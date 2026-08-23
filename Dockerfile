@@ -2,6 +2,12 @@ FROM python:3.12-slim AS builder
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# 国内加速：apt 源 / uv(pypi) / rustup / cargo crates
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+ENV UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+RUN mkdir -p /root/.cargo && printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n' > /root/.cargo/config.toml
+
 # 更新源
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential pkg-config patchelf cmake libportaudio2 portaudio19-dev \
