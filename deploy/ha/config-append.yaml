@@ -1,0 +1,23 @@
+
+# ==========================================
+# 7. xiaomusic 播控桥接（控制面/执行面解耦）
+#    实现层替换时仅改本段 URL/payload
+# ==========================================
+rest_command:
+  xiaomusic_cmd:
+    url: "http://10.10.10.2:8090/cmd"
+    method: post
+    content_type: "application/json"
+    payload: '{"did": "{{ did }}", "cmd": "{{ cmd }}"}'
+  xiaomusic_setvol:
+    url: "http://10.10.10.2:8090/setvolume"
+    method: post
+    content_type: "application/json"
+    payload: '{"did": "566642283", "volume": "{{ (states("sensor.xiaomusic_volume") | int(18)) + (delta | int(0)) }}"}'
+
+sensor:
+  - platform: rest
+    name: xiaomusic_volume
+    resource: "http://10.10.10.2:8090/getvolume?did=566642283"
+    value_template: "{{ value_json.volume }}"
+    scan_interval: 10
