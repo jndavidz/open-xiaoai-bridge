@@ -30,13 +30,30 @@ scp models.zip zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
 ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && unzip -o models.zip -d models && /usr/local/bin/docker compose up -d'
 ```
 
-## 4. LX06 切换 server 指向
+## 4. LX06 升级 client 并切换 server 指向
+
+> ⚠ 需要把音箱上的 client 从「官方版」升级为「coderzc fork 版」——官方 client 不支持鉴权 token，
+> 而 bridge 的 `OPEN_XIAOAI_TOKEN` 需要 client 端携带同值 Bearer（fork 版从 `/data/open-xiaoai/token.txt` 读取）。
 
 ```bash
 ssh -o HostKeyAlgorithms=+ssh-rsa root@10.10.10.20
+
+# 1) 更新 server 指向群晖 bridge
 echo 'ws://10.10.10.2:4399' > /data/open-xiaoai/server.txt
+
+# 2) 写入与 server 端一致的鉴权 token（deploy/.env 里的 OPEN_XIAOAI_TOKEN）
+echo '<与.env相同的OPEN_XIAOAI_TOKEN>' > /data/open-xiaoai/token.txt
+
+# 3) 用 fork 版 init.sh 重装 client（官方 init.sh 拉的是官方二进制，无 token 逻辑）
+curl -sSfL https://gitee.com/coderzc/open-xiaoai/raw/main/packages/client-rust/init.sh | sh
+
+# 4) 若需开机自启，重下 boot.sh 并重启
+curl -L -o /data/init.sh https://gitee.com/coderzc/open-xiaoai/raw/main/packages/client-rust/boot.sh
 reboot
 ```
+
+> 注意：重装后 `/data/open-xiaoai/server.txt` 与 `token.txt` 若被 init.sh 覆盖需重新写入；
+> 官方版与 fork 版协议同源（AppMessage 四件套），切换无兼容性风险。
 
 ## 5. 验收清单（按序）
 
