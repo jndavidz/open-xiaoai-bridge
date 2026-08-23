@@ -25,6 +25,8 @@ dist
 
 # Models (large files, should be downloaded separately)
 core/models/
+deploy/
+models/
 
 # Local env files
 .env
