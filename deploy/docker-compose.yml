@@ -1,0 +1,22 @@
+services:
+  open-xiaoai-bridge:
+    image: ghcr.nju.edu.cn/coderzc/open-xiaoai-bridge:latest
+    container_name: open-xiaoai-bridge
+    restart: unless-stopped
+    # host 网络：4399/9092 直接监听群晖宿主，音箱与 HA 均可直达，无需端口映射
+    network_mode: host
+    environment:
+      - LOGLEVEL=INFO
+      - API_SERVER_ENABLE=1
+      - API_SERVER_HOST=0.0.0.0   # 必须，否则 HA 访问不到 :9092
+      - OPENAI_ENABLE=1           # 仅启用 OpenAI 兼容后端（DeepSeek）
+      # 以下从 .env 读取（.env 不入库）
+      - OPEN_XIAOAI_TOKEN=${OPEN_XIAOAI_TOKEN}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - HA_TOKEN=${HA_TOKEN}
+      - HA_BASE_URL=${HA_BASE_URL:-http://10.10.10.2:8123}
+    volumes:
+      - ./config.py:/app/config.py        # 热重载：改完约 1 秒生效
+      - ./models:/app/core/models         # VAD + KWS 模型（xiaoai_asr 模式不需要 ASR 大模型）
+    stdin_open: true
+    tty: true
