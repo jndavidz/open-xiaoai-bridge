@@ -43,7 +43,7 @@ fi
 info "Phase 1: 安装核心包(squeezelite/alsa-utils/ethtool/curl/jq/cpufrequtils/openssh-server)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >>"$REPORT" 2>&1 &&
-apt-get install -y -qq squeezelite alsa-utils ethtool curl jq cpufrequtils openssh-server >>"$REPORT" 2>&1 &&
+apt-get install -y -qq squeezelite alsa-utils ethtool curl jq openssh-server sudo >>"$REPORT" 2>&1 &&
   ok "核心包安装完成" || ng "核心包安装失败(查看报告尾部)"
 
 command -v squeezelite >/dev/null && {
@@ -124,15 +124,28 @@ else
   ng "WOL 未生效 — 查 BIOS(Wake on PCIe/Deep Sleep=Disabled); 当前: $WOL_NOW"
 fi
 
-# ---------------- Phase 5: CPU performance ----------------
+# ---------------- Phase 5: CPU performance(sysfs, Trixie 无 cpufrequtils) ----------------
 info "Phase 5: CPU governor"
-echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
-systemctl restart cpufrequtils >/dev/null 2>&1 || systemctl enable --now cpufrequtils >/dev/null 2>&1
+cat > /etc/systemd/system/cpu-performance.service <<UNIT
+[Unit]
+Description=Set CPU governor to performance (home-patch)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > \$g 2>/dev/null; done'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now cpu-performance.service >/dev/null 2>&1
+sleep 1
 GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
-if [[ "$GOV" == "performance" ]]; then ok "CPU governor=performance"; else ng "governor=$GOV (cpufrequtils 未生效, 可忽略若无该驱动)"; fi
+if [[ "$GOV" == "performance" ]]; then ok "CPU governor=performance"; else ng "governor=$GOV (schedutil 亦可接受, USB 音频通常无碍)"; fi
 
 # ---------------- Phase 6: HA 关机通道(ha-admin + sudoers 白名单) ----------------
 info "Phase 6: HA 关机通道"
+install -d -m 755 /etc/sudoers.d
 id "$HA_ADMIN" &>/dev/null || useradd -m -s /bin/bash "$HA_ADMIN"
 install -d -m 700 -o "$HA_ADMIN" -g "$HA_ADMIN" "/home/$HA_ADMIN/.ssh"
 echo "$PUBKEY" > "/home/$HA_ADMIN/.ssh/authorized_keys"
@@ -145,8 +158,9 @@ systemctl is-active --quiet ssh && ok "sshd 运行中" || { systemctl enable --n
 
 # ---------------- Phase 7: 备用渲染服务(预装,停用) ----------------
 info "Phase 7: 备用渲染服务(AirPlay/DLNA renderer)"
-if apt-get install -y -qq shairport-sync gmrender-resurrect >>"$REPORT" 2>&1; then
-  for svc in shairport-sync gmrender-resurrect; do
+# 注: gmrender-resurrect 在 Trixie 无包, DLNA renderer 留 Phase F 手动方案
+if apt-get install -y -qq shairport-sync >>"$REPORT" 2>&1; then
+  for svc in shairport-sync; do
     systemctl disable --now "$svc" >/dev/null 2>&1
     ST=$(systemctl is-active "$svc" 2>/dev/null)
     [[ "$ST" != "active" ]] && ok "$svc 已预装并停用(备用,需时 enable)" || ng "$svc 意外运行中(与 squeezelite 抢 ALSA)"
