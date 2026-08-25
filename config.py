@@ -1,3 +1,5 @@
+# 本地开发基线配置；生产部署版见 deploy/config.py（家庭定制，scp 到群晖 /volume2/docker/open-xiaoai-bridge/）
+
 import asyncio
 import socket
 import subprocess

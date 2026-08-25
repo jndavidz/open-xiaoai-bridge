@@ -2,7 +2,7 @@
 
 > 目标：群晖 DS416play 上运行 open-xiaoai-bridge，小爱 Pro(LX06) 经 client 连接，
 > 实现：免唤醒短语场景控制 + 「你好贾维斯」DeepSeek 连续对话 + HA↔音箱双向 TTS。
-> 对应总方案：`../../doc/home-theater-automation-plan.md` Phase C/D。
+> 对应总方案：`../../doc/plan/home-theater-automation-plan.md` Phase C/D。
 
 ## 1. 前置
 
