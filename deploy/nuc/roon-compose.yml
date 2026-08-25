@@ -1,0 +1,25 @@
+# Roon Core @ NUC（路线 Y）
+# 流程: 先以官方镜像 up 初始化 → down → 删 ./roon/app/roonserver →
+#       解压 RoonServer_linuxx64.roonffa-patched.tar.bz2 到 ./roon/app/ → up
+services:
+  roonserver:
+    image: ghcr.io/roonlabs/roonserver:latest
+    container_name: roonserver
+    network_mode: host          # RAAT/mDNS 发现必需
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./roon:/Roon                        # 数据库(建议 SSD)
+      - /mnt/nas-music:/music:ro            # NFS 挂载群晖 lossless 区
+      - ./roon-backups:/RoonBackups         # Roon 内建备份落点
+      - /run/udev:/run/udev:ro              # USB DAC 设备发现
+    devices:
+      - /dev/snd:/dev/snd                   # ALSA 本机输出(板载/USB DAC)
+    group_add:
+      - audio
+    cap_add:
+      - SYS_ADMIN
+      - DAC_READ_SEARCH
+    security_opt:
+      - apparmor:unconfined
+    restart: unless-stopped
