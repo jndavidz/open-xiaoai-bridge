@@ -34,6 +34,9 @@ class OpenAIManager:
     # Ollama / LM Studio ignore the unknown header; set empty to disable.
     _session_header = "X-Hermes-Session-Key"
     _system_prompt = ""
+    # Per-session persona override: session_key -> system prompt.
+    # Takes precedence over _system_prompt when present (e.g. tutor vs Jarvis).
+    _session_system_prompts: dict[str, str] = {}
     _temperature: float | None = None
     _max_tokens: int | None = None
     _timeout = 120
@@ -84,6 +87,12 @@ class OpenAIManager:
         cls._session_key = str(config.get("session_key", "agent:default:open-xiaoai-bridge"))
         cls._session_header = str(config.get("session_header", "X-Hermes-Session-Key") or "").strip()
         cls._system_prompt = str(config.get("system_prompt", "") or "")
+        # Optional static overrides from config: {"agent:tutor:home": "..."}
+        sp = config.get("session_system_prompts")
+        if isinstance(sp, dict):
+            cls._session_system_prompts = {
+                str(k): str(v) for k, v in sp.items() if v
+            }
         cls._timeout = int(config.get("response_timeout", 120))
         cls._history_max_messages = max(0, int(config.get("history_max_messages", 20)))
         cls._temperature = cls._optional_float(config.get("temperature"))
@@ -155,6 +164,21 @@ class OpenAIManager:
             f"[OpenAI] Session key updated: {cls._session_key!r} -> {session_key!r}"
         )
         cls._session_key = session_key
+
+    @classmethod
+    def set_session_system_prompt(cls, prompt: str | None):
+        """Override the system prompt for the CURRENT session at runtime.
+
+        Pass a non-empty string to install a persona (e.g. tutor), or None/empty
+        to fall back to the global ``system_prompt``.
+        """
+        key = cls._session_key
+        if prompt:
+            cls._session_system_prompts[key] = str(prompt)
+            logger.info(f"[OpenAI] Session system prompt override installed for {key!r}")
+        else:
+            if cls._session_system_prompts.pop(key, None) is not None:
+                logger.info(f"[OpenAI] Session system prompt override cleared for {key!r}")
 
     @classmethod
     def reset_session(cls, session_key: str | None = None):
@@ -303,8 +327,12 @@ class OpenAIManager:
     @classmethod
     def _build_messages(cls, history: list[dict[str, str]], text: str) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
-        if cls._system_prompt:
-            messages.append({"role": "system", "content": cls._system_prompt})
+        system = (
+            cls._session_system_prompts.get(cls._session_key)
+            or cls._system_prompt
+        )
+        if system:
+            messages.append({"role": "system", "content": system})
         messages.extend(history[-cls._history_max_messages :] if cls._history_max_messages else [])
         messages.append({"role": "user", "content": text})
         return messages

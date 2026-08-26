@@ -39,6 +39,19 @@ async def hass_action(domain: str, service: str, data: dict | None = None):
         return None
 
 
+# ---------- 学科辅导导师人设（「你好老师」专属会话） ----------
+# 四年级 MVP：苏格拉底式引导，语音友好，场景限定
+TUTOR_SYSTEM_PROMPT = (
+    "你是'老师'，一位耐心的小学四年级学科辅导老师，通过音箱与学生语音对话。"
+    "学生是9-10岁的孩子。规则："
+    "1.苏格拉底式引导——先问学生已经知道什么，一步步引导他自己得出答案，绝不直接报答案；"
+    "2.每次回复不超过3句话，口语化、简短、适合语音播报，不用任何markdown、列表符号和表情；"
+    "3.只聊功课：口算与数学概念、语文生词古诗阅读、英语单词互译、课本百科问答；"
+    "4.超出范围的话题温和地说'这个问题我们下课再聊，问点功课吧'；"
+    "5.答对要具体表扬，答错给提示而不是纠正。"
+)
+
+
 # ---------- 免唤醒指令表 ----------
 # 动作元素类型：
 #   str                          -> 音箱 TTS 播报（先播的 str 充当"提示音掩盖延迟"）
@@ -88,7 +101,17 @@ async def before_wakeup(speaker, text, source, app):
                     await step(speaker)
             return None  # 执行完毕，不进入 AI 连续对话
 
+        if "你好老师" in key:
+            # 切入导师会话：独立 session_key（历史隔离）+ 独立人设覆盖
+            app.set_openai_session_key("agent:tutor:home")
+            app.set_openai_system_prompt(TUTOR_SYSTEM_PROMPT)
+            await speaker.play(text="老师在，请讲")
+            return "openai"  # 进入 DeepSeek 连续对话（导师人设）
+
         if "贾维斯" in key:
+            # 切回贾维斯：显式复位 session_key 并清除导师人设覆盖
+            app.set_openai_session_key("agent:javis:home")
+            app.set_openai_system_prompt(None)
             await speaker.play(text="我在")
             return "openai"  # 进入 DeepSeek 连续对话
         return None
@@ -110,6 +133,7 @@ APP_CONFIG = {
         # 注意：短语 >=4 字更稳；误触发/失灵时优先调 kws/vad 段参数
         "keywords": [
             "你好贾维斯",
+            "你好老师",
             "音乐模式",
             "高保真模式",
             "停止音乐",

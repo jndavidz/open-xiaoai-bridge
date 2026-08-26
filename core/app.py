@@ -483,6 +483,13 @@ class MainApp:
         """Override the OpenAI-compatible service session key at runtime."""
         OpenAIManager.set_session_key(session_key)
 
+    def set_openai_system_prompt(self, prompt: str | None):
+        """Override the system prompt for the current OpenAI session at runtime.
+
+        Pass None to clear the override and fall back to the global persona.
+        """
+        OpenAIManager.set_session_system_prompt(prompt)
+
     async def send_to_qwenpaw(self, text: str, wait_response: bool = False) -> str | None:
         """Send message to QwenPaw."""
         try:
