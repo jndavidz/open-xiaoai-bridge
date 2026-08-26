@@ -9,7 +9,12 @@ services:
       - LOGLEVEL=INFO
       - API_SERVER_ENABLE=1
       - API_SERVER_HOST=0.0.0.0   # 必须，否则 HA 访问不到 :9092
-      - OPENAI_ENABLE=1           # 仅启用 OpenAI 兼容后端（DeepSeek）
+      - OPENAI_ENABLE=1           # 仅启用 OpenAI 兼容后端（DeepSeek / aurora 等）
+      # 后台面板（http://<nas>:9092/admin）访问令牌，必填；写操作与配置修改全靠它鉴权
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      # 面板「外部服务」探测列表（JSON 数组）；aurora 同机 :8080，host 网络 127.0.0.1 直达
+      - MONITOR_SERVICES=${MONITOR_SERVICES}
+      - RUNTIME_OVERRIDES_PATH=/app/data/runtime-overrides.json
       # 以下从 .env 读取（.env 不入库）
       - OPEN_XIAOAI_TOKEN=${OPEN_XIAOAI_TOKEN}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
@@ -18,5 +23,6 @@ services:
     volumes:
       - ./config.py:/app/config.py        # 热重载：改完约 1 秒生效
       - ./models:/app/core/models         # VAD + KWS 模型（xiaoai_asr 模式不需要 ASR 大模型）
+      - ./data:/app/data                  # 面板运行时覆盖层持久化（runtime-overrides.json）
     stdin_open: true
     tty: true

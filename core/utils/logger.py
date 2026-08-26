@@ -1,3 +1,4 @@
+import copy
 import logging
 import sys
 import os
@@ -18,6 +19,9 @@ class ColoredFormatter(logging.Formatter):
     }
     
     def format(self, record):
+        # 操作副本：同一 record 会广播给所有 handler，
+        # 不能就地改写 levelname/asctime 污染后续 handler（如内存日志缓冲）
+        record = copy.copy(record)
         # 添加颜色
         color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
         reset = self.COLORS['RESET']
@@ -70,6 +74,11 @@ class XiaozhiLogger:
         
         # 添加处理器
         self.logger.addHandler(console_handler)
+
+        # 内存环形缓冲：供后台面板增量拉取日志（不影响控制台输出）
+        from core.utils.log_buffer import attach_memory_log_handler
+
+        attach_memory_log_handler(self.logger)
 
     def _format_message(self, message: str, module: Optional[str] = None) -> str:
         if module and not message.startswith("["):

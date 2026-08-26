@@ -27,6 +27,8 @@ open-xiaoai-bridge/
 │   ├── services/
 │   │   ├── speaker.py             # SpeakerManager 音箱硬件控制
 │   │   ├── api_server.py          # HTTP REST API（aiohttp）
+│   │   ├── admin_api.py           # 后台面板 API（/admin 页面 + /api/admin/*）
+│   │   ├── admin_static/index.html# 面板单页前端（零外部依赖）
 │   │   ├── audio/
 │   │   │   ├── stream.py          # GlobalStream 全局音频流（多路输入广播）
 │   │   │   ├── codec.py           # 音频编解码
@@ -38,8 +40,10 @@ open-xiaoai-bridge/
 │   │       ├── websocket_protocol.py  # 小智 WebSocket 协议实现
 │   │       └── typing.py              # 协议类型定义
 │   └── utils/
-│       ├── logger.py              # 彩色日志（XiaozhiLogger 单例）
-│       ├── config.py              # ConfigManager（嵌套路径查询、热重载）
+│       ├── logger.py              # 彩色日志（XiaozhiLogger 单例；含内存缓冲 handler）
+│       ├── log_buffer.py          # 内存环形日志缓冲（面板增量拉取）
+│       ├── runtime_overrides.py   # 运行时配置覆盖层（data/runtime-overrides.json）
+│       ├── config.py              # ConfigManager（嵌套路径查询、热重载、覆盖层合并）
 │       ├── config_loader.py       # config.py 动态导入
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
@@ -222,6 +226,25 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/tts/doubao` | POST | Doubao TTS 合成 |
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 
+### 后台管理面板 (core/services/admin_api.py)
+
+内嵌 Web 控制台（`GET /admin`，单页零依赖），随 APIServer 同端口启动。
+
+| 端点 | 方法 | 功能 |
+|------|------|------|
+| `/admin` | GET | 面板页面（总览 / 日志 / 设置三页） |
+| `/api/admin/overview` | GET | 各系统状态总览（设备/后端/音频管线/外部服务） |
+| `/api/admin/config` | GET/PUT | 读取（密钥掩码）/ 写入运行时覆盖层（白名单 schema，保存即热生效） |
+| `/api/admin/config/test` | POST | 上游连通性预检（GET /models → 兜底 chat/completions ping） |
+| `/api/admin/logs` | GET | 内存日志增量拉取（?after=<seq>） |
+| `/api/admin/logs/level` | POST | 运行时调整日志级别 |
+
+**安全与边界约束**:
+- 所有 `/api/admin/*` 要求 `Authorization: Bearer <ADMIN_TOKEN>`；未配置该环境变量时一律 503 拒绝
+- 配置写入走白名单 schema（`CONFIG_SCHEMA`）+ **运行时覆盖层**，绝不文本改写 config.py 源文件
+- 分层语义：面板覆盖值（`data/runtime-overrides.json`，原子落盘）> config.py/env 底层值；覆盖项值为 null 表示清除回落
+- 密钥字段读取只回掩码（尾 4 位），明文不出服务端
+
 ### 音频处理链
 
 | 模块 | 文件 | 职责 |
@@ -319,6 +342,9 @@ python3 tests/test_tts_latency.py --formats mp3,pcm --rounds 3 --repeat 8
 
 # OpenClaw 连通性测试
 python3 tests/test_openclaw_live_connectivity.py
+
+# 后台面板冒烟测试（无需音箱/模型/Rust 扩展；用法见脚本头注释）
+python3 tests/test_admin_panel.py
 ```
 
 ## 音箱设备控制命令

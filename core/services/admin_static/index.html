@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>桥接控制台 · open-xiaoai</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2330; --border: #2d3748;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 18px;
+           background: var(--panel); border-bottom: 1px solid var(--border);
+           position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); }
+  header .dot.ok { background: var(--ok); }
+  header .spacer { flex: 1; }
+  header .meta { color: var(--muted); font-size: .8rem; }
+  nav { display: flex; gap: 4px; padding: 8px 14px 0; background: var(--panel); }
+  nav button { background: none; border: none; color: var(--muted); padding: 8px 16px;
+               font-size: .95rem; cursor: pointer; border-bottom: 2px solid transparent; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { max-width: 1080px; margin: 0 auto; padding: 16px 14px 60px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h3 { margin: 0 0 10px; font-size: .92rem; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+  .kv { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: .85rem; }
+  .kv .k { color: var(--muted); white-space: nowrap; }
+  .kv .v { text-align: right; word-break: break-all; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: .75rem; }
+  .pill.ok   { background: rgba(63,185,80,.15);  color: var(--ok); }
+  .pill.bad  { background: rgba(248,81,73,.15);  color: var(--err); }
+  .pill.warn { background: rgba(210,153,34,.15); color: var(--warn); }
+  .pill.off  { background: rgba(139,148,158,.15); color: var(--muted); }
+  /* 日志 */
+  #logbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  #logbox { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px;
+            height: calc(100vh - 220px); min-height: 300px; overflow-y: auto;
+            font-family: Consolas, "JetBrains Mono", monospace; font-size: .78rem;
+            padding: 8px 10px; line-height: 1.5; }
+  .lg { white-space: pre-wrap; word-break: break-all; }
+  .lg .t { color: #55606e; }
+  .lg.ERROR, .lg.CRITICAL { color: var(--err); }
+  .lg.WARNING { color: var(--warn); }
+  .lg.DEBUG { color: #6e7681; }
+  .lg.INFO { color: #c9d1d9; }
+  /* 设置 */
+  section.cfg { background: var(--panel); border: 1px solid var(--border);
+                border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  section.cfg h2 { margin: 0 0 4px; font-size: 1rem; }
+  section.cfg p.desc { margin: 0 0 14px; color: var(--muted); font-size: .82rem; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 4px; }
+  .field input, .field select { width: 100%; max-width: 480px; background: var(--panel2);
+      border: 1px solid var(--border); color: var(--text); border-radius: 6px;
+      padding: 7px 10px; font-size: .9rem; }
+  .field input:focus { outline: none; border-color: var(--accent); }
+  .field .help { font-size: .75rem; color: var(--muted); margin-top: 3px; }
+  .field .tag { font-size: .7rem; margin-left: 6px; padding: 0 6px; border-radius: 8px; }
+  .tag.override { background: rgba(88,166,255,.15); color: var(--accent); }
+  .btnrow { display: flex; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+  button.act { background: var(--accent); color: #04121f; border: none; border-radius: 6px;
+               padding: 8px 16px; font-size: .88rem; cursor: pointer; font-weight: 600; }
+  button.act.sec { background: var(--panel2); color: var(--text); border: 1px solid var(--border); font-weight: 400; }
+  button.act.danger { background: transparent; color: var(--err); border: 1px solid var(--err); font-weight: 400; }
+  button.act:disabled { opacity: .45; cursor: not-allowed; }
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+           background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+           padding: 10px 20px; border-radius: 8px; font-size: .88rem; display: none; z-index: 99;
+           box-shadow: 0 4px 16px rgba(0,0,0,.5); max-width: 90vw; }
+  select#lvl { width: auto; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+           border-radius: 10px; padding: 22px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog input { width: 100%; background: var(--panel2); border: 1px solid var(--border);
+                 color: var(--text); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="hdot"></span>
+  <h1>桥接控制台</h1>
+  <span class="meta" id="hmeta"></span>
+  <div class="spacer"></div>
+  <span class="meta" id="huptime"></span>
+  <button class="act sec" id="tokenBtn" style="padding:5px 12px">🔑 Token</button>
+</header>
+
+<nav>
+  <button data-tab="overview" class="active">总览</button>
+  <button data-tab="logs">日志</button>
+  <button data-tab="settings">设置</button>
+</nav>
+
+<main>
+  <div id="tab-overview">
+    <div class="grid" id="ov-grid"><div class="card">加载中…</div></div>
+  </div>
+
+  <div id="tab-logs" style="display:none">
+    <div id="logbar">
+      <select id="logFilter" class="field" style="width:auto;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;">
+        <option value="ALL">全部级别</option>
+        <option value="INFO">INFO+</option>
+        <option value="WARNING">WARNING+</option>
+        <option value="ERROR">ERROR+</option>
+      </select>
+      <label style="font-size:.85rem;color:var(--muted)"><input type="checkbox" id="autoScroll" checked> 自动滚动</label>
+      <label style="font-size:.85rem;color:var(--muted)"><input type="checkbox" id="pausePoll"> 暂停刷新</label>
+      <span class="meta" style="margin-left:auto;color:var(--muted);font-size:.78rem" id="logstat"></span>
+    </div>
+    <div id="logbox"></div>
+  </div>
+
+  <div id="tab-settings" style="display:none">
+    <section class="cfg">
+      <h2>运行时</h2>
+      <p class="desc">日志级别立即生效（仅运行期，重启后回到 LOGLEVEL 环境变量值）。</p>
+      <div class="field">
+        <label>日志级别</label>
+        <select id="lvl">
+          <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option>
+        </select>
+      </div>
+      <div class="btnrow"><button class="act sec" id="lvlApply">应用日志级别</button></div>
+    </section>
+    <div id="cfgSections"></div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<dialog id="tokdlg">
+  <h3 style="margin:0 0 6px">面板访问令牌</h3>
+  <p style="color:var(--muted);font-size:.85rem;margin:0">即容器环境变量 ADMIN_TOKEN（.env 中配置）。仅保存在本机浏览器。</p>
+  <input type="password" id="tokInput" placeholder="ADMIN_TOKEN">
+  <div class="btnrow" style="margin-top:14px">
+    <button class="act" id="tokSave">保存并连接</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const TOKEN_KEY = "ox_admin_token";
+let token = localStorage.getItem(TOKEN_KEY) || "";
+
+function toast(msg, ms = 2600) {
+  const el = $("#toast"); el.textContent = msg; el.style.display = "block";
+  clearTimeout(el._t); el._t = setTimeout(() => el.style.display = "none", ms);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token, ...(opts.headers || {}) },
+  });
+  if (res.status === 401 || res.status === 503) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || (res.status === 401 ? "令牌无效" : "服务端未配置 ADMIN_TOKEN"));
+  }
+  const body = await res.json().catch(() => ({ success: false, error: "bad response" }));
+  if (!body.success) throw new Error(body.error || "unknown error");
+  return body.data;
+}
+
+/* ---------------- tabs ---------------- */
+document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  ["overview", "logs", "settings"].forEach(t =>
+    $("#tab-" + t).style.display = t === btn.dataset.tab ? "" : "none");
+}));
+
+/* ---------------- token ---------------- */
+function needToken(msg) { $("#tokdlg").showModal(); if (msg) toast(msg); }
+$("#tokenBtn").addEventListener("click", () => { $("#tokInput").value = ""; $("#tokdlg").showModal(); });
+$("#tokSave").addEventListener("click", () => {
+  token = $("#tokInput").value.trim();
+  if (!token) return toast("请输入令牌");
+  localStorage.setItem(TOKEN_KEY, token);
+  $("#tokdlg").close();
+  refreshOverview(); refreshConfigSchema();
+});
+if (!token) needToken();
+
+/* ---------------- overview ---------------- */
+const fmtDur = s => {
+  if (s == null) return "-";
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return (d ? d + "天" : "") + (h ? h + "时" : "") + m + "分";
+};
+const esc = s => String(s ?? "-").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pill = (cond, okText, badText, cls = "") =>
+  `<span class="pill ${cls || (cond ? "ok" : "off")}">${cond ? okText : badText}</span>`;
+
+function backendCard(name, icon, b, extraRows = []) {
+  const stateCls = !b.enabled ? "off" : b.connected ? "ok" : "warn";
+  const stateTxt = !b.enabled ? "未启用" : b.connected ? "已连接" : "已启用·未连接";
+  return `<div class="card"><h3>${icon} ${name} ${pill(true, stateTxt, stateTxt, stateCls)}</h3>
+    ${extraRows.map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("")}
+    ${b.last_error ? `<div class="kv"><span class="k">最近错误</span><span class="v" style="color:var(--err)">${esc(b.last_error).slice(0, 120)}</span></div>` : ""}
+  </div>`;
+}
+
+function renderOverview(d) {
+  $("#hdot").classList.add("ok");
+  $("#huptime").textContent = "已运行 " + fmtDur(d.runtime?.uptime_s);
+  const cards = [];
+
+  cards.push(`<div class="card"><h3>🌉 Bridge 服务 ${pill(d.app.running, "运行中", "异常", d.app.running ? "ok" : "bad")}</h3>
+    <div class="kv"><span class="k">设备状态</span><span class="v">${esc(d.app.device_state)}</span></div>
+    <div class="kv"><span class="k">配置文件</span><span class="v" style="font-size:.75rem">${esc(d.runtime.config_path)}</span></div>
+    <div class="kv"><span class="k">覆盖项</span><span class="v">${d.runtime.overrides_keys ?? 0} 项 · <span style="font-size:.72rem">${esc(d.runtime.overrides_path)}</span></span></div>
+    <div class="kv"><span class="k">日志级别</span><span class="v">${esc(d.runtime.log_level)}</span></div>
+  </div>`);
+
+  cards.push(`<div class="card"><h3>🔊 小爱音箱 ${pill(d.speaker.ready, "就绪", "未接入", d.speaker.ready ? "ok" : "bad")}</h3>
+    <div class="kv"><span class="k">播放状态</span><span class="v">${esc(d.speaker.playing)}</span></div>
+    <div class="kv"><span class="k">小智链路</span><span class="v">${d.backends.xiaozhi.enabled ? pill(d.backends.xiaozhi.connected, "已连接", "未连接", d.backends.xiaozhi.connected ? "ok" : "warn") : pill(false, "", "未启用")}</span></div>
+  </div>`);
+
+  const o = d.backends.openai;
+  cards.push(backendCard("AI 对话后端", "🤖", o, [
+    ["接口地址", esc(o.base_url)],
+    ["模型规格", esc(o.model)],
+    ["API Key", o.has_key ? pill(true, "已配置", "", "ok") : pill(false, "", "未配置", "bad")],
+    ["会话", esc(o.session_key)],
+  ]));
+
+  cards.push(backendCard("OpenClaw 网关", "🦞", d.backends.openclaw,
+    d.backends.openclaw.url ? [["地址", esc(d.backends.openclaw.url)]] : []));
+  cards.push(backendCard("QwenPaw 工作台", "🐾", d.backends.qwenpaw,
+    d.backends.qwenpaw.base_url ? [["地址", esc(d.backends.qwenpaw.base_url)]] : []));
+
+  cards.push(`<div class="card"><h3>🎙️ 音频管线</h3>
+    <div class="kv"><span class="k">VAD</span><span class="v">${d.audio.vad_present ? pill(!d.audio.vad_paused, d.audio.vad_paused ? "已暂停" : "检测中", "已暂停", d.audio.vad_paused ? "warn" : "ok") : pill(false, "", "未加载")}</span></div>
+    <div class="kv"><span class="k">KWS 唤醒</span><span class="v">${d.audio.kws_present ? pill(true, "已加载", "", "ok") : pill(false, "", "未加载")}</span></div>
+    <div class="kv"><span class="k">ASR 模型</span><span class="v">${esc(d.audio.asr_model)}</span></div>
+  </div>`);
+
+  for (const svc of (d.external_services || [])) {
+    cards.push(`<div class="card"><h3>🛰️ ${esc(svc.name)} ${svc.ok ? pill(true, "在线 " + svc.latency_ms + "ms", "", "ok") : pill(false, "", "离线", "bad")}</h3>
+      <div class="kv"><span class="k">探测地址</span><span class="v" style="font-size:.75rem">${esc(svc.url)}</span></div>
+      ${svc.status != null ? `<div class="kv"><span class="k">HTTP 状态</span><span class="v">${svc.status}</span></div>` : ""}
+      ${svc.error ? `<div class="kv"><span class="k">错误</span><span class="v" style="color:var(--err)">${esc(svc.error).slice(0, 100)}</span></div>` : ""}
+    </div>`);
+  }
+
+  $("#ov-grid").innerHTML = cards.join("");
+}
+
+async function refreshOverview() {
+  try {
+    renderOverview(await api("/api/admin/overview"));
+  } catch (e) {
+    $("#hdot").classList.remove("ok");
+    if (String(e.message).includes("令牌")) needToken(e.message);
+    else $("#ov-grid").innerHTML = `<div class="card" style="color:var(--err)">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+/* ---------------- logs ---------------- */
+const LEVEL_ORDER = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 };
+let lastSeq = -1, logLines = [];
+const LEVEL_COLORS = {};
+
+async function pollLogs() {
+  if ($("#tab-logs").style.display === "none" || $("#pausePoll").checked) return;
+  try {
+    const d = await api(`/api/admin/logs?after=${lastSeq}&limit=800`);
+    if (d.entries.length) {
+      lastSeq = d.entries[d.entries.length - 1].seq;
+      logLines.push(...d.entries.map(e => ({ ...e, tsStr:
+        new Date(e.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false }) + "." + String(Math.floor((e.ts % 1) * 1000)).padStart(3, "0")
+      })));
+      if (logLines.length > 4000) logLines = logLines.slice(-3000);
+      renderLogs();
+    }
+    $("#logstat").textContent = `缓冲 ${d.latest_seq - d.dropped_total}~${d.latest_seq}${d.dropped_total ? ` · 已丢弃 ${d.dropped_total}` : ""}`;
+  } catch (e) { /* 静默，下一轮重试 */ }
+}
+
+function renderLogs() {
+  const minLevel = LEVEL_ORDER[$("#logFilter").value] ?? 0;
+  const box = $("#logbox");
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  box.innerHTML = logLines
+    .filter(l => (LEVEL_ORDER[l.level] ?? 0) >= minLevel)
+    .map(l => `<div class="lg ${l.level}"><span class="t">${l.tsStr}</span> [${l.level}] ${esc(l.msg)}</div>`)
+    .join("");
+  if ($("#autoScroll").checked && atBottom) box.scrollTop = box.scrollHeight;
+}
+$("#logFilter").addEventListener("change", renderLogs);
+
+setInterval(pollLogs, 2000);
+setInterval(() => { if ($("#tab-overview").style.display !== "none") refreshOverview(); }, 5000);
+
+/* ---------------- settings ---------------- */
+let cfgSchema = [];
+
+async function refreshConfigSchema() {
+  try {
+    cfgSchema = (await api("/api/admin/config")).schema;
+    renderSettings();
+  } catch (e) { if (String(e.message).includes("令牌")) needToken(e.message); }
+}
+
+function renderSettings() {
+  const host = $("#cfgSections");
+  host.innerHTML = "";
+  for (const sec of cfgSchema) {
+    const el = document.createElement("section");
+    el.className = "cfg";
+    el.innerHTML = `<h2>${esc(sec.title)}</h2><p class="desc">${esc(sec.description || "")}</p>`;
+    for (const f of sec.fields) el.appendChild(renderField(f));
+    const row = document.createElement("div");
+    row.className = "btnrow";
+    if (sec.id === "openai") {
+      const testBtn = mkBtn("🔌 测试连接", "sec", () => testOpenai(el));
+      testBtn.id = "testBtn";
+      row.appendChild(testBtn);
+    }
+    row.appendChild(mkBtn("💾 保存并生效", "", e => saveSection(sec, el)));
+    host.appendChild(el);
+    el.appendChild(row);
+  }
+}
+
+function mkBtn(text, cls, onclick) {
+  const b = document.createElement("button");
+  b.className = "act " + cls; b.textContent = text; b.addEventListener("click", onclick);
+  return b;
+}
+
+function fieldPathEl(path) { return document.querySelector(`[data-path="${path}"]`); }
+
+function renderField(f) {
+  const wrap = document.createElement("div");
+  wrap.className = "field";
+  const tagHtml = f.overridden ? '<span class="tag override">已覆盖</span>' : "";
+  let input;
+  if (f.type === "secret") {
+    input = `<input data-path="${f.path}" data-type="secret" type="password" autocomplete="new-password"
+      placeholder="${f.value.set ? "已配置 " + f.value.masked + "（留空=不修改）" : "未配置"}">`;
+  } else {
+    input = `<input data-path="${f.path}" data-type="${f.type}" type="text"
+      value="${esc(f.value ?? "")}" placeholder="${esc(f.placeholder || "")}">`;
+  }
+  wrap.innerHTML = `<label>${esc(f.label)}${tagHtml}</label>${input}
+    ${f.help ? `<div class="help">${esc(f.help)}</div>` : ""}`;
+  if (f.type === "secret" && f.overridden) {
+    const clr = mkBtn("清除覆盖", "danger", async () => {
+      try {
+        await api("/api/admin/config", { method: "PUT", body: JSON.stringify({ patch: pathToPatch(f.path, null) }) });
+        toast("已清除覆盖，回落底层值"); refreshConfigSchema();
+      } catch (e) { toast("失败：" + e.message); }
+    });
+    clr.style.marginTop = "6px";
+    wrap.appendChild(clr);
+  }
+  return wrap;
+}
+
+function pathToPatch(path, value) {
+  const parts = path.split(".");
+  const root = {}; let node = root;
+  parts.forEach((p, i) => { if (i === parts.length - 1) node[p] = value; else node = node[p] = {}; });
+  return root;
+}
+
+function collectSection(sec) {
+  const patch = {};
+  let changed = false;
+  for (const f of sec.fields) {
+    const el = fieldPathEl(f.path);
+    if (!el) continue;
+    if (f.type === "secret") {
+      if (el.value.trim() !== "") { Object.assign(patch, pathToPatch(f.path, el.value.trim())); changed = true; }
+    } else if (el.value !== String(f.value ?? "")) {
+      Object.assign(patch, pathToPatch(f.path, el.value.trim())); changed = true;
+    }
+  }
+  return changed ? patch : null;
+}
+
+async function saveSection(sec, el) {
+  const patch = collectSection(sec);
+  if (!patch) return toast("没有修改需要保存");
+  try {
+    const d = await api("/api/admin/config", { method: "PUT", body: JSON.stringify({ patch }) });
+    toast("✅ 已生效（" + (d.applied.join(", ") || "无变更") + "），下一次对话即用新配置");
+    refreshConfigSchema(); refreshOverview();
+  } catch (e) { toast("保存失败：" + e.message, 4000); }
+}
+
+async function testOpenai(el) {
+  const btn = $("#testBtn"); btn.disabled = true; btn.textContent = "测试中…";
+  const get = p => { const n = fieldPathEl(p); return n ? n.value.trim() : ""; };
+  const body = { backend: "openai" };
+  const url = get("openai.base_url"), key = get("openai.api_key"), model = get("openai.model");
+  if (url) body.base_url = url;
+  if (key) body.api_key = key;
+  if (model) body.model = model;
+  try {
+    const d = await api("/api/admin/config/test", { method: "POST", body: JSON.stringify(body) });
+    if (d.ok) toast(`✅ 连通正常：${d.via} HTTP ${d.status} · ${d.latency_ms}ms`);
+    else toast(`❌ 不通：${d.first_attempt_error || ""} ${d.error || "HTTP " + d.status}`, 5000);
+  } catch (e) { toast("测试失败：" + e.message, 4000); }
+  finally { btn.disabled = false; btn.textContent = "🔌 测试连接"; }
+}
+
+$("#lvlApply").addEventListener("click", async () => {
+  try {
+    await api("/api/admin/logs/level", { method: "POST", body: JSON.stringify({ level: $("#lvl").value }) });
+    toast("日志级别已切换为 " + $("#lvl").value);
+    refreshOverview();
+  } catch (e) { toast("失败：" + e.message); }
+});
+
+/* ---------------- boot ---------------- */
+refreshOverview();
+refreshConfigSchema();
+pollLogs();
+</script>
+</body>
+</html>

@@ -13,6 +13,7 @@ from core.utils.config_loader import (
     load_config_module,
 )
 from core.utils.file import read_file, write_file
+from core.utils.runtime_overrides import runtime_overrides
 
 
 class ConfigManager:
@@ -52,12 +53,13 @@ class ConfigManager:
         self._initialize_mqtt_info()
 
     def _load_app_config(self) -> dict[str, Any]:
-        """加载 config.py 中的 APP_CONFIG。"""
+        """加载 config.py 中的 APP_CONFIG，并叠加运行时覆盖层。"""
         module = ensure_config_module_loaded()
         app_config = getattr(module, "APP_CONFIG", None)
         if not isinstance(app_config, dict):
             raise ValueError("config.APP_CONFIG must be a dict")
-        return app_config
+        # 面板/接口写入的 overrides 深合并其上（面板值 > config.py/env）
+        return runtime_overrides.apply_to(app_config)
 
     def get_config_path(self) -> Path:
         """返回配置文件路径。"""
@@ -95,6 +97,7 @@ class ConfigManager:
                 raise ValueError("config.APP_CONFIG must be a dict")
 
             previous_config = self._app_config
+            next_config = runtime_overrides.apply_to(next_config)
             self._app_config = next_config
 
             self._config["DEVICE_ID"] = self.get_app_config("xiaozhi.DEVICE_ID")

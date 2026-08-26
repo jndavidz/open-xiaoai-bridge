@@ -316,6 +316,21 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 | `GET`  | `/api/status`            | 获取播放状态       |
 | `GET`  | `/api/health`            | 健康检查         |
 
+### 🖥️ 后台管理面板
+
+浏览器打开 **`http://<host>:9092/admin`**（需环境变量 `ADMIN_TOKEN`；所有 `/api/admin/*` 接口要求 Bearer 鉴权，未配置时一律拒绝）。三页功能：
+
+- **总览**：设备状态、各 AI 后端连接状况、音频管线（VAD/KWS）、外部服务探测（环境变量 `MONITOR_SERVICES` 配置 JSON 数组）
+- **日志**：内存环形缓冲实时增量拉取、级别过滤
+- **设置**：在线更换上游 API 的接口地址（含端口）/模型规格/API Key——写入运行时覆盖层（优先级高于 config.py/env），保存即热生效无需重启；支持「测试连接」预检（先 GET /models，兜底 chat ping）
+
+```bash
+# 面板 API 示例：更换上游并热生效
+curl -X PUT http://localhost:9092/api/admin/config \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"patch": {"openai": {"base_url": "http://10.10.10.2:8080/v1", "model": "deepseek-chat", "api_key": "..."}}}'
+```
+
 ### 💡 使用示例
 
 ```bash

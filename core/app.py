@@ -89,6 +89,7 @@ class MainApp:
         self.device_state = DeviceState.IDLE
         self.current_text = ""
         self.current_emotion = "neutral"
+        self.started_at = time.time()  # 面板 uptime 统计用
 
         # Event loop and threads
         self.loop = asyncio.new_event_loop()

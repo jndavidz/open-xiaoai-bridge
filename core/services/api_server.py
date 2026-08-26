@@ -13,6 +13,7 @@ from typing import Any
 import open_xiaoai_server
 from aiohttp import web
 from core.ref import get_speaker, get_xiaoai
+from core.services.admin_api import AdminAPI
 from core.services.tts.doubao import DoubaoTTS
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
@@ -25,10 +26,13 @@ class APIServer:
         self.host = host
         self.port = port
         self.config = ConfigManager.instance()
-        self.app = web.Application()
+        # Admin 面板鉴权中间件（只拦 /api/admin/*，业务 API 不受影响）
+        self.admin_api = AdminAPI()
+        self.app = web.Application(middlewares=[self.admin_api.auth_middleware])
         self.runner = None
         self.site = None
         self._setup_routes()
+        self.admin_api.register(self.app)
 
     def _setup_routes(self):
         """Setup API routes"""
