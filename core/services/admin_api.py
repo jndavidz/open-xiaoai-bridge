@@ -585,7 +585,15 @@ class AdminAPI:
                 {"success": False, "error": "base_url 为空，无法测试"}, status=400
             )
 
-        headers = OpenAIManager._headers(style)
+        # 用「本次提交的待测 Key」构造探测头——不能复用 OpenAIManager._headers()，
+        # 那会带上当前生效配置的旧 Key，导致换 Key 场景预检结果失真
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            if style == "anthropic_messages":
+                headers["x-api-key"] = api_key
+                headers["anthropic-version"] = "2023-06-01"
+
         started = time.monotonic()
         timeout = aiohttp.ClientTimeout(total=15)
 

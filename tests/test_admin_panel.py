@@ -128,9 +128,15 @@ async def test_http():
     site = web.TCPSite(runner, "127.0.0.1", 18923)
     await site.start()
 
-    # mock 上游（成功路径）：GET /v1/models -> 200
+    # mock 上游（成功路径）：GET /v1/models -> 200；并严格校验探测头携带
+    # 的正是本次提交的待测 Key（回归：预检不得复用运行时旧 Key）
+    async def models_handler(request: web.Request) -> web.Response:
+        if request.headers.get("Authorization") != "Bearer k-test":
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        return web.json_response({"data": []})
+
     upstream = web.Application()
-    upstream.router.add_get("/v1/models", lambda r: web.json_response({"data": []}))
+    upstream.router.add_get("/v1/models", models_handler)
 
     up_runner = web.AppRunner(upstream)
     await up_runner.setup()
