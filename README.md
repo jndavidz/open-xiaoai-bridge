@@ -322,7 +322,7 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 
 - **总览**：设备状态、各 AI 后端连接状况、音频管线（VAD/KWS）、外部服务探测（环境变量 `MONITOR_SERVICES` 配置 JSON 数组）
 - **日志**：内存环形缓冲实时增量拉取、级别过滤
-- **设置**：在线更换上游 API 的接口地址（含端口）/模型规格/API Key——写入运行时覆盖层（优先级高于 config.py/env），保存即热生效无需重启；支持「测试连接」预检（先 GET /models，兜底 chat ping）
+- **设置**：在线更换上游 API 的**接口地址（含端口）/ 接口规格 / 模型名称 / API Key**——接口规格三选：OpenAI Chat Completions（默认）/ OpenAI Responses（Aurora 默认表面）/ Anthropic Messages；写入运行时覆盖层（优先级高于 config.py/env），保存即热生效无需重启；「测试连接」按所选规格预检
 
 ```bash
 # 面板 API 示例：更换上游并热生效

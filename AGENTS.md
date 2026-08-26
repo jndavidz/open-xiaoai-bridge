@@ -235,7 +235,7 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/admin` | GET | 面板页面（总览 / 日志 / 设置三页） |
 | `/api/admin/overview` | GET | 各系统状态总览（设备/后端/音频管线/外部服务） |
 | `/api/admin/config` | GET/PUT | 读取（密钥掩码）/ 写入运行时覆盖层（白名单 schema，保存即热生效） |
-| `/api/admin/config/test` | POST | 上游连通性预检（GET /models → 兜底 chat/completions ping） |
+| `/api/admin/config/test` | POST | 上游连通性预检（按所选规格：GET /models → 兜底各协议最小对话 ping） |
 | `/api/admin/logs` | GET | 内存日志增量拉取（?after=<seq>） |
 | `/api/admin/logs/level` | POST | 运行时调整日志级别 |
 
@@ -244,6 +244,7 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 - 配置写入走白名单 schema（`CONFIG_SCHEMA`）+ **运行时覆盖层**，绝不文本改写 config.py 源文件
 - 分层语义：面板覆盖值（`data/runtime-overrides.json`，原子落盘）> config.py/env 底层值；覆盖项值为 null 表示清除回落
 - 密钥字段读取只回掩码（尾 4 位），明文不出服务端
+- **接口规格**（`openai.api_style`）三选：`chat_completions`（默认）/ `openai_responses` / `anthropic_messages`；内部会话历史统一 chat 格式、出口按规格转换；连通性预检使用**本次提交的待测 Key** 构造鉴权头（不得复用运行时旧 Key）
 
 ### 音频处理链
 
