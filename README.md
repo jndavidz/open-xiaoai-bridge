@@ -328,7 +328,7 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 # 面板 API 示例：更换上游并热生效
 curl -X PUT http://localhost:9092/api/admin/config \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"patch": {"openai": {"base_url": "http://10.10.10.2:8080/v1", "model": "deepseek-chat", "api_key": "..."}}}'
+  -d '{"patch": {"openai": {"base_url": "http://10.10.10.2:65432/v1", "model": "deepseek-chat", "api_key": "..."}}}'
 ```
 
 ### 💡 使用示例

@@ -274,7 +274,7 @@ async def test_monitor_services():
         by_name = {r["name"]: r for r in results}
         assert by_name["mock-upstream"]["ok"] and by_name["mock-upstream"]["status"] == 200
         assert not by_name["blackhole"]["ok"] and by_name["blackhole"]["error"]
-        ok("aurora 式外部服务并发探测（在线/离线各一）")
+        ok("MONITOR_SERVICES 外部服务并发探测（在线/离线各一）")
     finally:
         os.environ.pop("MONITOR_SERVICES", None)
         await up_runner.cleanup()

@@ -58,7 +58,7 @@ reboot
 ## 5. 验收清单（按序）
 
 1. `curl http://10.10.10.2:9092/api/health` → 200
-2. 浏览器打开 **http://10.10.10.2:9092/admin** → 输入 `.env` 里的 `ADMIN_TOKEN` → 总览页各卡片正常（aurora / home-assistant 探测在线）
+2. 浏览器打开 **http://10.10.10.2:9092/admin** → 输入 `.env` 里的 `ADMIN_TOKEN` → 总览页各卡片正常、`MONITOR_SERVICES` 配置的外部服务显示在线
 3. `docker logs -f open-xiaoai-bridge` → 出现音箱连接 + `get_version` 日志
 4. 音箱喊 **「测试模式」** → 播报「桥接正常，家庭中枢在线」
 5. 音箱喊 **「你好贾维斯」** → 播「我在」→ 问一句天气 → DeepSeek 回答（多轮追问验证上下文；喊「小爱同学」验证可打断）
@@ -69,7 +69,7 @@ reboot
 > 无需 SSH 即可查看系统状况与日志、更换上游 AI 的接口地址（含端口）/模型规格/API Key。
 
 - **入口**：`http://10.10.10.2:9092/admin`（局域网 / WireGuard 内可达），首次打开输入 `ADMIN_TOKEN`（存浏览器 localStorage）
-- **总览**：bridge 运行态、小爱音箱、AI 对话后端（地址/模型/key 状态）、OpenClaw/QwenPaw、音频管线（VAD/KWS）、外部服务探测（`MONITOR_SERVICES`，默认含 aurora :8080 与 HA）
+- **总览**：bridge 运行态、小爱音箱、AI 对话后端（地址/模型/key 状态）、OpenClaw/QwenPaw、音频管线（VAD/KWS）、外部服务探测（`MONITOR_SERVICES` 可选配置——纯状态监控、与对话链路无关，监控谁由 .env 决定）
 - **日志**：内存环形缓冲实时增量拉取（约 2000 条），级别过滤、自动滚动
 - **设置**：
   - 「测试连接」先预检新 地址+Key（GET /models，兜底 chat ping），再保存

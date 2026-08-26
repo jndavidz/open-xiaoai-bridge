@@ -375,7 +375,7 @@ class AdminAPI:
     def _monitor_service_specs() -> list[dict[str, Any]]:
         """解析 MONITOR_SERVICES 环境变量（JSON 数组）。
 
-        每项: {"name": "aurora", "url": "http://127.0.0.1:8080/v1/models",
+        每项: {"name": "my-service", "url": "http://127.0.0.1:<port>/v1/models",
                "auth": "Bearer david"(可选)}
         未配置时返回空列表（面板隐藏该区块）。
         """
@@ -402,7 +402,7 @@ class AdminAPI:
         return specs
 
     async def _probe_external_services(self) -> list[dict[str, Any]]:
-        """并发探测外部家庭服务（aurora / HA 等），单服务 4s 超时。"""
+        """并发探测外部服务（MONITOR_SERVICES 声明的任意 HTTP 端点），单服务 4s 超时。"""
         specs = self._monitor_service_specs()
         if not specs:
             return []
