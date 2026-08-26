@@ -36,24 +36,35 @@ from core.utils.logger import logger
 from core.utils.runtime_overrides import runtime_overrides
 
 # ---------------------------------------------------------------- schema ----
-# 可通过面板编辑的白名单字段。type: string | int | float | bool | secret
+# 可通过面板编辑的白名单字段。type: string | int | float | bool | secret | select
 # secret 字段读取时只回掩码，保存留空=不修改，null=清除覆盖回落底层值。
 CONFIG_SCHEMA: list[dict[str, Any]] = [
     {
         "id": "openai",
-        "title": "AI 对话后端（OpenAI 兼容）",
-        "description": "贾维斯/老师等会话的上游服务。修改接口地址（含端口）、模型规格或 API Key 后保存即热生效，下一次对话使用新配置。",
+        "title": "AI 对话后端",
+        "description": "贾维斯/老师等会话的上游服务。修改接口地址（含端口）、接口规格、模型名称或 API Key 后保存即热生效，下一次对话使用新配置。",
         "fields": [
             {
                 "path": "openai.base_url",
                 "label": "接口地址 Base URL",
                 "type": "string",
                 "placeholder": "https://api.deepseek.com/v1",
-                "help": "含协议、主机、端口与路径前缀；可自动补 /chat/completions",
+                "help": "含协议、主机、端口与路径前缀；按接口规格自动补全端点路径",
+            },
+            {
+                "path": "openai.api_style",
+                "label": "接口规格",
+                "type": "select",
+                "options": [
+                    {"value": "chat_completions", "label": "OpenAI Chat Completions（默认）"},
+                    {"value": "openai_responses", "label": "OpenAI Responses"},
+                    {"value": "anthropic_messages", "label": "Anthropic Messages"},
+                ],
+                "help": "上游 API 协议表面；Aurora 网关两种 OpenAI 表面均支持，其默认为 Responses",
             },
             {
                 "path": "openai.model",
-                "label": "模型规格 Model",
+                "label": "模型名称 Model",
                 "type": "string",
                 "placeholder": "deepseek-chat",
             },
@@ -125,6 +136,12 @@ def _coerce_field_value(field: dict[str, Any], value: Any) -> Any:
     ftype = field.get("type", "string")
     if value is None:
         return None  # 清除覆盖
+    if ftype == "select":
+        allowed = {opt.get("value") for opt in field.get("options", [])}
+        text = str(value).strip()
+        if text not in allowed:
+            raise ValueError(f"must be one of {sorted(a for a in allowed if a)}")
+        return text
     if ftype == "int":
         return int(str(value).strip())
     if ftype == "float":
@@ -320,6 +337,7 @@ class AdminAPI:
             "enabled": safe_is_enabled(OpenAIManager),
             "connected": safe_is_connected(OpenAIManager),
             "base_url": getattr(OpenAIManager, "_base_url", None),
+            "api_style": getattr(OpenAIManager, "_api_style", None),
             "model": getattr(OpenAIManager, "_model", None),
             "session_key": getattr(OpenAIManager, "_session_key", None),
             "has_key": bool(getattr(OpenAIManager, "_api_key", "")),
@@ -554,73 +572,106 @@ class AdminAPI:
             # 未填新 key：用当前生效值测试（掩码无法回传明文）
             api_key = cfg.get("api_key") or ""
         model = str((body or {}).get("model") or cfg.get("model") or "")
+        style = str(
+            (body or {}).get("style") or cfg.get("api_style") or "chat_completions"
+        ).strip()
+        if style not in ("chat_completions", "openai_responses", "anthropic_messages"):
+            return web.json_response(
+                {"success": False, "error": f"unsupported style: {style}"}, status=400
+            )
 
         if not base_url:
             return web.json_response(
                 {"success": False, "error": "base_url 为空，无法测试"}, status=400
             )
 
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
+        headers = OpenAIManager._headers(style)
         started = time.monotonic()
         timeout = aiohttp.ClientTimeout(total=15)
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # 第一优先：GET /models（DeepSeek/OpenAI/Ollama/LM Studio 均支持）
-            url = f"{base_url}/models"
-            try:
-                async with session.get(url, headers=headers) as resp:
-                    latency_ms = int((time.monotonic() - started) * 1000)
-                    if resp.status < 400:
-                        return web.json_response(
-                            {
-                                "success": True,
-                                "data": {
-                                    "ok": True,
-                                    "via": "GET /models",
-                                    "status": resp.status,
-                                    "latency_ms": latency_ms,
-                                    "base_url": base_url,
-                                },
-                            }
-                        )
-                    first_error = f"HTTP {resp.status} via GET /models"
-            except asyncio.TimeoutError:
-                first_error = "timeout via GET /models"
-            except aiohttp.ClientError as exc:
-                first_error = f"{type(exc).__name__}: {exc}"
-
-            # 兜底：POST /chat/completions max_tokens=1
-            chat_url = (
+        # 各规格的对话预检请求（max_tokens 压到最小）
+        if style == "anthropic_messages":
+            probe_url = (
+                base_url if base_url.endswith("/messages")
+                else f"{base_url}/messages"
+            )
+            probe_payload: dict[str, Any] = {
+                "model": model or "claude-3-5-haiku-latest",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+        elif style == "openai_responses":
+            probe_url = (
+                base_url if base_url.endswith("/responses")
+                else f"{base_url}/responses"
+            )
+            probe_payload = {
+                "model": model or "gpt-4o-mini",
+                "input": [{"role": "user", "content": "ping"}],
+                "max_output_tokens": 16,
+                "stream": False,
+            }
+        else:
+            probe_url = (
                 base_url if base_url.endswith("/chat/completions")
                 else f"{base_url}/chat/completions"
             )
-            payload = {
+            probe_payload = {
                 "model": model or "gpt-4o-mini",
                 "messages": [{"role": "user", "content": "ping"}],
                 "max_tokens": 1,
                 "stream": False,
             }
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 第一优先（Anthropic 除外）：GET /models 轻探测
+            first_error = None
+            if style != "anthropic_messages":
+                try:
+                    async with session.get(f"{base_url}/models", headers=headers) as resp:
+                        latency_ms = int((time.monotonic() - started) * 1000)
+                        if resp.status < 400:
+                            return web.json_response(
+                                {
+                                    "success": True,
+                                    "data": {
+                                        "ok": True,
+                                        "via": f"GET /models ({style})",
+                                        "status": resp.status,
+                                        "latency_ms": latency_ms,
+                                        "base_url": base_url,
+                                        "style": style,
+                                    },
+                                }
+                            )
+                        first_error = f"HTTP {resp.status} via GET /models"
+                except asyncio.TimeoutError:
+                    first_error = "timeout via GET /models"
+                except aiohttp.ClientError as exc:
+                    first_error = f"{type(exc).__name__}: {exc}"
+
+            # 兜底：按接口规格发一次最小对话请求
             try:
                 probe_started = time.monotonic()
-                async with session.post(chat_url, json=payload, headers=headers) as resp:
+                async with session.post(
+                    probe_url, json=probe_payload, headers=headers
+                ) as resp:
                     latency_ms = int((time.monotonic() - probe_started) * 1000)
                     body_text = await resp.text()
                     ok = resp.status < 400
-                    error_detail = None if ok else body_text[:300]
                     return web.json_response(
                         {
                             "success": True,
                             "data": {
                                 "ok": ok,
-                                "via": "POST /chat/completions",
+                                "via": f"POST {probe_url.rsplit('/', 1)[-1]}",
                                 "status": resp.status,
                                 "latency_ms": latency_ms,
                                 "base_url": base_url,
+                                "style": style,
                                 "first_attempt_error": first_error if not ok else None,
-                                "error": error_detail,
+                                "error": None if ok else body_text[:300],
                             },
                         }
                     )
@@ -630,9 +681,10 @@ class AdminAPI:
                         "success": True,
                         "data": {
                             "ok": False,
-                            "via": "POST /chat/completions",
+                            "via": "POST",
                             "latency_ms": int((time.monotonic() - started) * 1000),
                             "base_url": base_url,
+                            "style": style,
                             "first_attempt_error": first_error,
                             "error": "timeout",
                         },
@@ -644,9 +696,10 @@ class AdminAPI:
                         "success": True,
                         "data": {
                             "ok": False,
-                            "via": "POST /chat/completions",
+                            "via": "POST",
                             "latency_ms": int((time.monotonic() - started) * 1000),
                             "base_url": base_url,
+                            "style": style,
                             "first_attempt_error": first_error,
                             "error": f"{type(exc).__name__}: {exc}",
                         },

@@ -236,8 +236,24 @@ async def test_http():
                 },
             )
             d = (await r.json())["data"]
-            assert d["ok"] and d["via"] == "GET /models", d
+            assert d["ok"] and d["via"].startswith("GET /models") and d["style"] == "chat_completions", d
             ok("连通性预检：mock 上游 GET /models 通过")
+
+            # responses 规格的预检（style 透传 + GET /models 探测）
+            r = await s.post(
+                f"{base}/api/admin/config/test",
+                headers=H,
+                json={
+                    "backend": "openai",
+                    "base_url": "http://127.0.0.1:18924/v1",
+                    "api_key": "k-test",
+                    "model": "m-test",
+                    "style": "openai_responses",
+                },
+            )
+            d = (await r.json())["data"]
+            assert d["ok"] and d["style"] == "openai_responses" and d["via"].startswith("GET /models"), d
+            ok("连通性预检：openai_responses 规格透传")
 
             r = await s.post(
                 f"{base}/api/admin/config/test",
@@ -280,11 +296,77 @@ async def test_monitor_services():
         await up_runner.cleanup()
 
 
+# ---------------------------------------------------------------- part 5 ----
+def test_api_styles():
+    print("[5] 接口规格（api_style）请求构造与响应解析")
+    from core.openai import OpenAIManager
+
+    messages = [
+        {"role": "system", "content": "你是贾维斯"},
+        {"role": "user", "content": "你好"},
+    ]
+
+    OpenAIManager._base_url = "https://gw.example/v1"
+    OpenAIManager._model = "m-test"
+    OpenAIManager._max_tokens = 300
+    OpenAIManager._temperature = 0.5
+    OpenAIManager._api_key = "sk-test"
+    original_style = OpenAIManager._api_style
+
+    try:
+        url, payload, headers = OpenAIManager._build_chat_completions_request(messages)
+        assert url.endswith("/chat/completions") and payload["messages"] is messages
+        assert headers.get("X-Hermes-Session-Key")
+
+        OpenAIManager._api_style = "openai_responses"
+        url2, payload2, h2 = OpenAIManager._build_responses_request(messages)
+        assert url2.endswith("/responses")
+        assert payload2["instructions"] == "你是贾维斯"
+        assert payload2["input"] == [{"role": "user", "content": "你好"}]
+        assert payload2["max_output_tokens"] == 300 and "messages" not in payload2
+        assert "X-Hermes-Session-Key" not in h2
+
+        OpenAIManager._api_style = "anthropic_messages"
+        url3, payload3, h3 = OpenAIManager._build_anthropic_request(messages)
+        assert url3.endswith("/messages")
+        assert payload3["system"] == "你是贾维斯"
+        assert payload3["max_tokens"] == 300
+        assert h3.get("x-api-key") == "sk-test" and h3.get("anthropic-version")
+
+        assert OpenAIManager._extract_responses_text({"output_text": "聚合答案"}) == "聚合答案"
+        assert OpenAIManager._extract_responses_text(
+            {"output": [{"type": "message", "content": [{"type": "output_text", "text": "分"}]}]}
+        ) == "分"
+        assert OpenAIManager._extract_anthropic_text(
+            {"content": [{"type": "text", "text": "Anthropic 答案"}, {"type": "other"}]}
+        ) == "Anthropic 答案"
+        ok("三种规格的端点/载荷/鉴权头构造 + 响应文本提取")
+    finally:
+        OpenAIManager._api_style = original_style
+
+
+async def test_api_style_hot_reload():
+    print("[6] api_style 经面板写入热生效")
+    from core.openai import OpenAIManager
+
+    cm = ConfigManager.instance()
+    original = OpenAIManager._api_style
+    runtime_overrides.update({"openai": {"api_style": "openai_responses"}})
+    cm.reload_app_config()
+    assert OpenAIManager._api_style == "openai_responses"
+    runtime_overrides.update({"openai": {"api_style": None}})
+    cm.reload_app_config()
+    assert OpenAIManager._api_style == original
+    ok("api_style 覆盖写入 → Manager 类变量热刷新")
+
+
 def main():
     test_overrides()
     test_log_buffer()
     asyncio.run(test_http())
     asyncio.run(test_monitor_services())
+    test_api_styles()
+    asyncio.run(test_api_style_hot_reload())
     print(f"\n全部通过：{PASS} 项断言组 ✅")
 
 

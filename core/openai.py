@@ -2,6 +2,14 @@
 
 This module talks to any OpenAI-compatible Chat Completions endpoint,
 including Hermes Agent API server mode.
+
+接口规格（api_style）支持三种上游协议表面：
+    - chat_completions   POST {base}/chat/completions（默认，原版唯一支持的）
+    - openai_responses   POST {base}/responses（OpenAI Responses API；Aurora 默认表面）
+    - anthropic_messages POST {base}/messages（Anthropic Messages API）
+
+内部会话历史统一存 chat 格式（{role, content}），仅在出口按 api_style 转换，
+切换接口规格不影响既有会话记忆。
 """
 
 import asyncio
@@ -17,6 +25,10 @@ from core.utils.config import ConfigManager
 from core.utils.logger import logger
 
 
+# 支持的接口规格（与 admin_api.CONFIG_SCHEMA 的 options 保持一致）
+API_STYLES = ("chat_completions", "openai_responses", "anthropic_messages")
+
+
 class OpenAIManager:
     """Manager for OpenAI-compatible chat backends."""
 
@@ -25,6 +37,8 @@ class OpenAIManager:
     _initialized = False
     _reload_listener_registered = False
     _enabled = False
+    # 上游接口规格：chat_completions | openai_responses | anthropic_messages
+    _api_style = "chat_completions"
     _base_url = "http://127.0.0.1:8000/v1"
     _api_key = ""
     _model = "gpt-4o-mini"
@@ -84,6 +98,13 @@ class OpenAIManager:
         cls._base_url = str(config.get("base_url", "http://127.0.0.1:8000/v1")).rstrip("/")
         cls._api_key = str(config.get("api_key", "") or "")
         cls._model = str(config.get("model", "gpt-4o-mini"))
+        api_style = str(config.get("api_style", "chat_completions") or "chat_completions").strip()
+        if api_style not in API_STYLES:
+            logger.warning(
+                f"[OpenAI] Unknown api_style {api_style!r}, falling back to chat_completions"
+            )
+            api_style = "chat_completions"
+        cls._api_style = api_style
         cls._session_key = str(config.get("session_key", "agent:default:open-xiaoai-bridge"))
         cls._session_header = str(config.get("session_header", "X-Hermes-Session-Key") or "").strip()
         cls._system_prompt = str(config.get("system_prompt", "") or "")
@@ -116,7 +137,8 @@ class OpenAIManager:
 
         if cls._enabled:
             logger.info(
-                f"[OpenAI] Enabled, base_url={cls._base_url}, model={cls._model}"
+                f"[OpenAI] Enabled, base_url={cls._base_url}, model={cls._model}, "
+                f"api_style={cls._api_style}"
             )
 
     @classmethod
@@ -274,6 +296,37 @@ class OpenAIManager:
         session_key = cls._session_key
         history = cls._sessions.setdefault(session_key, [])
         messages = cls._build_messages(history, text)
+
+        # 内部历史统一 chat 格式，出口按接口规格转换
+        if cls._api_style == "anthropic_messages":
+            url, payload, headers = cls._build_anthropic_request(messages)
+        elif cls._api_style == "openai_responses":
+            url, payload, headers = cls._build_responses_request(messages)
+        else:
+            url, payload, headers = cls._build_chat_completions_request(messages)
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=cls._timeout)
+        ) as session:
+            async with session.post(url, json=payload, headers=headers) as response:
+                body = await response.json(content_type=None)
+                if response.status >= 400:
+                    message = body.get("error", body) if isinstance(body, dict) else body
+                    raise RuntimeError(f"HTTP {response.status}: {message}")
+
+        if cls._api_style == "anthropic_messages":
+            response_text = cls._extract_anthropic_text(body)
+        elif cls._api_style == "openai_responses":
+            response_text = cls._extract_responses_text(body)
+        else:
+            response_text = cls._extract_response_text(body)
+
+        if response_text:
+            cls._append_history(history, text, response_text)
+        return response_text
+
+    @classmethod
+    def _build_chat_completions_request(cls, messages: list[dict[str, str]]):
         payload: dict[str, Any] = {
             "model": cls._model,
             "messages": messages,
@@ -284,37 +337,75 @@ class OpenAIManager:
             payload["temperature"] = cls._temperature
         if cls._max_tokens is not None:
             payload["max_tokens"] = cls._max_tokens
-
-        headers = cls._headers()
-
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=cls._timeout)
-        ) as session:
-            async with session.post(
-                cls._chat_completions_url(),
-                json=payload,
-                headers=headers,
-            ) as response:
-                body = await response.json(content_type=None)
-                if response.status >= 400:
-                    message = body.get("error", body) if isinstance(body, dict) else body
-                    raise RuntimeError(f"HTTP {response.status}: {message}")
-
-        response_text = cls._extract_response_text(body)
-        if response_text:
-            cls._append_history(history, text, response_text)
-        return response_text
+        return cls._chat_completions_url(), payload, cls._headers()
 
     @classmethod
-    def _headers(cls) -> dict[str, str]:
+    def _build_responses_request(cls, messages: list[dict[str, str]]):
+        """OpenAI Responses API：system 人设走 instructions，历史走 input 数组。"""
+        system = next((m["content"] for m in messages if m["role"] == "system"), None)
+        payload: dict[str, Any] = {
+            "model": cls._model,
+            "input": [
+                {"role": m["role"], "content": m["content"]}
+                for m in messages
+                if m["role"] != "system"
+            ],
+            "stream": False,
+            **(cls._extra_body or {}),
+        }
+        if system:
+            payload["instructions"] = system
+        if cls._max_tokens is not None:
+            payload["max_output_tokens"] = cls._max_tokens
+        if cls._temperature is not None:
+            payload["temperature"] = cls._temperature
+        url = (
+            cls._base_url
+            if cls._base_url.endswith("/responses")
+            else cls._base_url.rstrip("/") + "/responses"
+        )
+        return url, payload, cls._headers("openai_responses")
+
+    @classmethod
+    def _build_anthropic_request(cls, messages: list[dict[str, str]]):
+        """Anthropic Messages API：system 独立字段；max_tokens 为必填项。"""
+        system = next((m["content"] for m in messages if m["role"] == "system"), None)
+        payload: dict[str, Any] = {
+            "model": cls._model,
+            "messages": [
+                {"role": m["role"], "content": m["content"]}
+                for m in messages
+                if m["role"] in ("user", "assistant")
+            ],
+            "max_tokens": cls._max_tokens or 1024,
+            "stream": False,
+        }
+        if system:
+            payload["system"] = system
+        if cls._temperature is not None:
+            payload["temperature"] = cls._temperature
+        url = (
+            cls._base_url
+            if cls._base_url.endswith("/messages")
+            else cls._base_url.rstrip("/") + "/messages"
+        )
+        return url, payload, cls._headers("anthropic_messages")
+
+    @classmethod
+    def _headers(cls, style: str | None = None) -> dict[str, str]:
+        style = style or cls._api_style
         headers = {"Content-Type": "application/json"}
         if cls._api_key:
             headers["Authorization"] = f"Bearer {cls._api_key}"
+            if style == "anthropic_messages":
+                # Anthropic 官方鉴权头；同时保留 Bearer 兼容各类代理网关
+                headers["x-api-key"] = cls._api_key
+                headers["anthropic-version"] = "2023-06-01"
         # Scope server-side long-term memory to this session (e.g. Hermes'
         # X-Hermes-Session-Key). chat/completions stays stateless — the
         # messages array is still the source of turn history — so this does
         # not duplicate context.
-        if cls._session_header and cls._session_key:
+        if style == "chat_completions" and cls._session_header and cls._session_key:
             headers[cls._session_header] = cls._session_key
         return headers
 
@@ -349,6 +440,38 @@ class OpenAIManager:
         )
         if len(history) > cls._history_max_messages:
             del history[: len(history) - cls._history_max_messages]
+
+    @staticmethod
+    def _extract_responses_text(body: Any) -> str | None:
+        """OpenAI Responses API 取文本：优先聚合字段 output_text，
+        否则遍历 output[] → message → output_text 片段拼接。"""
+        if not isinstance(body, dict):
+            return None
+        aggregated = body.get("output_text")
+        if isinstance(aggregated, str) and aggregated.strip():
+            return aggregated.strip()
+        chunks: list[str] = []
+        for item in body.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            for part in item.get("content") or []:
+                if isinstance(part, dict) and part.get("type") == "output_text":
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        chunks.append(text)
+        return "".join(chunks).strip() or None
+
+    @staticmethod
+    def _extract_anthropic_text(body: Any) -> str | None:
+        """Anthropic Messages API 取文本：content[] 中 type=text 片段拼接。"""
+        if not isinstance(body, dict):
+            return None
+        chunks = [
+            part.get("text", "")
+            for part in body.get("content") or []
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "".join(chunks).strip() or None
 
     @classmethod
     def _extract_response_text(cls, body: Any) -> str | None:

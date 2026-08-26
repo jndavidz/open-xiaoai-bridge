@@ -230,7 +230,8 @@ function renderOverview(d) {
   const o = d.backends.openai;
   cards.push(backendCard("AI 对话后端", "🤖", o, [
     ["接口地址", esc(o.base_url)],
-    ["模型规格", esc(o.model)],
+    ["接口规格", esc(o.api_style)],
+    ["模型名称", esc(o.model)],
     ["API Key", o.has_key ? pill(true, "已配置", "", "ok") : pill(false, "", "未配置", "bad")],
     ["会话", esc(o.session_key)],
   ]));
@@ -350,6 +351,11 @@ function renderField(f) {
   if (f.type === "secret") {
     input = `<input data-path="${f.path}" data-type="secret" type="password" autocomplete="new-password"
       placeholder="${f.value.set ? "已配置 " + f.value.masked + "（留空=不修改）" : "未配置"}">`;
+  } else if (f.type === "select") {
+    const opts = (f.options || [])
+      .map(o => `<option value="${esc(o.value)}"${o.value === f.value ? " selected" : ""}>${esc(o.label || o.value)}</option>`)
+      .join("");
+    input = `<select data-path="${f.path}" data-type="select">${opts}</select>`;
   } else {
     input = `<input data-path="${f.path}" data-type="${f.type}" type="text"
       value="${esc(f.value ?? "")}" placeholder="${esc(f.placeholder || "")}">`;
@@ -404,7 +410,7 @@ async function saveSection(sec, el) {
 async function testOpenai(el) {
   const btn = $("#testBtn"); btn.disabled = true; btn.textContent = "测试中…";
   const get = p => { const n = fieldPathEl(p); return n ? n.value.trim() : ""; };
-  const body = { backend: "openai" };
+  const body = { backend: "openai", style: get("openai.api_style") || undefined };
   const url = get("openai.base_url"), key = get("openai.api_key"), model = get("openai.model");
   if (url) body.base_url = url;
   if (key) body.api_key = key;
