@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 # 安装 uv
-COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /uvx /bin/
+COPY --from=ghcr.nju.edu.cn/astral-sh/uv:0.7 /uv /uvx /bin/
 
 # 设置环境变量
 ENV BASH_ENV=/root/.bash_env
