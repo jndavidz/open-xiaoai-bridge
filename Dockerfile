@@ -28,14 +28,25 @@ RUN echo '[ -s "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"' >> "$BASH_ENV"
 # 设置工作目录
 WORKDIR /app
 
-# 复制项目文件
-COPY . .
+# 层缓存优化（2026-08-29）：按变更频率从低到高拷贝——
+# 依赖清单/Rust 源变化少，先拷并编译；core/ 等高频源码最后拷，
+# 使 Rust 全量编译（3-8 分钟）仅在 native/ 或依赖变化时重跑
+# ① 依赖清单（uv sync 所需）
+COPY pyproject.toml uv.lock ./
 
-# 安装锁定依赖（保持 pyproject.toml 与 uv.lock 一致）
+# ② Rust 源（maturin build 所需）
+COPY native/ ./native/
+
+# ③ 安装锁定依赖（保持 pyproject.toml 与 uv.lock 一致）
 RUN uv sync --locked --no-install-project --no-editable
 
-# 构建 Rust 扩展并安装
+# ④ 构建 Rust 扩展并安装（仅 native/ 或依赖变化时重跑）
 RUN uv run maturin build --release --manifest-path native/Cargo.toml && uv remove maturin
+
+# ⑤ 高频变更源码（core/ 改动只失效本层）
+COPY core ./core
+COPY main.py .
+COPY scripts ./scripts
 
 
 FROM python:3.12-slim
