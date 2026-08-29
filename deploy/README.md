@@ -23,19 +23,22 @@ cp .env.example .env && vim .env      # 六项见 .env.example：必填 4（OPEN
 
 ## 3. 上传到群晖并启动
 
-> ⚠ **compose 已改为本地构建**（`build: context: ..` + `image: open-xiaoai-bridge:local`）：
-> fork 深度演进后 kws/api_server/openai.py/tools 等代码改动**烤进镜像**，拉上游镜像会丢功能。
-> 群晖上没有源码树，**不能直接 `compose up` 构建**——镜像获取走 [REBUILD.md](REBUILD.md) 的
-> 「本地 build → save → scp → load」流程；本节只负责 bind-mount 文件与启动。
+> ⚠ **fork 深度演进，代码烤进镜像**：kws/api_server/openai.py/tools 等改动不会进 bind-mount，
+> 拉上游镜像或纯 `restart` 会丢功能（喊「停止聆听」时 `disable_listening()` 在镜像里缺失 → `AttributeError`）。
+> 镜像构建走 [REBUILD.md](REBUILD.md)：把 `bridge/` 源码 rsync 到群晖 `/volume2/docker/open-xiaoai-bridge-src`，
+> 在群晖上 `docker build -t open-xiaoai-bridge:home /volume2/docker/open-xiaoai-bridge-src`，
+> 再 `cd /volume2/docker/open-xiaoai-bridge && docker compose up -d` 重建。本节只负责 bind-mount 文件与启动。
 
 ```bash
+# 1) 部署 bind-mount 文件（config.py 已含 T7.6 关键词与路由钩子；.env 不入库需自备）
+#    ⚠ scp 必须 -O：DSM 的 SFTP 视图受限（chroot），系统路径报 No such file or directory
 ssh zxsadmin@10.10.10.2 'mkdir -p /volume2/docker/open-xiaoai-bridge'
-scp -r config.py docker-compose.yml .env \
-    zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
-# models/ 若大，先 scp models.zip 再在群晖解压（群晖有 unzip）
-scp models.zip zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
-# 镜像按 REBUILD.md 构建/传输后，在群晖 load 并启动：
-ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && unzip -o models.zip -d models && /usr/local/bin/docker load -i open-xiaoai-bridge:local.tar && /usr/local/bin/docker compose up -d'
+scp -O -r config.py .env zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
+# 2) 镜像已在群晖本地构建（见 REBUILD.md §1）：open-xiaoai-bridge:home
+#    —— 不 scp 本机 docker-compose.yml：其 build.context 在群晖解析错误（会指到 /volume2/docker 而非源码）。
+#       群晖部署目录的 compose 固定引用 image: open-xiaoai-bridge:home（无 build 指令），由手动 docker build 提供。
+# 3) 重建并启动（models/ 经 bind-mount 提供，已在部署目录；容器启动重编 keywords.txt）
+ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && /usr/local/bin/docker compose up -d'
 ```
 
 ## 4. LX06 升级 client 并切换 server 指向
@@ -73,7 +76,7 @@ reboot
 6. 音箱喊 **「你好老师」** → 进入辅导人设（四年级导师，苏格拉底式引导、不直接报答案）；喊「你好贾维斯」切回后确认人格无串台
 7. 音箱喊 **「贾维斯，现在上海天气怎么样」**（工具回环）→ 回答来自 weather 工具而非纯生成；bridge 日志见 tool_calls 回环
 8. HA 侧建一个临时脚本调 `POST http://10.10.10.2:9092/api/play/text`（body `{"text":"来自HA的播报"}`）→ 音箱说话
-9. `POST :9092/api/audio_input {"mic":"off"}` → KWS 停止分析；`{"mic":"on"}` 恢复（「停止聆听」隐私开关）
+9. 音箱喊 **「停止聆听」** → 麦克风静音 + KWS 停止分析 + TTS「已停止聆听」（隐私开关，语音通道自关）；`curl -X POST http://10.10.10.2:9092/api/audio_input`（免 token、无需 body，为唯一恢复路径）→ mic 恢复 on + KWS 恢复分析，返回 `{"success":true,"mic":"on","listening":true}`
 
 ## 5.5 后台面板（:9092/admin）
 

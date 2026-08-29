@@ -35,7 +35,7 @@ cd /mnt/d/repos/open-xiaoai/bridge
 export DOCKER_CONFIG=/tmp/docker-config
 
 docker build -t open-xiaoai-bridge:home .
-# 产物约 431MB；成功标志 = 末尾 "#n naming to docker.io/library/open-xiaoai-bridge:home done"
+# 产物约 400–600MB（随依赖演进）；成功标志 = 末尾 "#n naming to docker.io/library/open-xiaoai-bridge:home done"
 ```
 
 **WSL 路径踩坑实录**：
@@ -47,7 +47,7 @@ docker build -t open-xiaoai-bridge:home .
 推送到群晖（SSH 流式，免 scp 中转）：
 
 ```bash
-cd bridge/deploy && DOCKER_CONFIG=/tmp/docker-config \
+DOCKER_CONFIG=/tmp/docker-config \
   docker save open-xiaoai-bridge:home | \
   ssh -o BatchMode=yes zxsadmin@10.10.10.2 '/usr/local/bin/docker load'
 # NAS 侧若已有同名镜像自动改名保留（可回滚）
