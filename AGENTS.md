@@ -12,7 +12,7 @@
 ```
 open-xiaoai-bridge/
 ├── main.py                        # 入口：解析环境变量，启动 MainApp
-├── config.py                      # 用户配置（唤醒词、路由钩子、TTS、OpenClaw 等）
+├── config.py                      # 用户配置（唤醒词、双指令表、路由钩子、TTS、OpenClaw 等）
 ├── core/
 │   ├── app.py                     # MainApp 主控制器（单例，管理生命周期）
 │   ├── xiaoai.py                  # XiaoAI 设备接入 / 事件桥接
@@ -22,18 +22,19 @@ open-xiaoai-bridge/
 │   ├── openclaw_conversation.py   # OpenClaw 连续对话循环（VAD → ASR → Agent → TTS）
 │   ├── wakeup_session.py          # 小智唤醒会话状态机
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
+│   ├── tools/                     # Agent 工具层：registry 三函数 + hass/weather/music 只读工具（阶段 1.5）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
 │   │   ├── speaker.py             # SpeakerManager 音箱硬件控制
-│   │   ├── api_server.py          # HTTP REST API（aiohttp）
+│   │   ├── api_server.py          # HTTP REST API（aiohttp；含 /api/audio_input 停麦恢复通道）
 │   │   ├── admin_api.py           # 后台面板 API（/admin 页面 + /api/admin/*）
 │   │   ├── admin_static/index.html# 面板单页前端（零外部依赖）
 │   │   ├── audio/
 │   │   │   ├── stream.py          # GlobalStream 全局音频流（多路输入广播）
 │   │   │   ├── codec.py           # 音频编解码
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
-│   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒
+│   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
 │   │   ├── tts/doubao.py          # 豆包 TTS 客户端（火山引擎）
 │   │   └── protocols/
@@ -225,6 +226,7 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/health` | GET | 健康检查 |
 | `/api/tts/doubao` | POST | Doubao TTS 合成 |
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
+| `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |
 
 ### 后台管理面板 (core/services/admin_api.py)
 
@@ -245,6 +247,35 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 - 分层语义：面板覆盖值（`data/runtime-overrides.json`，原子落盘）> config.py/env 底层值；覆盖项值为 null 表示清除回落
 - 密钥字段读取只回掩码（尾 4 位），明文不出服务端
 - **接口规格**（`openai.api_style`）三选：`chat_completions`（默认）/ `openai_responses` / `anthropic_messages`；内部会话历史统一 chat 格式、出口按规格转换；连通性预检使用**本次提交的待测 Key** 构造鉴权头（不得复用运行时旧 Key）
+
+### 指令双表与动作构造器 (config.py)
+
+config.py 承载两张指令表 + 声明式动作构造器，两条路径共用 `_run_steps()` 执行逻辑：
+
+| 表 | 触发源 | 场景 |
+|----|--------|------|
+| `DIRECT_COMMANDS` | `before_wakeup(source=="kws")` 免唤醒短语 | 高频确定性播控/场景（毫秒级、100% 确定） |
+| `XIAOAI_COMMANDS` | `before_wakeup(source=="xiaoai")` 小爱对话中截胡 | 「小爱同学，打开电脑」类口语触发自动化 |
+
+- **动作元素三型**（混排，按序执行）：`str`（首条充当确认播报，如「正在开启高保真模式」）→ `ha_script(name)` / `ha_switch(entity_id)` 构造器（HA REST 调用）→ 任意 `async def(speaker)` 函数
+- **截胡边界**：米家设备控制类口语（「把空调开到 26 度」）放行原生小爱，两表都不截——判定表见工作区 `selection-review.md` §3.1.2；边界错了就是吞指令
+- **执行前清场**：`speaker.stop_device_audio()`；**禁止** `abort_xiaoai()`（见「不可用的中断方式」）
+
+### Agent 工具层 (core/tools/)
+
+LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"任务执行"的实现层）。
+
+| 文件 | 职责 |
+|------|------|
+| `registry.py` | 三函数：`get_all_tools()`（聚合工具定义喂 LLM）/ `execute_tool(name, arguments)`（责任链分发）/ system prompt 聚合；新增工具 = 加模块文件，注册表零改动 |
+| `hass.py` | HA 实体状态查询（只读） |
+| `weather.py` | Open-Meteo 天气查询（无需 key，已端到端验证） |
+| `music.py` | LMS 播放状态查询（只读） |
+
+**接线位置与硬约束** (`core/openai.py`):
+- `tools` 注入仅 **chat_completions 风格**；回环深度 `_max_tool_rounds=3`（配置项 `max_tool_rounds`），总开关 `tool_calls_enabled`（默认开）
+- ⚠ **reasoning_content 条件回传**：thinking 模式带 `tools` 时，后续每轮必须完整回传 assistant 的 `reasoning_content`（缺失直接 400）；仅当响应携带时才回传（非 thinking 模型无此字段，天然无影响）——改消息组装前先读官方 thinking_mode 文档
+- **只读边界**：当前暴露的工具全部只读；写操作工具（HA 控制/关机类）落地时必须带二次确认护栏（见工作区 selection-review §3.1）
 
 ### 音频处理链
 
@@ -331,6 +362,15 @@ API_SERVER_ENABLE=1 uv run main.py
 - `CLI` 环境变量不再作为功能开关，不要引入依赖 `CLI` 的运行时分支
 - `XIAOZHI_ENABLE=0` 时必须允许跳过 KWS 初始化
 - `scripts/start.sh` 在仅小爱模式下不应检查 `core/models/` 下的模型文件
+- 工具回环三开关缺一即回退纯对话：`tool_calls_enabled` / `get_all_tools()` 非空 / api_style 为 `chat_completions`——排障时按此顺序查
+- `reasoning_content` 守卫只能收紧不能放松：thinking+tools 场景漏回传 = 400（详见「Agent 工具层」）
+
+## 构建与部署
+
+- **镜像必须本地构建**：fork 深度演进后，`kws/__init__.py`、`api_server.py`、`openai.py`、`tools/` 等代码改动**烤进镜像**，bind-mount（config.py/models）覆盖不到——拉上游镜像 = 丢功能。构建与验收流程见 [deploy/REBUILD.md](deploy/REBUILD.md)
+- **家庭部署手册**（NAS 部署 / LX06 接入 / 验收 / 安全）：[deploy/README.md](deploy/README.md)
+- **HA 配置片段权威**：工作区 `deploy/ha/`（按代际编号）——本仓库内不含 HA 配置
+- `config.py` 有两份：根目录 = 开发基线；`deploy/config.py` = 生产版（scp 到群晖，热重载生效）——改错文件是已踩过的坑（首次部署只推镜像漏推 config.py → 唤醒失败）
 
 ## 测试
 

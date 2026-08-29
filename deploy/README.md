@@ -1,8 +1,10 @@
 # 家庭部署手册（deploy/）
 
 > 目标：群晖 DS416play 上运行 open-xiaoai-bridge，小爱 Pro(LX06) 经 client 连接，
-> 实现：免唤醒短语场景控制 + 「你好贾维斯」DeepSeek 连续对话 + HA↔音箱双向 TTS。
-> 对应总方案：`../../doc/plan/home-theater-automation-plan.md` Phase C/D。
+> 实现：免唤醒/截胡双指令表场景控制 + 「你好贾维斯」DeepSeek 连续对话 + 「你好老师」
+> 学科辅导（独立人设）+ Agent 工具层（weather/hass/music 只读工具）+ 「停止聆听」隐私开关
+> + HA↔音箱双向 TTS + 后台管理面板。
+> 对应总方案：`../../doc/plan/home-theater-automation-plan.md` Phase C/D；构建与镜像边界见 [REBUILD.md](REBUILD.md)。
 
 ## 1. 前置
 
@@ -14,12 +16,17 @@
 
 ```bash
 cd /mnt/d/repos/open-xiaoai/bridge/deploy
-cp .env.example .env && vim .env      # 填三个 token/key
+cp .env.example .env && vim .env      # 六项见 .env.example：必填 4（OPEN_XIAOAI_TOKEN / DEEPSEEK_API_KEY / HA_TOKEN / ADMIN_TOKEN）+ 可选 2（HA_BASE_URL / MONITOR_SERVICES）
 # 下载模型包（VAD+KWS；xiaoai_asr 模式不需要 ASR 大模型，但包内含，体积可控）
 #   URL 见下方"模型包"节，解压到 ./models/
 ```
 
 ## 3. 上传到群晖并启动
+
+> ⚠ **compose 已改为本地构建**（`build: context: ..` + `image: open-xiaoai-bridge:local`）：
+> fork 深度演进后 kws/api_server/openai.py/tools 等代码改动**烤进镜像**，拉上游镜像会丢功能。
+> 群晖上没有源码树，**不能直接 `compose up` 构建**——镜像获取走 [REBUILD.md](REBUILD.md) 的
+> 「本地 build → save → scp → load」流程；本节只负责 bind-mount 文件与启动。
 
 ```bash
 ssh zxsadmin@10.10.10.2 'mkdir -p /volume2/docker/open-xiaoai-bridge'
@@ -27,7 +34,8 @@ scp -r config.py docker-compose.yml .env \
     zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
 # models/ 若大，先 scp models.zip 再在群晖解压（群晖有 unzip）
 scp models.zip zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
-ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && unzip -o models.zip -d models && /usr/local/bin/docker compose up -d'
+# 镜像按 REBUILD.md 构建/传输后，在群晖 load 并启动：
+ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && unzip -o models.zip -d models && /usr/local/bin/docker load -i open-xiaoai-bridge:local.tar && /usr/local/bin/docker compose up -d'
 ```
 
 ## 4. LX06 升级 client 并切换 server 指向
@@ -62,7 +70,10 @@ reboot
 3. `docker logs -f open-xiaoai-bridge` → 出现音箱连接 + `get_version` 日志
 4. 音箱喊 **「测试模式」** → 播报「桥接正常，家庭中枢在线」
 5. 音箱喊 **「你好贾维斯」** → 播「我在」→ 问一句天气 → DeepSeek 回答（多轮追问验证上下文；喊「小爱同学」验证可打断）
-6. HA 侧建一个临时脚本调 `POST http://10.10.10.2:9092/api/play/text`（body `{"text":"来自HA的播报"}`）→ 音箱说话
+6. 音箱喊 **「你好老师」** → 进入辅导人设（四年级导师，苏格拉底式引导、不直接报答案）；喊「你好贾维斯」切回后确认人格无串台
+7. 音箱喊 **「贾维斯，现在上海天气怎么样」**（工具回环）→ 回答来自 weather 工具而非纯生成；bridge 日志见 tool_calls 回环
+8. HA 侧建一个临时脚本调 `POST http://10.10.10.2:9092/api/play/text`（body `{"text":"来自HA的播报"}`）→ 音箱说话
+9. `POST :9092/api/audio_input {"mic":"off"}` → KWS 停止分析；`{"mic":"on"}` 恢复（「停止聆听」隐私开关）
 
 ## 5.5 后台面板（:9092/admin）
 
@@ -78,15 +89,19 @@ reboot
 - **安全**：所有 `/api/admin/*` 需 Bearer token；未配置 `ADMIN_TOKEN` 时接口整体拒绝；密钥读取只回掩码
 - 升级镜像时注意：`upgrade-image.sh` 重启容器不影响 `data/`（覆盖层持久化在宿主卷）
 
-## 6. HA 侧需预建的 script 实体（免唤醒表引用）
+## 6. HA 侧 script 实体（免唤醒表引用）
 
-| script 实体 | 内容（示例） |
+> ⚠ 下表为**初版示意**。生产权威 = 工作区 `deploy/ha/`（按代际编号的 append 片段，含
+> A7 智能播控路由版：`music_next/prev` 按「NUC-HiFi 在播→LMS / 音箱在播→xiaomusic /
+> 都空闲→hifi_mode」三分支 choose，`music_stop` 双链路停）——改 HA 配置以那边为准，
+> 本表仅说明 config.py 只认 script 名、HA 侧改实现不影响语音层的解耦原则。
+
+| script 实体 | 内容（初版示意） |
 |------------|-------------|
-| `script.hifi_mode` | 依次：WOL 唤醒 NUC → 等待 ping 通 → media_player.select_source 或 MA 播放 → （可选）经 :9092 播「高保真模式已开启」 |
-| `script.music_stop` | `media_player.media_stop`（MA/LMS player） |
-| `script.music_play` | `media_player.media_play` |
-| `script.music_next` / `music_prev` | `media_player.media_next_track` / `previous_track` |
-| `script.music_vol_up` / `vol_down` | `media_player.volume_up` / `volume_down` |
+| `script.hifi_mode` | WOL 唤醒 NUC → 等 player 在线 → LMS randomplay → TTS「高保真模式已开启」（已上线） |
+| `script.music_stop` | choose：NUC 在播→media_stop(nuc_hifi)；否则 xiaomusic 停止（双链路） |
+| `script.music_next` / `music_prev` | choose 三分支路由（NUC→LMS 切歌 / 音箱→xiaomusic / 空闲→hifi_mode） |
+| `script.music_vol_up` / `vol_down` | xiaomusic 音量（HIFI 链路音量归功放旋钮） |
 
 config.py 只认 script 名，HA 侧改实现不影响语音层。
 
