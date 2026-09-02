@@ -128,6 +128,14 @@ async def after_wakeup(speaker, source=None, session_key=None):
 
 
 APP_CONFIG = {
+    # 固定设备 ID，避免 ConfigManager.reload_app_config() 在每次热重载时
+    # 因 DEVICE_ID 缺失而回写 config.py 源文件（导致 mtime 抖动 → 文件监听
+    # 误判变更 → 每秒 reload 死循环、刷屏淹没真实日志）。值需为合法 MAC 格式。
+    # 上游根因修复见 core/utils/config.py update_config_file（无变化时跳过写盘），
+    # 此处保留作为运行态冗余兜底。
+    "xiaozhi": {
+        "DEVICE_ID": "aa:bb:cc:dd:ee:ff",
+    },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
         # 注意：短语 >=4 字更稳；误触发/失灵时优先调 kws/vad 段参数
