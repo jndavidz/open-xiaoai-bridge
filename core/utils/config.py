@@ -159,16 +159,23 @@ class ConfigManager:
 
     def update_config_file(self, path: str, value: Any):
         """
-        更新 config.py 文件中的特定配置项
+        更新 config.py 文件中的特定配置项。
+
+        写盘前先比较新旧内容：若替换后内容与原文件完全一致（典型场景——
+        config.py 未声明该键导致 re.sub 匹配不到、回写原样），则直接跳过写盘，
+        避免无谓的 mtime/ctime 更新。否则 _watch_config_file 会误判为"配置变更"
+        而反复 reload，形成 reload → 回写 → 再 reload 的死循环（见 issue 由
+        DEVICE_ID 缺失触发）。
         """
-        write_file(
-            "config.py",
-            re.sub(
-                r'"{}"\s*:\s*"[^"]*"'.format(path),
-                f'"{path}": "{value}"',
-                read_file("config.py"),
-            ),
+        current = read_file("config.py")
+        updated = re.sub(
+            r'"{}"\s*:\s*"[^"]*"'.format(path),
+            f'"{path}": "{value}"',
+            current,
         )
+        if updated == current:
+            return
+        write_file("config.py", updated)
 
     @classmethod
     def instance(cls):
