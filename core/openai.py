@@ -23,6 +23,7 @@ import open_xiaoai_server
 from core.utils.base import get_env
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
+from core.tools.registry import get_all_tools, execute_tool
 
 
 # 支持的接口规格（与 admin_api.CONFIG_SCHEMA 的 options 保持一致）
@@ -61,6 +62,9 @@ class OpenAIManager:
     _tts_speed = 1.0
     _rule_prompt = ""
     _rule_prompt_for_skill = ""
+    # 工具层（Agent 1.5 / 阶段 1.5）：function calling 回环开关与轮数上限
+    _tool_calls_enabled = True
+    _max_tool_rounds = 3
     _sessions: dict[str, list[dict[str, str]]] = {}
     _response_events: dict[str, asyncio.Future] = {}
     _response_texts: dict[str, str] = {}
@@ -134,6 +138,9 @@ class OpenAIManager:
         cls._tts_speed = float(config.get("tts_speed", 1.0))
         cls._rule_prompt = str(config.get("rule_prompt", "") or "")
         cls._rule_prompt_for_skill = str(config.get("rule_prompt_for_skill", "") or "")
+        # 工具层（Agent 1.5）：默认开启；max_tool_rounds 限制 tool_calls 回环深度
+        cls._tool_calls_enabled = bool(config.get("tool_calls_enabled", True))
+        cls._max_tool_rounds = max(1, int(config.get("max_tool_rounds", 3)))
 
         if cls._enabled:
             logger.info(
@@ -292,19 +299,8 @@ class OpenAIManager:
                 waiter.get_loop().call_soon_threadsafe(waiter.set_result, None)
 
     @classmethod
-    async def _request_chat_completion(cls, text: str) -> str | None:
-        session_key = cls._session_key
-        history = cls._sessions.setdefault(session_key, [])
-        messages = cls._build_messages(history, text)
-
-        # 内部历史统一 chat 格式，出口按接口规格转换
-        if cls._api_style == "anthropic_messages":
-            url, payload, headers = cls._build_anthropic_request(messages)
-        elif cls._api_style == "openai_responses":
-            url, payload, headers = cls._build_responses_request(messages)
-        else:
-            url, payload, headers = cls._build_chat_completions_request(messages)
-
+    async def _post_llm(cls, url: str, payload: dict, headers: dict) -> dict:
+        """发送一次 LLM 请求并取回 JSON body（HTTP>=400 抛 RuntimeError）。"""
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=cls._timeout)
         ) as session:
@@ -313,17 +309,93 @@ class OpenAIManager:
                 if response.status >= 400:
                     message = body.get("error", body) if isinstance(body, dict) else body
                     raise RuntimeError(f"HTTP {response.status}: {message}")
+                return body
 
-        if cls._api_style == "anthropic_messages":
-            response_text = cls._extract_anthropic_text(body)
-        elif cls._api_style == "openai_responses":
-            response_text = cls._extract_responses_text(body)
-        else:
-            response_text = cls._extract_response_text(body)
+    @classmethod
+    async def _request_chat_completion(cls, text: str) -> str | None:
+        session_key = cls._session_key
+        history = cls._sessions.setdefault(session_key, [])
+        messages = cls._build_messages(history, text)
 
-        if response_text:
-            cls._append_history(history, text, response_text)
-        return response_text
+        # 工具层（Agent 1.5 / 阶段 1.5）：仅 chat_completions 风格注入 tools。
+        # 其它 api_style（anthropic/responses）本期不接工具，纯对话回退。
+        use_tools = (
+            cls._tool_calls_enabled
+            and cls._api_style == "chat_completions"
+            and bool(get_all_tools())
+        )
+        tools = get_all_tools() if use_tools else None
+
+        for _ in range(cls._max_tool_rounds + 1):
+            # 内部历史统一 chat 格式，出口按接口规格转换
+            if cls._api_style == "anthropic_messages":
+                url, payload, headers = cls._build_anthropic_request(messages)
+            elif cls._api_style == "openai_responses":
+                url, payload, headers = cls._build_responses_request(messages)
+            else:
+                url, payload, headers = cls._build_chat_completions_request(messages)
+
+            if tools is not None:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
+
+            try:
+                body = await cls._post_llm(url, payload, headers)
+            except RuntimeError as exc:
+                cls.last_error = f"{type(exc).__name__}: {exc}"
+                logger.error(f"[OpenAI] Chat completion failed: {cls.last_error}")
+                return None
+
+            choices = body.get("choices") if isinstance(body, dict) else None
+            choice = choices[0] if choices else {}
+            msg = choice.get("message", {}) if isinstance(choice, dict) else {}
+            finish = choice.get("finish_reason")
+
+            # —— 工具调用回环 ——
+            if finish == "tool_calls" and tools is not None:
+                tool_calls = msg.get("tool_calls") or []
+                if tool_calls:
+                    # 回填 assistant 消息；reasoning_content 守卫见下。
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": msg.get("content") or "",
+                        "tool_calls": tool_calls,
+                    }
+                    rc = msg.get("reasoning_content")
+                    if rc:
+                        # T8.2 守卫：thinking 模式带 tools 时，后续每轮必须完整回传
+                        # assistant 的 reasoning_content，缺失直接 400。仅当响应确实
+                        # 携带时才带回——非 thinking 模型不会带此字段，故对它们无影响。
+                        assistant_msg["reasoning_content"] = rc
+                    messages.append(assistant_msg)
+                    for tc in tool_calls:
+                        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                        result = await execute_tool(fn.get("name"), fn.get("arguments", "{}"))
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "content": result,
+                        })
+                    logger.info(
+                        f"[OpenAI] tool round: {[tc.get('function', {}).get('name') for tc in tool_calls]}"
+                    )
+                    continue  # 带着工具结果再请求一轮
+                logger.warning("[OpenAI] finish_reason=tool_calls but empty tool_calls, fall back to text")
+
+            # —— 普通文本完成 ——
+            if cls._api_style == "anthropic_messages":
+                response_text = cls._extract_anthropic_text(body)
+            elif cls._api_style == "openai_responses":
+                response_text = cls._extract_responses_text(body)
+            else:
+                response_text = cls._extract_response_text(body)
+
+            if response_text:
+                cls._append_history(history, text, response_text)
+            return response_text
+
+        logger.warning("[OpenAI] tool rounds exceeded max_tool_rounds, no final text returned")
+        return None
 
     @classmethod
     def _build_chat_completions_request(cls, messages: list[dict[str, str]]):

@@ -1,6 +1,6 @@
 services:
   open-xiaoai-bridge:
-    image: ghcr.nju.edu.cn/coderzc/open-xiaoai-bridge:latest
+    image: open-xiaoai-bridge:home      # 路径A：镜像由 WSL 侧 docker build -t :home → save tar → scp → NAS docker load 提供；compose 仅引用,不在此构建
     container_name: open-xiaoai-bridge
     restart: unless-stopped
     # host 网络：4399/9092 直接监听群晖宿主，音箱与 HA 均可直达，无需端口映射
@@ -15,6 +15,8 @@ services:
       # 面板「外部服务」探测列表（JSON 数组，可选）；纯状态监控，与对话后端无关，留空不展示
       - MONITOR_SERVICES=${MONITOR_SERVICES}
       - RUNTIME_OVERRIDES_PATH=/app/data/runtime-overrides.json
+      # AI 对话后端「一键切换」预设库（按钮配置）；与覆盖层分离，同挂 ./data 卷持久化
+      - BACKEND_PRESETS_PATH=/app/data/backend-presets.json
       # 以下从 .env 读取（.env 不入库）
       - OPEN_XIAOAI_TOKEN=${OPEN_XIAOAI_TOKEN}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
@@ -23,6 +25,6 @@ services:
     volumes:
       - ./config.py:/app/config.py        # 热重载：改完约 1 秒生效
       - ./models:/app/core/models         # VAD + KWS 模型（xiaoai_asr 模式不需要 ASR 大模型）
-      - ./data:/app/data                  # 面板运行时覆盖层持久化（runtime-overrides.json）
+      - ./data:/app/data                  # 面板运行时覆盖层（runtime-overrides.json）+ 后端预设库（backend-presets.json）持久化
     stdin_open: true
     tty: true

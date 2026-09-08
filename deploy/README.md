@@ -1,7 +1,7 @@
 # 家庭部署手册（deploy/）
 
 > 目标：群晖 DS416play 上运行 open-xiaoai-bridge，小爱 Pro(LX06) 经 client 连接，
-> 实现：免唤醒/截胡双指令表场景控制 + 「你好贾维斯」DeepSeek 连续对话 + 「你好老师」
+> 实现：免唤醒/截胡双指令表场景控制 + 「你好贾维斯」OpenAI 兼容大模型连续对话（当前 DeepSeek，可经 admin 面板热切换）+ 「你好老师」
 > 学科辅导（独立人设）+ Agent 工具层（weather/hass/music 只读工具）+ 「停止聆听」隐私开关
 > + HA↔音箱双向 TTS + 后台管理面板。
 > 对应总方案：`../../doc/plan/home-theater-automation-plan.md` Phase C/D；构建与镜像边界见 [REBUILD.md](REBUILD.md)。
@@ -10,7 +10,7 @@
 
 - 群晖 SSH：`ssh zxsadmin@10.10.10.2`，docker 全路径 `/usr/local/bin/docker`
 - LX06 已刷补丁固件、client-rust 可运行（SSH：`ssh -o HostKeyAlgorithms=+ssh-rsa root@10.10.10.20`，密码 open-xiaoai）
-- DeepSeek API Key、HA 长期访问令牌
+- 大模型 API Key（当前 DeepSeek，OpenAI 兼容；可经 admin 面板热切换）、HA 长期访问令牌
 
 ## 2. 本地准备（WSL2）
 
@@ -25,18 +25,16 @@ cp .env.example .env && vim .env      # 六项见 .env.example：必填 4（OPEN
 
 > ⚠ **fork 深度演进，代码烤进镜像**：kws/api_server/openai.py/tools 等改动不会进 bind-mount，
 > 拉上游镜像或纯 `restart` 会丢功能（喊「停止聆听」时 `disable_listening()` 在镜像里缺失 → `AttributeError`）。
-> 镜像构建走 [REBUILD.md](REBUILD.md)：把 `bridge/` 源码 rsync 到群晖 `/volume2/docker/open-xiaoai-bridge-src`，
-> 在群晖上 `docker build -t open-xiaoai-bridge:home /volume2/docker/open-xiaoai-bridge-src`，
-> 再 `cd /volume2/docker/open-xiaoai-bridge && docker compose up -d` 重建。本节只负责 bind-mount 文件与启动。
+> 镜像构建走 [REBUILD.md](REBUILD.md)（**推荐路径 A：WSL 构建后推 NAS**；路径 B 为群晖本地构建）。本节只负责 bind-mount 文件与启动。
 
 ```bash
 # 1) 部署 bind-mount 文件（config.py 已含 T7.6 关键词与路由钩子；.env 不入库需自备）
 #    ⚠ scp 必须 -O：DSM 的 SFTP 视图受限（chroot），系统路径报 No such file or directory
 ssh zxsadmin@10.10.10.2 'mkdir -p /volume2/docker/open-xiaoai-bridge'
 scp -O -r config.py .env zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
-# 2) 镜像已在群晖本地构建（见 REBUILD.md §1）：open-xiaoai-bridge:home
-#    —— 不 scp 本机 docker-compose.yml：其 build.context 在群晖解析错误（会指到 /volume2/docker 而非源码）。
-#       群晖部署目录的 compose 固定引用 image: open-xiaoai-bridge:home（无 build 指令），由手动 docker build 提供。
+# 2) 镜像由显式 `docker build -t open-xiaoai-bridge:home` 提供（推荐路径 A：WSL 构建后推 NAS，见 REBUILD.md §1）
+#    —— 不 scp 本机 docker-compose.yml：NAS 部署目录的 compose 已固定引用 image: open-xiaoai-bridge:home（无 build 段），
+#       与 PC 同源；盲目覆盖可能冲掉 NAS 侧专有调整。
 # 3) 重建并启动（models/ 经 bind-mount 提供，已在部署目录；容器启动重编 keywords.txt）
 ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && /usr/local/bin/docker compose up -d'
 ```
@@ -72,9 +70,9 @@ reboot
 2. 浏览器打开 **http://10.10.10.2:9092/admin** → 输入 `.env` 里的 `ADMIN_TOKEN` → 总览页各卡片正常、`MONITOR_SERVICES` 配置的外部服务显示在线
 3. `docker logs -f open-xiaoai-bridge` → 出现音箱连接 + `get_version` 日志
 4. 音箱喊 **「测试模式」** → 播报「桥接正常，家庭中枢在线」
-5. 音箱喊 **「你好贾维斯」** → 播「我在」→ 问一句天气 → DeepSeek 回答（多轮追问验证上下文；喊「小爱同学」验证可打断）
+5. 音箱喊 **「你好贾维斯」** → 播「我在」→ 问一句天气 → OpenAI 兼容大模型回答（当前 DeepSeek，可热切换；多轮追问验证上下文；喊「小爱同学」验证可打断）
 6. 音箱喊 **「你好老师」** → 进入辅导人设（四年级导师，苏格拉底式引导、不直接报答案）；喊「你好贾维斯」切回后确认人格无串台
-7. 音箱喊 **「贾维斯，现在上海天气怎么样」**（工具回环）→ 回答来自 weather 工具而非纯生成；bridge 日志见 tool_calls 回环
+7. 音箱先喊 **「你好贾维斯」** 进对话（听到"我在"），再说 **「现在上海天气怎么样」** → 回答来自 weather 工具而非纯生成；bridge 日志见 `tool round: ['weather_get']` 回环。**注意：连说"贾维斯，…"无效**（唤醒词是完整「你好贾维斯」，KWS 词表无单独「贾维斯」）
 8. HA 侧建一个临时脚本调 `POST http://10.10.10.2:9092/api/play/text`（body `{"text":"来自HA的播报"}`）→ 音箱说话
 9. 音箱喊 **「停止聆听」** → 麦克风静音 + KWS 停止分析 + TTS「已停止聆听」（隐私开关，语音通道自关）；`curl -X POST http://10.10.10.2:9092/api/audio_input`（免 token、无需 body，为唯一恢复路径）→ mic 恢复 on + KWS 恢复分析，返回 `{"success":true,"mic":"on","listening":true}`
 

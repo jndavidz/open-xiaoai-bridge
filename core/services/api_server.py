@@ -12,7 +12,7 @@ from typing import Any
 
 import open_xiaoai_server
 from aiohttp import web
-from core.ref import get_speaker, get_xiaoai
+from core.ref import get_speaker, get_xiaoai, get_kws
 from core.services.admin_api import AdminAPI
 from core.services.tts.doubao import DoubaoTTS
 from core.utils.config import ConfigManager
@@ -42,6 +42,7 @@ class APIServer:
         self.app.router.add_get("/api/status", self.handle_get_status)
         self.app.router.add_post("/api/wakeup", self.handle_wakeup)
         self.app.router.add_post("/api/interrupt", self.handle_stop)
+        self.app.router.add_post("/api/audio_input", self.handle_audio_input)  # T7.6 恢复通道
         self.app.router.add_get("/api/health", self.handle_health)
         # TTS endpoints
         self.app.router.add_post("/api/tts/doubao", self.handle_tts_doubao)
@@ -376,6 +377,64 @@ class APIServer:
             return web.json_response(
                 {"success": False, "error": str(e)},
                 status=500
+            )
+
+    async def handle_audio_input(self, request: web.Request) -> web.Response:
+        """
+        POST /api/audio_input
+        T7.6 恢复通道：解除「停止聆听」隐私开关（硬件麦克风恢复 + KWS 恢复分析）。
+        一旦用户喊「停止聆听」，语音通道自关，本端点是唯一可靠的恢复路径。
+        请求体（可选）：{"text": "..."} 预留给未来"经 HTTP 喂入音频/文本"场景，
+        本期仅作恢复开关使用。
+
+        Response:
+            {"success": true, "mic": "on"/"off", "listening": bool}
+        """
+        try:
+            speaker = get_speaker()
+            kws = get_kws()
+            if not speaker:
+                return web.json_response(
+                    {"success": False, "error": "Speaker not initialized"},
+                    status=503,
+                )
+
+            # 解除停止聆听：硬件麦克风恢复
+            try:
+                await speaker.set_mic(True)
+            except Exception as e:
+                logger.warning(f"[APIServer] set_mic(True) on audio_input failed: {e}")
+
+            # T7.6 修复：set_mic(True) 的 ubus event:7 不会清除设备端静音标志
+            # (/tmp/mipns/mute，由 set_mic(False) 的 ubus event:8 在宿主侧创建)，
+            # 导致宿主机仍静音、KWS 收不到语音、恢复后④⑤ 无响应。
+            # 显式删掉该宿主侧标志，与「停止聆听」时对称地真正恢复采集。
+            try:
+                await speaker.run_shell("rm -f /tmp/mipns/mute")
+            except Exception as e:
+                logger.warning(f"[APIServer] rm /tmp/mipns/mute on audio_input failed: {e}")
+
+            # KWS 恢复关键词分析
+            if kws:
+                kws.enable_listening()
+            logger.info("[APIServer] /api/audio_input 恢复: mic unmuted + KWS listening enabled")
+
+            mic = "off"
+            try:
+                mic = await speaker.get_mic()
+            except Exception:
+                pass
+
+            return web.json_response({
+                "success": True,
+                "mic": mic,
+                "listening": not (kws and kws.is_listening_disabled()),
+            })
+        except Exception as e:
+            logger.error(f"[APIServer] Error in audio_input: {e}")
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500,
             )
 
     async def handle_health(self, request: web.Request) -> web.Response:

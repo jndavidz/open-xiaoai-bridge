@@ -15,7 +15,7 @@
 - 任何 `core/` 下的代码改动
 
 只有 `config.py` 是 bind-mount（`./config.py:/app/config.py`），改它能热重载参数值，
-**但代码改动不会进容器**。因此 compose 已改为 `build: { context: .. }` + `image: open-xiaoai-bridge:local`，
+**但代码改动不会进容器**。因此部署统一用本地构建产物 `image: open-xiaoai-bridge:home`（compose **不含 build 段**，镜像由显式 `docker build -t open-xiaoai-bridge:home` 提供，见 §1），
 从 fork 源码（`bridge/` 根）本地构建。
 
 > ⚠️ 直接 `docker compose restart` 上游镜像 = 功能 broken：喊「停止聆听」时
@@ -61,8 +61,8 @@ DOCKER_CONFIG=/tmp/docker-config \
 /usr/local/bin/docker build -t open-xiaoai-bridge:home /volume2/docker/open-xiaoai-bridge-src
 ```
 
-> PC 侧 `bridge/deploy/docker-compose.yml` 另含 `build: { context: .. }` + `image: open-xiaoai-bridge:local` 变体，
-> 适用于把 `bridge/` 当上下文的工作站；**群晖部署统一用 `open-xiaoai-bridge:home` 这个 tag**（A/B 两路径产物同名）。
+> PC 侧 `bridge/deploy/docker-compose.yml` 与群晖部署目录的 compose **同源**——均为 `image: open-xiaoai-bridge:home`（无 build 段）；
+> 构建由显式 `docker build -t open-xiaoai-bridge:home` 完成（路径 A 在 WSL、路径 B 在 NAS），不走 compose build。**群晖部署统一用 `:home` 这个 tag**（A/B 两路径产物同名）。
 
 - 构建上下文 `.dockerignore` 已排除 `.git`/`.venv`/`target`/`deploy`/`models`，上下文干净。
 - 镜像内 `keywords.txt` 由 `Dockerfile` CMD 在**容器启动时**经 `keywords.py` 编译，
@@ -75,9 +75,9 @@ DOCKER_CONFIG=/tmp/docker-config \
 ssh -o BatchMode=yes zxsadmin@10.10.10.2 \
   'cd /volume2/docker/open-xiaoai-bridge && /usr/local/bin/docker compose up -d --force-recreate'
 
-# 路径 B 之后（在 NAS 本地构建完）：同上一条即可；或在 PC 侧 compose 变体下：
-cd bridge/deploy
-docker compose up -d --build --force-recreate
+# 路径 B 之后（在 NAS 本地构建完）：同上一条即可；或在 WSL 工作站本地起：
+cd bridge && docker build -t open-xiaoai-bridge:home .
+cd bridge/deploy && docker compose up -d --force-recreate
 ```
 
 容器启动即重跑 CMD → 重新编译 `keywords.txt`（含新增唤醒词）+ 以 fork 代码运行 `main.py`。
@@ -92,8 +92,8 @@ docker compose up -d --build --force-recreate
 | # | 项目 | 操作 | 期望 |
 |---|------|------|------|
 | 1 | 容器健康 | `docker compose ps` / 日志 `docker compose logs -f` | 无启动报错；见 `关键词文件生成完成` |
-| 2 | T7.3 WOL | 说「打开电脑」 | NUC 唤醒（HA `script.wake_nuc` 触发） |
-| 3 | T8 工具闭环 | 说「北京天气怎么样」 | DeepSeek 调度 Open-Meteo 工具，返回实况天气 |
+| 2 | T7.3 WOL | **须说"小爱同学，打开电脑"**（xiaoai 截胡）；直接说"打开电脑"无效 | NUC 唤醒（HA `switch.nuc_hifi_wol` turn_on）→ 实测 `HA switch.turn_on OK` ✓ |
+| 3 | T8 工具闭环 | **先喊"你好贾维斯"进对话再问**；连说"贾维斯，北京天气怎么样"无效（唤醒词是"你好贾维斯"） | OpenAI 兼容后端调度 Open-Meteo → 实测 `tool round: ['weather_get']` ✓ |
 | 4 | T7.6 关 | 喊「停止聆听」 | 麦克风停 + TTS「已停止聆听」；日志见 `set_mic(False)` / `disable_listening()` |
 | 5 | T7.6 开（唯一恢复路径） | `curl -X POST http://<nas>:9092/api/audio_input` | `{"success":true,"mic":"on","listening":true}` |
 | 6 | T7.6 静默回退 | 停止聆听后再喊任意词 | 无响应（语音通道已关，符合设计） |
@@ -106,8 +106,21 @@ docker compose up -d --build --force-recreate
 | 新增/删除 `wakeup.keywords` 唤醒词 | 必须**重建+recreate**（词表仅启动时编译） |
 | 任何 `core/` 代码改动 | 必须**重建+recreate**（代码烤进镜像） |
 
-## 5. 已知待回写结论（实机验收后补 runbook）
+## 5. 实机验收结论（2026-08-29 回填）
 
-- `speaker.set_mic(False)` 是否同时停掉 GlobalStream 本地 PCM 采集；
-  若只停云 ASR、本地 KWS 仍吃 PCM，则 `listen_disabled` 持久暂停已兜底，无需额外改动。
-- T7.5 截胡边界周级调优（`XIAOAI_COMMANDS` 当前仅「打开电脑」最小集）。
+### 5.1 set_mic / 静音机制（T7.6）
+- `set_mic(False)` 经 `run_shell` 在**设备宿主侧**建 `/tmp/mipns/mute` → 设备真静音（隐私关闭成立）。
+- **关键坑（已修复）**：`set_mic(True)` 只发 ubus event:7，**不删 mute 文件** → 设备仍静音 → ④⑤ 收不到语音零事件。
+  修复：`handle_audio_input` 在 `set_mic(True)` 后显式 `rm -f /tmp/mipns/mute`（与关对称）+ 日志 `[APIServer] /api/audio_input 恢复: mic unmuted`；修复已入镜像 `b8cc1961`，恢复通道现返回 `mic:"on"`。
+- 本地 KWS 仍吃 PCM（二次"停止聆听"能触发=KWS 离线识别不依赖云语音流）；`listen_disabled` 持久暂停兜底成立，**无需**改动 GlobalStream。
+
+### 5.2 截胡边界与唤醒词（T7.3 / T8）
+- 「打开电脑」=`XIAOAI_COMMANDS`（xiaoai 分支）→ HA `switch.nuc_hifi_wol` WOL。
+  **须"小爱同学，打开电脑"**（小爱唤醒才把指令转发 bridge 截胡）；直接说"打开电脑"无小爱前缀→不进 bridge→不唤醒。
+- AI 对话唤醒词 = **「你好贾维斯」**（默认 agent:javis）/ **「你好老师」**（导师）。
+  **连说"贾维斯，北京天气怎么样"无效**——KWS 词表仅「你好贾维斯」整词，无单独「贾维斯」。须分两步：喊「你好贾维斯」听到"我在"→再说问题。
+- 文档已修正：`README` 第75行错误样例"贾维斯，现在上海天气怎么样"（连说无效）已改为「你好贾维斯」进对话再问；「贾维斯」短唤醒词**保持现状不加**（用户 08-29 决定）。
+
+### 5.3 本轮验收结果（全绿）
+- ① 停止聆听关+TTS ✓　② 静默回退 ✓　③ 恢复 mic:on ✓
+- ④ NUC 唤醒 ✓（04:34 `HA switch.turn_on OK`）　⑤ 天气工具闭环 ✓（多次 `tool round: ['weather_get']`）

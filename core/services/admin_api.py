@@ -33,51 +33,27 @@ from core.ref import get_app, get_kws, get_vad, get_xiaoai
 from core.utils.config import ConfigManager
 from core.utils.log_buffer import get_memory_log_handler
 from core.utils.logger import logger
+import core.utils.backend_presets as backend_presets_mod
+from core.utils.backend_presets import BackendPresets, backend_presets, mask_secret
 from core.utils.runtime_overrides import runtime_overrides
 
 # ---------------------------------------------------------------- schema ----
 # 可通过面板编辑的白名单字段。type: string | int | float | bool | secret | select
 # secret 字段读取时只回掩码，保存留空=不修改，null=清除覆盖回落底层值。
 CONFIG_SCHEMA: list[dict[str, Any]] = [
+    # 「AI 对话后端」的地址/规格/模型/Key 已由预设条（/api/admin/presets）接管，
+    # 不再开放裸表单——切换预设即写入覆盖层，日常无需直接编辑。
+    # 仅保留 response_timeout 供微调；「清除覆盖」由独立端点提供（见 clear_overrides）。
     {
-        "id": "openai",
-        "title": "AI 对话后端",
-        "description": "贾维斯/老师等会话的上游服务。修改接口地址（含端口）、接口规格、模型名称或 API Key 后保存即热生效，下一次对话使用新配置。",
+        "id": "openai_advanced",
+        "title": "AI 对话后端 · 高级",
+        "description": "预设条之上的兜底项：响应超时可微调；「清除覆盖」会把地址/规格/模型/Key 的面板覆盖全部清空，回落 config.py / 环境变量注入的原始值（预设不受影响）。",
         "fields": [
-            {
-                "path": "openai.base_url",
-                "label": "接口地址 Base URL",
-                "type": "string",
-                "placeholder": "https://api.deepseek.com/v1",
-                "help": "含协议、主机、端口与路径前缀；按接口规格自动补全端点路径",
-            },
-            {
-                "path": "openai.api_style",
-                "label": "接口规格",
-                "type": "select",
-                "options": [
-                    {"value": "chat_completions", "label": "OpenAI Chat Completions（默认）"},
-                    {"value": "openai_responses", "label": "OpenAI Responses"},
-                    {"value": "anthropic_messages", "label": "Anthropic Messages"},
-                ],
-                "help": "上游 API 协议表面；Aurora 网关两种 OpenAI 表面均支持，其默认为 Responses",
-            },
-            {
-                "path": "openai.model",
-                "label": "模型名称 Model",
-                "type": "string",
-                "placeholder": "deepseek-chat",
-            },
-            {
-                "path": "openai.api_key",
-                "label": "API Key",
-                "type": "secret",
-                "help": "留空表示不修改；「清除」回落到环境变量注入的原始 Key",
-            },
             {
                 "path": "openai.response_timeout",
                 "label": "响应超时（秒）",
                 "type": "int",
+                "help": "对话请求的总超时；测速与预检另有各自更短的超时，互不影响",
             },
         ],
     },
@@ -116,6 +92,19 @@ _FIELD_INDEX: dict[str, dict[str, Any]] = {
 }
 
 _SECRET_MASK_TAIL = 4
+
+# ---------------------------------------------------------- 测速默认参数 ----
+# 测速只衡量「对话场景」：发一次真实对话请求，量端到端响应耗时 + 生成速度。
+# 默认多轮取最后 1 轮计入统计——首轮含 TLS/DNS 建连与服务端冷启动，
+# 不代表稳态体感，故前几轮只作预热。
+BENCH_DEFAULT_ROUNDS = 3
+BENCH_MAX_ROUNDS = 10
+BENCH_DEFAULT_MAX_TOKENS = 300
+BENCH_MAX_MAX_TOKENS = 2048
+BENCH_TIMEOUT_S = 60
+# 失败轮次的排序惩罚：失败项总分 = 惩罚 × 轮数，必定排在成功项之后
+BENCH_FAILURE_PENALTY_MS = 100_000
+BENCH_DEFAULT_PROMPT = "用三句话介绍你自己，并说明你能帮我做什么。"
 
 
 # ---------------------------------------------------------------- helpers ----
@@ -205,17 +194,94 @@ def _current_effective_values(dotted_paths: list[str]) -> dict[str, Any]:
     return values
 
 
+def _build_probe_headers(style: str, api_key: str) -> dict[str, str]:
+    """按接口规格构造鉴权头。
+
+    必须用「本次提交的待测 Key」——不能复用 OpenAIManager._headers()，
+    那会带上当前生效配置的旧 Key，导致换 Key 场景预检结果失真。
+    """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        if style == "anthropic_messages":
+            # Anthropic 官方鉴权头；同时保留 Bearer 兼容各类代理网关
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+    return headers
+
+
+def _build_probe_request(
+    style: str, base_url: str, model: str, *, prompt: str, max_tokens: int
+) -> tuple[str, dict[str, Any]]:
+    """构造一次对话探测请求（端点 URL + payload），max_tokens 由调用方压控。"""
+    base_url = base_url.rstrip("/")
+    if style == "anthropic_messages":
+        probe_url = base_url if base_url.endswith("/messages") else f"{base_url}/messages"
+        payload: dict[str, Any] = {
+            "model": model or "claude-3-5-haiku-latest",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+    elif style == "openai_responses":
+        probe_url = base_url if base_url.endswith("/responses") else f"{base_url}/responses"
+        payload = {
+            "model": model or "gpt-4o-mini",
+            "input": [{"role": "user", "content": prompt}],
+            "max_output_tokens": max_tokens,
+            "stream": False,
+        }
+    else:
+        probe_url = (
+            base_url
+            if base_url.endswith("/chat/completions")
+            else f"{base_url}/chat/completions"
+        )
+        payload = {
+            "model": model or "gpt-4o-mini",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+    return probe_url, payload
+
+
+def _extract_probe_text(style: str, body: Any) -> str:
+    """从探测响应中取文本，用于测速统计输出量（复用 OpenAIManager 的解析语义）。"""
+    from core.openai import OpenAIManager
+
+    if style == "anthropic_messages":
+        return OpenAIManager._extract_anthropic_text(body) or ""
+    if style == "openai_responses":
+        return OpenAIManager._extract_responses_text(body) or ""
+    return OpenAIManager._extract_response_text(body) or ""
+
+
+def _count_tokens(body: Any, text: str) -> int | None:
+    """取上游自报的 completion tokens；缺失返回 None（前端显示 —）。"""
+    usage = body.get("usage") if isinstance(body, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    for key in ("completion_tokens", "output_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)) and value >= 0:
+            return int(value)
+    return None
+
+
 # --------------------------------------------------------------- handlers ----
 class AdminAPI:
     """Admin 路由注册中心与处理器集合。"""
 
-    def __init__(self, static_dir: Optional[str] = None):
+    def __init__(self, static_dir: Optional[str] = None, presets: BackendPresets | None = None):
         self.config = ConfigManager.instance()
         if static_dir is None:
             static_dir = os.path.join(
                 os.path.dirname(__file__), "admin_static"
             )
         self.static_dir = static_dir
+        # 预设库：默认用模块级单例；测试可注入独立实例（指向临时目录）
+        self.presets = presets if presets is not None else backend_presets
         self.started_at = time.time()
 
     # ---- auth ----
@@ -265,6 +331,15 @@ class AdminAPI:
         app.router.add_post("/api/admin/config/test", self.handle_test_config)
         app.router.add_get("/api/admin/logs", self.handle_get_logs)
         app.router.add_post("/api/admin/logs/level", self.handle_log_level)
+        # AI 对话后端预设库（一键切换 / 测速）
+        app.router.add_get("/api/admin/presets", self.handle_list_presets)
+        app.router.add_post("/api/admin/presets", self.handle_create_preset)
+        app.router.add_put("/api/admin/presets", self.handle_reorder_presets)
+        app.router.add_put("/api/admin/presets/{pid}", self.handle_update_preset)
+        app.router.add_delete("/api/admin/presets/{pid}", self.handle_delete_preset)
+        app.router.add_post("/api/admin/presets/{pid}/switch", self.handle_switch_preset)
+        app.router.add_post("/api/admin/presets/benchmark", self.handle_benchmark)
+        app.router.add_post("/api/admin/presets/clear-overrides", self.handle_clear_overrides)
         logger.info("[AdminAPI] Admin panel routes registered (/admin)")
 
     # ---- page ----
@@ -587,50 +662,15 @@ class AdminAPI:
 
         # 用「本次提交的待测 Key」构造探测头——不能复用 OpenAIManager._headers()，
         # 那会带上当前生效配置的旧 Key，导致换 Key 场景预检结果失真
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-            if style == "anthropic_messages":
-                headers["x-api-key"] = api_key
-                headers["anthropic-version"] = "2023-06-01"
+        headers = _build_probe_headers(style, str(api_key))
 
         started = time.monotonic()
         timeout = aiohttp.ClientTimeout(total=15)
 
-        # 各规格的对话预检请求（max_tokens 压到最小）
-        if style == "anthropic_messages":
-            probe_url = (
-                base_url if base_url.endswith("/messages")
-                else f"{base_url}/messages"
-            )
-            probe_payload: dict[str, Any] = {
-                "model": model or "claude-3-5-haiku-latest",
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 1,
-                "stream": False,
-            }
-        elif style == "openai_responses":
-            probe_url = (
-                base_url if base_url.endswith("/responses")
-                else f"{base_url}/responses"
-            )
-            probe_payload = {
-                "model": model or "gpt-4o-mini",
-                "input": [{"role": "user", "content": "ping"}],
-                "max_output_tokens": 16,
-                "stream": False,
-            }
-        else:
-            probe_url = (
-                base_url if base_url.endswith("/chat/completions")
-                else f"{base_url}/chat/completions"
-            )
-            probe_payload = {
-                "model": model or "gpt-4o-mini",
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 1,
-                "stream": False,
-            }
+        # 各规格的对话预检请求（max_tokens 压到最小，只验连通不看内容）
+        probe_url, probe_payload = _build_probe_request(
+            style, base_url, model, prompt="ping", max_tokens=1
+        )
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             # 第一优先（Anthropic 除外）：GET /models 轻探测
@@ -714,6 +754,337 @@ class AdminAPI:
                     }
                 )
 
+    # ---- AI 对话后端预设（一键切换） ----
+
+    async def handle_list_presets(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "success": True,
+                "data": {
+                    "presets": self.presets.all(),
+                    "path": str(self.presets.path),
+                    "styles": list(backend_presets_mod.API_STYLES),
+                },
+            }
+        )
+
+    async def handle_create_preset(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"success": False, "error": "Invalid JSON"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"success": False, "error": "body must be an object"}, status=400)
+
+        # 复制现有按钮：服务端从源预设取明文（含 api_key），绕开「列表只给掩码」的限制
+        source_id = str(body.get("copy_from") or "").strip()
+        if source_id:
+            source = self.presets.get_raw(source_id)
+            if source is None:
+                return web.json_response(
+                    {"success": False, "error": f"copy_from preset not found: {source_id}"},
+                    status=404,
+                )
+            draft = {k: v for k, v in source.items() if k not in ("id", "name")}
+            name = str(body.get("name") or "").strip()
+            draft["name"] = name or f"{source.get('name')} 副本"
+            body = {**draft, **{k: v for k, v in body.items() if k in ("name",)}}
+
+        preset = self.presets.add(body)
+        logger.info(f"[AdminAPI] Backend preset created: {preset['name']} ({preset['id']})"
+                    + (f" (copied from {source_id})" if source_id else ""))
+        return web.json_response({"success": True, "data": {"preset": preset}})
+
+    async def handle_reorder_presets(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"success": False, "error": "Invalid JSON"}, status=400)
+        ids = (body or {}).get("ids")
+        if not isinstance(ids, list):
+            return web.json_response(
+                {"success": False, "error": "Missing required field: ids (array)"}, status=400
+            )
+        return web.json_response(
+            {"success": True, "data": {"presets": self.presets.reorder([str(i) for i in ids])}}
+        )
+
+    async def handle_update_preset(self, request: web.Request) -> web.Response:
+        pid = request.match_info["pid"]
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"success": False, "error": "Invalid JSON"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"success": False, "error": "body must be an object"}, status=400)
+        updated = self.presets.update(pid, body)
+        if updated is None:
+            return web.json_response({"success": False, "error": "preset not found"}, status=404)
+        return web.json_response({"success": True, "data": {"preset": updated}})
+
+    async def handle_delete_preset(self, request: web.Request) -> web.Response:
+        pid = request.match_info["pid"]
+        if not self.presets.delete(pid):
+            return web.json_response({"success": False, "error": "preset not found"}, status=404)
+        logger.info(f"[AdminAPI] Backend preset deleted: {pid}")
+        return web.json_response({"success": True, "data": {"deleted": pid}})
+
+    async def handle_switch_preset(self, request: web.Request) -> web.Response:
+        """把某条预设写入覆盖层并热生效（一键切换）。
+
+        预设可能缺 api_key（如本地 ollama），故按「预设里实际存在的字段」展开 patch：
+        不写 null，避免把用户没填的字段清成空（null 在覆盖层 = 删除回落底层值）。
+        """
+        pid = request.match_info["pid"]
+        preset = self.presets.get_raw(pid)
+        if preset is None:
+            return web.json_response({"success": False, "error": "preset not found"}, status=404)
+
+        patch = self.presets.to_patch(preset)
+        if not patch:
+            return web.json_response(
+                {"success": False, "error": "预设内容为空，无可切换字段"}, status=400
+            )
+
+        applied = _flatten_leaves(patch)
+        runtime_overrides.update(patch)
+        # 立即热重载：ConfigManager listeners（OpenAIManager）同步刷新
+        self.config.reload_app_config()
+        logger.info(
+            f"[AdminAPI] Switched AI backend to preset {preset.get('name')} "
+            f"({pid}): {', '.join(applied)}"
+        )
+
+        values = _current_effective_values(list(_FIELD_INDEX.keys()))
+        return web.json_response(
+            {
+                "success": True,
+                "data": {
+                    "applied": applied,
+                    "preset": {k: v for k, v in preset.items() if k != "api_key"},
+                    "values": {
+                        p: (
+                            _mask_secret(v)
+                            if _FIELD_INDEX[p]["type"] == "secret"
+                            else v
+                        )
+                        for p, v in values.items()
+                    },
+                },
+            }
+        )
+
+    # ---- 测速（对话场景：非流式端到端） ----
+
+    async def handle_clear_overrides(self, request: web.Request) -> web.Response:
+        """清除地址/规格/模型/Key 的面板覆盖，回落 config.py / 环境变量原始值。
+
+        逃生舱：预设库接管日常切换后，用户可能把覆盖层改得面目全非（如误填了
+        不可达地址），需要一条不依赖任何预设的「回到出厂」通道。response_timeout
+        与其它 section 的覆盖不受影响；预设列表原样保留。
+        """
+        from core.utils.backend_presets import FIELD_PATHS
+
+        cleared: list[str] = []
+        for dotted in FIELD_PATHS.values():
+            if runtime_overrides.contains(dotted):
+                runtime_overrides.update(path_to_override(dotted, None))
+                cleared.append(dotted)
+        if cleared:
+            self.config.reload_app_config()
+            logger.info(f"[AdminAPI] Cleared openai overrides: {', '.join(cleared)}")
+
+        values = _current_effective_values(
+            ["openai.base_url", "openai.api_style", "openai.model",
+             "openai.api_key", "openai.response_timeout"]
+        )
+        return web.json_response(
+            {
+                "success": True,
+                "data": {
+                    "cleared": cleared,
+                    "values": {
+                        p: (
+                            mask_secret(v) if p == "openai.api_key" else v
+                        )
+                        for p, v in values.items()
+                    },
+                },
+            }
+        )
+
+    async def handle_benchmark(self, request: web.Request) -> web.Response:
+        """对一组候选后端做对话场景测速排序。
+
+        请求体：
+            {
+              "ids": ["a", "b"],          // 留空/缺省 = 全部预设
+              "prompt": "…",             // 可选
+              "rounds": 3,               // 每候选轮数（最后 1 轮计入统计）
+              "max_tokens": 300          // 可选
+            }
+
+        统计口径（对话体感）：
+            - ok_rounds / rounds：成功轮数
+            - avg_ms / min_ms：端到端耗时（取成功轮）
+            - tokens：最后一轮的 completion tokens（上游自报，缺失为 null）
+            - score：avg_ms + 失败惩罚(BENCH_FAILURE_PENALTY_MS)；纯失败项排最后
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+
+        raw_ids = body.get("ids")
+        if raw_ids is None:
+            targets = self.presets.all(mask=False)
+        else:
+            if not isinstance(raw_ids, list):
+                return web.json_response(
+                    {"success": False, "error": "ids must be an array"}, status=400
+                )
+            targets = [
+                p for p in (self.presets.get_raw(str(i)) for i in raw_ids) if p is not None
+            ]
+        if not targets:
+            return web.json_response(
+                {"success": True, "data": {"results": [], "config": {}}}
+            )
+
+        try:
+            rounds = int(body.get("rounds", BENCH_DEFAULT_ROUNDS))
+        except (TypeError, ValueError):
+            rounds = BENCH_DEFAULT_ROUNDS
+        # 首轮预热：rounds 为实际发起的请求数，其中第 1 轮不计入统计
+        rounds = max(1, min(BENCH_MAX_ROUNDS, rounds))
+
+        try:
+            max_tokens = int(body.get("max_tokens", BENCH_DEFAULT_MAX_TOKENS))
+        except (TypeError, ValueError):
+            max_tokens = BENCH_DEFAULT_MAX_TOKENS
+        max_tokens = max(16, min(BENCH_MAX_MAX_TOKENS, max_tokens))
+
+        prompt = str(body.get("prompt") or BENCH_DEFAULT_PROMPT).strip() or BENCH_DEFAULT_PROMPT
+
+        # 并发测各候选（候选之间并行；同一候选的多轮内部串行，保证预热顺序）
+        results = await asyncio.gather(
+            *[self._benchmark_one(p, rounds, prompt, max_tokens) for p in targets]
+        )
+
+        ranked = sorted(
+            results,
+            key=lambda r: (r["score"] is None, r["score"] if r["score"] is not None else 0),
+        )
+        return web.json_response(
+            {
+                "success": True,
+                "data": {
+                    "results": ranked,
+                    "config": {
+                        "rounds": rounds,
+                        "prompt": prompt,
+                        "max_tokens": max_tokens,
+                        "failure_penalty_ms": BENCH_FAILURE_PENALTY_MS,
+                    },
+                },
+            }
+        )
+
+    async def _benchmark_one(
+        self, preset: dict[str, Any], rounds: int, prompt: str, max_tokens: int
+    ) -> dict[str, Any]:
+        """对单个预设跑 rounds 轮对话测速，返回聚合结果。"""
+        base_url = str(preset.get("base_url") or "").strip()
+        style = str(preset.get("api_style") or "chat_completions").strip()
+        model = str(preset.get("model") or "")
+        api_key = str(preset.get("api_key") or "")
+
+        result: dict[str, Any] = {
+            "id": preset.get("id"),
+            "name": preset.get("name"),
+            "model": model,
+            "base_url": base_url,
+            "api_style": style,
+            "rounds": rounds,
+            "ok": False,
+            "ok_rounds": 0,
+            "avg_ms": None,
+            "min_ms": None,
+            "last_ms": None,
+            "tokens": None,
+            "chars": None,
+            "score": None,
+            "error": None,
+            "preview": None,
+        }
+
+        if not base_url:
+            result["error"] = "base_url 为空"
+            result["score"] = BENCH_FAILURE_PENALTY_MS * rounds
+            return result
+
+        headers = _build_probe_headers(style, api_key)
+        probe_url, payload = _build_probe_request(
+            style, base_url, model, prompt=prompt, max_tokens=max_tokens
+        )
+
+        durations: list[int] = []
+        last_error: str | None = None
+        last_tokens: int | None = None
+        last_chars: int | None = None
+        preview: str | None = None
+
+        timeout = aiohttp.ClientTimeout(total=BENCH_TIMEOUT_S)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for round_index in range(rounds):
+                started = time.monotonic()
+                try:
+                    async with session.post(probe_url, json=payload, headers=headers) as resp:
+                        body = await resp.json(content_type=None)
+                        elapsed = int((time.monotonic() - started) * 1000)
+                        if resp.status >= 400:
+                            message = body.get("error", body) if isinstance(body, dict) else body
+                            last_error = f"HTTP {resp.status}: {str(message)[:200]}"
+                            continue
+                        # 首轮作预热：含 TLS/DNS 建连与服务端冷启动，不代表稳态体感，
+                        # 不计入统计（rounds=1 时无预热，仅测这一轮）
+                        if round_index > 0 or rounds == 1:
+                            durations.append(elapsed)
+                        text = _extract_probe_text(style, body)
+                        last_tokens = _count_tokens(body, text)
+                        last_chars = len(text) if text else 0
+                        preview = text[:120] if text else None
+                except asyncio.TimeoutError:
+                    last_error = f"timeout（>{BENCH_TIMEOUT_S}s）"
+                except aiohttp.ClientError as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                except Exception as exc:  # 解析等意外，不中断其余候选
+                    last_error = f"{type(exc).__name__}: {exc}"
+
+        scored_rounds = max(1, rounds - 1) if rounds > 1 else 1
+        result["ok_rounds"] = len(durations)
+        result["rounds"] = scored_rounds          # 语义改为「计入统计的轮数」
+        result["total_rounds"] = rounds           # 实际发起的请求数（含预热）
+        result["last_ms"] = durations[-1] if durations else None
+        result["tokens"] = last_tokens
+        result["chars"] = last_chars
+        result["preview"] = preview
+        if durations:
+            result["ok"] = True
+            result["avg_ms"] = int(sum(durations) / len(durations))
+            result["min_ms"] = min(durations)
+            failed = scored_rounds - len(durations)
+            # 部分失败只惩罚失败轮次，仍能参与排序（否则 3 轮挂 1 轮就被挤到末尾）
+            result["score"] = result["avg_ms"] + failed * BENCH_FAILURE_PENALTY_MS
+        else:
+            result["score"] = BENCH_FAILURE_PENALTY_MS * scored_rounds
+        result["error"] = (
+            last_error if not durations
+            else (last_error if len(durations) < scored_rounds else None)
+        )
+        return result
+
     # ---- logs ----
 
     async def handle_get_logs(self, request: web.Request) -> web.Response:
@@ -765,6 +1136,22 @@ def safe_is_connected(manager_cls) -> bool:
         return bool(manager_cls.is_connected())
     except Exception:
         return False
+
+
+def path_to_override(dotted: str, value: Any) -> dict[str, Any]:
+    """把点分路径包成覆盖层 patch（{"openai": {"model": value}}）。
+
+    value=None 语义 = 覆盖层删除该键、回落底层值（供「清除覆盖」使用）。
+    """
+    parts = dotted.split(".")
+    root: dict[str, Any] = {}
+    node: dict[str, Any] = root
+    for i, part in enumerate(parts):
+        if i == len(parts) - 1:
+            node[part] = value
+        else:
+            node = node.setdefault(part, {})
+    return root
 
 
 def _flatten_leaves(node: dict[str, Any], prefix: str = "") -> list[str]:

@@ -59,6 +59,7 @@ class _KWS:
 
         # 启动 KWS 服务
         self.paused = False
+        self.listen_disabled = False  # T7.6「停止聆听」持久开关（高于 paused，resume 不可撤销）
         self.thread = threading.Thread(target=self._detection_loop, daemon=True)
         self.thread.start()
         config = ConfigManager.instance()
@@ -75,7 +76,23 @@ class _KWS:
         self.paused = True
 
     def resume(self):
+        # T7.6：用户已显式"停止聆听"时，resume 不生效，保持暂停
+        if self.listen_disabled:
+            return
         self.paused = False
+
+    def disable_listening(self):
+        """T7.6「停止聆听」：持久停止 KWS 关键词分析（resume 不可撤销）。"""
+        self.listen_disabled = True
+        self.paused = True
+
+    def enable_listening(self):
+        """T7.6 恢复：经 HTTP AUDIO_INPUT 通道解除停止聆听。"""
+        self.listen_disabled = False
+        self.paused = False
+
+    def is_listening_disabled(self) -> bool:
+        return self.listen_disabled
 
     def _detection_loop(self):
         SherpaOnnx.start()
@@ -92,6 +109,7 @@ class _KWS:
             if (
                 not frames
                 or self.paused
+                or self.listen_disabled
                 or (
                     xiaozhi and xiaozhi.device_state
                     in [DeviceState.LISTENING, DeviceState.SPEAKING]

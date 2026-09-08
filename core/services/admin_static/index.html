@@ -80,6 +80,46 @@
   dialog::backdrop { background: rgba(0,0,0,.6); }
   dialog input { width: 100%; background: var(--panel2); border: 1px solid var(--border);
                  color: var(--text); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
+  /* 预设条：一键切换 */
+  .pbar { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 16px;
+          padding: 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; }
+  .pbar-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pbar-head .title { font-size: .85rem; color: var(--muted); margin-right: auto; }
+  .plist { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pitem { position: relative; display: inline-flex; align-items: center; gap: 6px;
+           padding: 7px 12px; border-radius: 18px; cursor: pointer; user-select: none;
+           background: var(--panel); border: 1px solid var(--border); color: var(--text);
+           font-size: .88rem; transition: border-color .12s, background .12s; }
+  .pitem:hover { border-color: var(--muted); }
+  .pitem .nm { font-weight: 600; }
+  .pitem .mdl { font-size: .72rem; color: var(--muted); }
+  .pitem.active { border-color: var(--accent); background: rgba(88,166,255,.12); }
+  .pitem.active::after { content: "●"; color: var(--accent); font-size: .7rem; }
+  .pitem.disabled { cursor: progress; opacity: .6; }
+  .pitem .x { margin-left: 2px; color: var(--muted); font-size: .95rem; line-height: 1;
+              padding: 0 2px; border-radius: 50%; }
+  .pitem .x:hover { color: var(--err); }
+  .pitem .bm { font-size: .72rem; color: var(--ok); font-variant-numeric: tabular-nums; }
+  .pitem .bm.bad { color: var(--err); }
+  .pitem .psel { margin: 0 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+  .pempty { color: var(--muted); font-size: .82rem; }
+  /* 测速结果 */
+  #benchWrap { margin-top: 10px; }
+  #benchWrap table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  #benchWrap th, #benchWrap td { text-align: left; padding: 5px 8px;
+      border-bottom: 1px solid var(--border); }
+  #benchWrap th { color: var(--muted); font-weight: 500; }
+  #benchWrap td.num, #benchWrap th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  #benchWrap tr.best td { color: var(--ok); }
+  #benchWrap .pv { color: var(--muted); font-size: .74rem; }
+  /* 预设编辑弹窗 */
+  #presetDlg { min-width: min(460px, 92vw); }
+  #presetDlg .dfield { margin-top: 10px; }
+  #presetDlg .dfield label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: 3px; }
+  #presetDlg .dfield input, #presetDlg .dfield select {
+      width: 100%; background: var(--panel2); border: 1px solid var(--border);
+      color: var(--text); border-radius: 6px; padding: 7px 10px; font-size: .9rem; }
+  #presetDlg .dfield .help { font-size: .73rem; color: var(--muted); margin-top: 3px; }
 </style>
 </head>
 <body>
@@ -121,6 +161,41 @@
 
   <div id="tab-settings" style="display:none">
     <section class="cfg">
+      <h2>AI 对话后端</h2>
+      <p class="desc">预设按钮一键切换（写入覆盖层即热生效）；测速对比各候选的响应与生成速度。</p>
+      <div class="pbar">
+        <div class="pbar-head">
+          <span class="title">一键切换</span>
+          <select id="benchRounds" title="发起的请求数：首轮作预热（含建连/冷启动）不计入统计，其余轮取平均" style="background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:.8rem">
+            <option value="1">1 轮（不预热）</option>
+            <option value="2">2 轮</option>
+            <option value="3" selected>3 轮</option>
+            <option value="5">5 轮</option>
+          </select>
+          <button class="act sec" id="benchBtn" style="padding:6px 14px">⚡ 测速</button>
+          <button class="act sec" id="presetAdd" style="padding:6px 14px">＋ 空白模板</button>
+        </div>
+        <div class="pbar-head" id="benchOpts">
+          <label style="font-size:.8rem;color:var(--muted)">测速范围
+            <select id="benchScope" style="background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:.8rem">
+              <option value="all">全部预设</option>
+              <option value="selected">仅勾选</option>
+            </select>
+          </label>
+          <label style="font-size:.8rem;color:var(--muted)">生成上限
+            <input id="benchTokens" type="number" min="16" max="2048" step="16" value="300"
+                   style="width:84px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:.8rem">
+          </label>
+          <label style="font-size:.8rem;color:var(--muted);flex:1;min-width:200px">提示词
+            <input id="benchPrompt" value="用三句话介绍你自己，并说明你能帮我做什么。"
+                   style="width:100%;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:.8rem">
+          </label>
+        </div>
+        <div class="plist" id="presetList"></div>
+        <div id="benchWrap"></div>
+      </div>
+    </section>
+    <section class="cfg">
       <h2>运行时</h2>
       <p class="desc">日志级别立即生效（仅运行期，重启后回到 LOGLEVEL 环境变量值）。</p>
       <div class="field">
@@ -143,6 +218,34 @@
   <input type="password" id="tokInput" placeholder="ADMIN_TOKEN">
   <div class="btnrow" style="margin-top:14px">
     <button class="act" id="tokSave">保存并连接</button>
+  </div>
+</dialog>
+
+<dialog id="presetDlg">
+  <h3 style="margin:0 0 4px" id="presetDlgTitle">新增预设</h3>
+  <p style="color:var(--muted);font-size:.8rem;margin:0" id="presetDlgHint">
+    预设只是「候选按钮」，点它才会切换生效；新增/删除不影响当前配置。
+  </p>
+  <div class="dfield"><label>名称（按钮文字）</label><input id="pf_name" placeholder="如 DeepSeek"></div>
+  <div class="dfield"><label>接口地址 Base URL</label><input id="pf_base_url" placeholder="https://api.deepseek.com/v1"></div>
+  <div class="dfield">
+    <label>接口规格</label>
+    <select id="pf_api_style">
+      <option value="chat_completions">OpenAI Chat Completions（默认）</option>
+      <option value="openai_responses">OpenAI Responses</option>
+      <option value="anthropic_messages">Anthropic Messages</option>
+    </select>
+  </div>
+  <div class="dfield"><label>模型名称 Model</label><input id="pf_model" placeholder="deepseek-chat"></div>
+  <div class="dfield">
+    <label>API Key</label>
+    <input id="pf_api_key" type="password" autocomplete="new-password" placeholder="留空 = 不修改">
+    <div class="help" id="pf_key_help">本地 ollama / LM Studio 等无需鉴权的服务可留空。</div>
+  </div>
+  <div class="btnrow" style="margin-top:16px">
+    <button class="act" id="pfSave">保存</button>
+    <button class="act sec" id="pfCancel">取消</button>
+    <button class="act sec" id="pfTest">🔌 测试连接</button>
   </div>
 </dialog>
 
@@ -260,7 +363,11 @@ function renderOverview(d) {
 
 async function refreshOverview() {
   try {
-    renderOverview(await api("/api/admin/overview"));
+    const d = await api("/api/admin/overview");
+    lastOverview = d;
+    renderOverview(d);
+    // 裸表单删除后，「生效中」高亮只能依赖 overview 的运行时实际值
+    renderPresetBar();
   } catch (e) {
     $("#hdot").classList.remove("ok");
     if (String(e.message).includes("令牌")) needToken(e.message);
@@ -311,6 +418,7 @@ async function refreshConfigSchema() {
   try {
     cfgSchema = (await api("/api/admin/config")).schema;
     renderSettings();
+    await refreshPresets();
   } catch (e) { if (String(e.message).includes("令牌")) needToken(e.message); }
 }
 
@@ -324,10 +432,11 @@ function renderSettings() {
     for (const f of sec.fields) el.appendChild(renderField(f));
     const row = document.createElement("div");
     row.className = "btnrow";
-    if (sec.id === "openai") {
-      const testBtn = mkBtn("🔌 测试连接", "sec", () => testOpenai(el));
-      testBtn.id = "testBtn";
-      row.appendChild(testBtn);
+    // 高级区块的专属动作：清除 openai 覆盖（回落环境变量原始 Key）
+    if (sec.id === "openai_advanced") {
+      const clrBtn = mkBtn("♻️ 清除地址/规格/模型/Key 覆盖", "danger", clearOpenaiOverrides);
+      clrBtn.id = "clearOvBtn";
+      row.appendChild(clrBtn);
     }
     row.appendChild(mkBtn("💾 保存并生效", "", e => saveSection(sec, el)));
     host.appendChild(el);
@@ -407,20 +516,15 @@ async function saveSection(sec, el) {
   } catch (e) { toast("保存失败：" + e.message, 4000); }
 }
 
-async function testOpenai(el) {
-  const btn = $("#testBtn"); btn.disabled = true; btn.textContent = "测试中…";
-  const get = p => { const n = fieldPathEl(p); return n ? n.value.trim() : ""; };
-  const body = { backend: "openai", style: get("openai.api_style") || undefined };
-  const url = get("openai.base_url"), key = get("openai.api_key"), model = get("openai.model");
-  if (url) body.base_url = url;
-  if (key) body.api_key = key;
-  if (model) body.model = model;
+async function clearOpenaiOverrides() {
+  if (!confirm("清除地址/规格/模型/API Key 的面板覆盖？\n\n将回落到 config.py / 环境变量注入的原始值（.env 的 DEEPSEEK_API_KEY 等）。\n预设列表不受影响。")) return;
+  const btn = $("#clearOvBtn"); btn.disabled = true;
   try {
-    const d = await api("/api/admin/config/test", { method: "POST", body: JSON.stringify(body) });
-    if (d.ok) toast(`✅ 连通正常：${d.via} HTTP ${d.status} · ${d.latency_ms}ms`);
-    else toast(`❌ 不通：${d.first_attempt_error || ""} ${d.error || "HTTP " + d.status}`, 5000);
-  } catch (e) { toast("测试失败：" + e.message, 4000); }
-  finally { btn.disabled = false; btn.textContent = "🔌 测试连接"; }
+    const d = await api("/api/admin/presets/clear-overrides", { method: "POST" });
+    toast(d.cleared.length ? "✅ 已清除 " + d.cleared.length + " 项覆盖，回落底层原始值" : "本来就没有覆盖，无需清除");
+    refreshOverview(); refreshPresets();
+  } catch (e) { toast("清除失败：" + e.message, 4000); }
+  finally { btn.disabled = false; }
 }
 
 $("#lvlApply").addEventListener("click", async () => {
@@ -430,6 +534,267 @@ $("#lvlApply").addEventListener("click", async () => {
     refreshOverview();
   } catch (e) { toast("失败：" + e.message); }
 });
+
+/* ---------------- AI 后端预设：一键切换 ---------------- */
+let presets = [];          // 掩码视图（列表展示用）
+let lastOverview = null;   // overview 快照：预设「生效中」高亮的数据源
+let presetEditingId = null; // null = 新增模式
+let benchResults = {};      // presetId -> 测速结果
+
+const STYLE_LABEL = {
+  chat_completions: "Chat Completions",
+  openai_responses: "Responses",
+  anthropic_messages: "Anthropic",
+};
+
+async function refreshPresets() {
+  try {
+    const d = await api("/api/admin/presets");
+    presets = d.presets || [];
+    renderPresetBar();
+  } catch (e) { /* 令牌问题由 refreshConfigSchema 统一处理 */ }
+}
+
+
+function renderPresetBar() {
+  const list = $("#presetList");
+  if (!list) return;                  // renderSettings 未跑（首次加载竞态）
+  const eff = effectiveOpenai();
+  // 记住勾选状态：切换/测速都会整体重绘，若不还原，用户勾的候选会被悄悄清空
+  const prevSel = {};
+  list.querySelectorAll(".pitem.sel").forEach(e => { prevSel[e.dataset.id] = true; });
+  list.innerHTML = "";
+
+  if (!presets.length) {
+    const empty = document.createElement("span");
+    empty.className = "pempty";
+    empty.textContent = "暂无预设 —— 点「＋ 空白模板」建一个，或用「＋ 复制当前表单」把下方填好的值存成按钮。";
+    list.appendChild(empty);
+  }
+
+  for (const p of presets) {
+    // 用「预设值 vs 当前表单值」判定生效中。表单在编辑态会先于保存到 DOM 反映用户改动，
+    // 因此编辑中途不会被误标为「已生效」；api_style 缺省按 chat_completions 归一。
+    const isActive = Boolean(p.base_url) && p.base_url === eff.base_url
+      && p.model === eff.model
+      && (p.api_style || "chat_completions") === eff.api_style;
+    const item = document.createElement("span");
+    item.className = "pitem" + (isActive ? " active" : "");
+    item.dataset.id = p.id;
+    item.title = `${p.name}\n${p.base_url}\n${p.model || "未填模型"} · ${STYLE_LABEL[p.api_style] || p.api_style}\n点击切换到此外端`;
+
+    const bm = benchResults[p.id];
+    const bmHtml = bm
+      ? `<span class="bm${bm.ok ? "" : " bad"}">${bm.ok ? bm.avg_ms + "ms" : "失败"}</span>`
+      : "";
+    item.innerHTML = `<input type="checkbox" class="psel" data-act="sel" title="勾选参与测速">
+      ${bmHtml}<span class="nm">${esc(p.name)}</span>
+      <span class="mdl">${esc(p.model || "未填模型")} · ${esc(STYLE_LABEL[p.api_style] || p.api_style)}</span>
+      <span class="x" data-act="copy" title="复制此预设（连同已存 Key，生成一个新按钮）">⧉</span>
+      <span class="x" data-act="edit" title="编辑">✎</span>
+      <span class="x" data-act="del" title="删除">×</span>`;
+
+    item.addEventListener("click", e => {
+      const act = e.target.dataset ? e.target.dataset.act : null;
+      if (act === "sel") return;                                  // 勾选不触发切换
+      if (act === "del") { deletePreset(p); e.stopPropagation(); return; }
+      if (act === "edit") { openPresetDlg(p, true); e.stopPropagation(); return; }
+      if (act === "copy") { copyPreset(p); e.stopPropagation(); return; }
+      switchPreset(p, item);
+    });
+    // 勾选态：回写到 .pitem 自身的 class，供「仅勾选」测速读取
+    const cb = item.querySelector(".psel");
+    if (cb) {
+      if (prevSel[p.id]) { cb.checked = true; item.classList.add("sel"); }
+      cb.addEventListener("change", () => item.classList.toggle("sel", cb.checked));
+    }
+    list.appendChild(item);
+  }
+  renderBenchTable();
+}
+
+/* 当前表单值：用于判断哪个预设处于「生效中」。
+   表单未渲染时（如切到日志页）回落到覆盖层之下的生效配置，避免误判。 */
+function effectiveOpenai() {
+  const o = lastOverview?.backends?.openai || {};
+  return {
+    base_url: String(o.base_url ?? "").trim(),
+    api_style: String(o.api_style ?? "chat_completions").trim() || "chat_completions",
+    model: String(o.model ?? "").trim(),
+  };
+}
+
+async function switchPreset(p, itemEl) {
+  if (itemEl) itemEl.classList.add("disabled");
+  try {
+    const d = await api(`/api/admin/presets/${encodeURIComponent(p.id)}/switch`, { method: "POST" });
+    toast(`✅ 已切换到「${p.name}」（${d.applied.join(", ")}），下一次对话即用新配置`);
+    await refreshConfigSchema();
+    refreshOverview();
+  } catch (e) { toast("切换失败：" + e.message, 4000); }
+  finally { if (itemEl) itemEl.classList.remove("disabled"); }
+}
+
+async function deletePreset(p) {
+  if (!confirm(`删除预设「${p.name}」？\n\n只删除按钮本身，不会影响当前生效配置。`)) return;
+  try {
+    await api(`/api/admin/presets/${encodeURIComponent(p.id)}`, { method: "DELETE" });
+    delete benchResults[p.id];
+    toast("已删除预设 " + p.name);
+    await refreshPresets();
+  } catch (e) { toast("删除失败：" + e.message, 4000); }
+}
+
+/* ---------------- 预设编辑弹窗 ---------------- */
+function openPresetDlg(preset, editing) {
+  const isEdit = editing === true || Boolean(preset && preset.id);
+  presetEditingId = isEdit ? preset.id : null;
+  $("#presetDlgTitle").textContent = isEdit ? "编辑预设" : "新增预设";
+  $("#pf_name").value = preset ? preset.name : "";
+  $("#pf_base_url").value = preset ? preset.base_url : "";
+  $("#pf_api_style").value = preset ? preset.api_style : "chat_completions";
+  $("#pf_model").value = preset ? preset.model : "";
+  $("#pf_api_key").value = "";
+  if (isEdit) {
+    // 编辑：Key 为掩码视图，无法回传明文；留空 = 保持已保存的原值
+    const key = preset.api_key;
+    if (key && key.set) $("#pf_api_key").placeholder = `已保存 ${key.masked}（留空=保持不变）`;
+    else $("#pf_api_key").placeholder = "未配置（留空=无鉴权）";
+  } else {
+    $("#pf_api_key").placeholder = "sk-...（本地无鉴权服务可留空）";
+  }
+  $("#presetDlg").showModal();
+}
+
+/* 从当前表单值生成一个预设草稿（复制现有按钮 / 当前表单 两种来源） */
+async function copyPreset(p) {
+  const newName = prompt(`复制预设「${p.name}」
+
+新按钮名称（已存 API Key 会一并复制）：`, p.name + " 副本");
+  if (newName === null) return;                       // 用户取消
+  try {
+    await api("/api/admin/presets", {
+      method: "POST",
+      body: JSON.stringify({ copy_from: p.id, name: newName.trim() || p.name + " 副本" }),
+    });
+    toast("✅ 已复制为「" + (newName.trim() || p.name + " 副本") + "」");
+    await refreshPresets();
+  } catch (e) { toast("复制失败：" + e.message, 4000); }
+}
+
+async function savePresetFromDlg() {
+  const payload = {
+    name: $("#pf_name").value.trim() || $("#pf_base_url").value.trim() || "未命名预设",
+    base_url: $("#pf_base_url").value.trim(),
+    api_style: $("#pf_api_style").value,
+    model: $("#pf_model").value.trim(),
+  };
+  const key = $("#pf_api_key").value;
+  if (key) payload.api_key = key;               // 留空 = 保持原值（编辑）/ 无鉴权（新增）
+  if (!payload.base_url) return toast("请填写接口地址 Base URL");
+
+  try {
+    if (presetEditingId) {
+      await api(`/api/admin/presets/${encodeURIComponent(presetEditingId)}`,
+        { method: "PUT", body: JSON.stringify(payload) });
+      toast("✅ 预设已更新");
+    } else {
+      await api("/api/admin/presets", { method: "POST", body: JSON.stringify(payload) });
+      toast("✅ 预设已新增");
+    }
+    $("#presetDlg").close();
+    await refreshPresets();
+  } catch (e) { toast("保存失败：" + e.message, 4000); }
+}
+
+async function testPresetFromDlg() {
+  const base_url = $("#pf_base_url").value.trim();
+  if (!base_url) return toast("请填写接口地址 Base URL");
+  try {
+    const d = await api("/api/admin/config/test", {
+      method: "POST",
+      body: JSON.stringify({
+        backend: "openai", base_url, model: $("#pf_model").value.trim(),
+        style: $("#pf_api_style").value, api_key: $("#pf_api_key").value,
+      }),
+    });
+    if (d.ok) toast(`✅ 连通正常：${d.via} HTTP ${d.status} · ${d.latency_ms}ms`);
+    else toast(`❌ 不通：${d.first_attempt_error || ""} ${d.error || "HTTP " + d.status}`, 5000);
+  } catch (e) { toast("测试失败：" + e.message, 4000); }
+}
+
+/* ---------------- 测速 ---------------- */
+function benchTargetIds() {
+  const scope = $("#benchScope") ? $("#benchScope").value : "all";
+  if (scope !== "selected") return null;   // null = 服务端默认（全部预设）
+  const picked = [...document.querySelectorAll("#presetList .pitem.sel")].map(e => e.dataset.id);
+  if (!picked.length) { toast("请先勾选要测速的预设（点击名称前的方框）"); return []; }
+  return picked;
+}
+
+async function runBenchmark() {
+  const ids = benchTargetIds();
+  if (ids && !ids.length) return;               // 已 toast 提示
+  const btn = $("#benchBtn");
+  btn.disabled = true; btn.textContent = "测速中…";
+  $("#presetList").querySelectorAll(".pitem").forEach(e => e.classList.add("disabled"));
+  try {
+    const body = {
+      rounds: parseInt($("#benchRounds").value, 10),
+      max_tokens: parseInt($("#benchTokens").value, 10) || 300,
+      prompt: $("#benchPrompt").value.trim(),
+    };
+    if (ids) body.ids = ids;
+    const d = await api("/api/admin/presets/benchmark", { method: "POST", body: JSON.stringify(body) });
+    benchResults = {};
+    for (const r of d.results) benchResults[r.id] = r;
+    const best = d.results.find(r => r.ok);
+    toast(best ? `测速完成，最快：${best.name}（${best.avg_ms}ms）` : "测速完成：全部失败", 4000);
+  } catch (e) { toast("测速失败：" + e.message, 4000); }
+  finally {
+    btn.disabled = false; btn.textContent = "⚡ 全部测速";
+    renderPresetBar();
+  }
+}
+
+function renderBenchTable() {
+  const wrap = $("#benchWrap");
+  if (!wrap) return;
+  const rows = Object.values(benchResults);
+  if (!rows.length) { wrap.innerHTML = ""; return; }
+  const bestOk = rows.filter(r => r.ok).sort((a, b) => a.avg_ms - b.avg_ms)[0];
+  const body = rows.map(r => {
+    const tok = r.tokens != null ? r.tokens : "—";
+    const tps = (r.ok && r.tokens && r.avg_ms) ? (r.tokens / (r.avg_ms / 1000)).toFixed(1) : "—";
+    const cls = [r.ok ? "" : "bad", bestOk && r.id === bestOk.id ? "best" : ""].join(" ");
+    return `<tr class="${cls}">
+      <td>${esc(r.name)}</td>
+      <td>${esc(r.model || "-")}</td>
+      <td class="num">${r.ok ? r.avg_ms + " ms" : "失败"}</td>
+      <td class="num">${r.ok ? r.min_ms + " ms" : "—"}</td>
+      <td class="num">${tok}</td>
+      <td class="num">${tps === "—" ? "—" : tps + " tok/s"}</td>
+      <td>${r.ok ? (r.ok_rounds < r.rounds ? `<span class="pv">${r.ok_rounds}/${r.rounds} 轮成功</span>` : "")
+                 : `<span class="pv">${esc((r.error || "失败").slice(0, 60))}</span>`}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table>
+    <thead><tr><th>预设</th><th>模型</th><th class="num">平均耗时</th>
+      <th class="num">最快</th><th class="num">输出</th><th class="num">生成速度</th><th>备注</th></tr></thead>
+    <tbody>${body}</tbody></table>
+    <div class="pv" style="margin-top:6px">按平均耗时升序；生成速度 = 输出 tokens ÷ 平均耗时（上游自报 usage，缺失显示 —）。</div>`;
+}
+
+/* ---------------- 预设条 / 测速控件（事件委托：栏为动态生成） ---------------- */
+document.addEventListener("click", async e => {
+  const t = e.target;
+  if (t.id === "presetAdd") { openPresetDlg(null); return; }
+  if (t.id === "benchBtn") { await runBenchmark(); return; }
+  if (t.id === "pfSave") { await savePresetFromDlg(); return; }
+  if (t.id === "pfCancel") { $("#presetDlg").close(); return; }
+  if (t.id === "pfTest") { await testPresetFromDlg(); return; }
+});
+$("#presetDlg").addEventListener("close", () => { presetEditingId = null; });
 
 /* ---------------- boot ---------------- */
 refreshOverview();
