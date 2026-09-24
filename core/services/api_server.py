@@ -74,13 +74,13 @@ class InjectRelay:
 
         窗口未开时直接 409 拒绝（客户端应先 POST /api/inject 开窗）。
         """
-        caller = self._caller(request) if hasattr(self, "_caller") else "?"
         if not self.active:
             return web.json_response(
                 {"success": False, "error": "injection window not open"},
                 status=409,
             )
-        logger.info(f"[InjectRelay] 上行开始 caller={caller}")
+        peer = request.transport.get_extra_info("peername") if request.transport else None
+        logger.info(f"[InjectRelay] 上行开始 peer={peer}")
         dropped = 0
         try:
             async for chunk in request.content.iter_any():
@@ -698,7 +698,7 @@ class APIServer:
         """
         try:
             data = await request.json() if request.can_read_body else {}
-            caller = self._caller(request)
+            caller = self._caller_tag(request)
 
             if data.get("on"):
                 duration = data.get("duration")
