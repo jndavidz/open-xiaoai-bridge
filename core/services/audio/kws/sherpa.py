@@ -31,7 +31,12 @@ class _SherpaOnnx:
         self.stream = self.keyword_spotter.create_stream()
 
     def kws(self, frames):
-        # print(f"kws....., {len(frames)}")
+        """识别关键词。命中返回结果的完整对象（keyword/tokens/timestamps），无命中返回 None。
+
+        incident §5 建议 6：暴露完整 KeywordResult 供命中留证（tokens/timestamps）。
+        注：sherpa-onnx 的 KeywordResult **不提供置信度**（只有 keyword/tokens/timestamps），
+        故无法记录 `score`；事故复盘可用 tokens 与时间戳辅助定位声源。
+        """
         samples = np.frombuffer(frames, dtype=np.int16)
         samples = samples.astype(np.float32) / 32768.0
         self.stream.accept_waveform(16000, samples)
@@ -40,7 +45,19 @@ class _SherpaOnnx:
             result = self.keyword_spotter.get_result(self.stream)
             if result:
                 self.keyword_spotter.reset_stream(self.stream)
-                return result.lower()
+                # result 是 KeywordResult：.keyword / .tokens / .timestamps
+                try:
+                    kw = (result.keyword or "").strip()
+                except AttributeError:
+                    # 兼容旧版 API（get_result 直接返回 str）
+                    return {"keyword": str(result).lower(), "tokens": [], "timestamps": []}
+                if not kw:
+                    continue
+                return {
+                    "keyword": kw.lower(),
+                    "tokens": list(getattr(result, "tokens", []) or []),
+                    "timestamps": list(getattr(result, "timestamps", []) or []),
+                }
 
 
 SherpaOnnx = _SherpaOnnx()

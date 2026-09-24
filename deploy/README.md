@@ -15,7 +15,7 @@
 ## 2. 本地准备（WSL2）
 
 ```bash
-cd /mnt/d/repos/open-xiaoai/bridge/deploy
+cd /mnt/d/_work/repos/open-xiaoai/bridge/deploy
 cp .env.example .env && vim .env      # 六项见 .env.example：必填 4（OPEN_XIAOAI_TOKEN / DEEPSEEK_API_KEY / HA_TOKEN / ADMIN_TOKEN）+ 可选 2（HA_BASE_URL / MONITOR_SERVICES）
 # 下载模型包（VAD+KWS；xiaoai_asr 模式不需要 ASR 大模型，但包内含，体积可控）
 #   URL 见下方"模型包"节，解压到 ./models/
@@ -108,9 +108,21 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 
 ## 7. 免唤醒词表与调参
 
-- 词表在 `config.py` 的 `APP_CONFIG["wakeup"]["keywords"]`（AI 唤醒词 + 全部免唤醒短语都在此）
-- 识别不灵：`kws.keywords_threshold` 下调（0.2→0.1）；误触发：上调 + `vad.threshold` 上调（当前 0.3）
+- 词表在 `config.py` 的 `APP_CONFIG["wakeup"]["keywords"]`（AI 唤醒词 + 全部免唤醒短语都在此）；
+  免唤醒动作在 `DIRECT_COMMANDS`（两处必须同步，否则词表命中但无对应动作）
+- 识别不灵：`kws.keywords_threshold` 下调；误触发：上调 + `vad.threshold` 上调
+- **当前值（2026-09-24 收紧，incident §5 建议 3）**：
+  `keywords_score=3.0`（原 2.0）· `keywords_threshold=0.35`（原 0.2）· `vad.threshold=0.4`（原 0.3）
+- ⚠️ **`keywords_score`/`keywords_threshold` 改动需重启容器**（`SherpaOnnx.start()` 只在启动时建 KeywordSpotter；
+  config 热重载只刷 `vad.threshold`/`min_silence`）；词表改动同理（`keywords.txt` 启动时编译）
 - 短词（4 字以下）易误触发，优先用「下一首歌曲」而非「下一首」
+- ⚠️ **播报文案不得含词表词**（否则形成自触发回环，见 `bridge/AGENTS.md` 「TTS 文案安全约束」
+  及工作区 `doc/plan/incident-kws-self-trigger-loop.md`）
+- 命中留证：
+  - `data/kws_snapshots/kws_hit_*.pcm`（命中前 5 秒 16k/单声道，最多保留 10 个）
+  - 日志行 `[KWS] 命中留证 | keyword=... vad_prob=... tokens=... ts=[...]`
+  - （sherpa-onnx 不提供置信度，故以 tokens/timestamps 代替）
+- 外部播报审计：`/api/play/{text,url,file}` 均记录 `caller=<IP>` 与消息摘要
 
 ## 8. 安全
 

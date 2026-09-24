@@ -293,16 +293,20 @@ APP_CONFIG = {
         "after_wakeup": after_wakeup,
     },
     "kws": {
-        # 唤醒词置信度加成（越高越难误触发）；实测误触发再上调
-        "keywords_score": 2.0,
+        # 唤醒词置信度加成（越高越难误触发）
+        # 2026-09-24 收紧：2.0 -> 3.0（incident §5 建议 3）
+        # 依据：2026-09-17 自触发回环事故中环境音误命中（score 阈值过松）
+        "keywords_score": 3.0,
         # 检测阈值（越低越灵敏）
-        "keywords_threshold": 0.2,
+        # 2026-09-24 收紧：0.2 -> 0.35（incident §5 建议 3，建议区间 0.35~0.4 取下沿）
+        "keywords_threshold": 0.35,
         # 判定说完的最小静默时长（ms）
         "min_silence_duration": 480,
     },
     "vad": {
-        # share 项目客厅环境实战值 0.3（默认 0.10 过敏易误触发），实测微调
-        "threshold": 0.3,
+        # share 项目客厅环境实战值 0.3（默认 0.10 过敏易误触发）
+        # 2026-09-24 收紧：0.3 -> 0.4（incident §5 建议 3）
+        "threshold": 0.4,
         "min_speech_duration": 250,
         "min_silence_duration": 500,
     },

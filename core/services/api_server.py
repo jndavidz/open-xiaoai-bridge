@@ -108,6 +108,26 @@ class APIServer:
 
     # ============ Handlers ============
 
+    def _caller_tag(self, request: web.Request) -> str:
+        """返回调用方标识（用于审计“是谁让音箱说话”）。incident §5 建议 7。
+
+        优先取反向代理链头（X-Forwarded-For / X-Real-IP），否则 peer 地址。
+        """
+        for h in ("X-Forwarded-For", "X-Real-IP"):
+            v = request.headers.get(h)
+            if v:
+                return v.split(",")[0].strip()
+        peer = request.transport.get_extra_info("peername") if request.transport else None
+        if peer:
+            return f"{peer[0]}:{peer[1]}" if len(peer) >= 2 else str(peer)
+        return "unknown"
+
+    @staticmethod
+    def _redact_text(text: str, limit: int = 40) -> str:
+        """文本摘要（脱敏）：仅截断，不写完整内容到日志。"""
+        t = (text or "").strip().replace("\n", " ")
+        return t[:limit] + ("…" if len(t) > limit else "")
+
     async def handle_play_text(self, request: web.Request) -> web.Response:
         """
         POST /api/play/text
@@ -143,6 +163,11 @@ class APIServer:
             # Run in background to not block the response
             # incident-kws-self-trigger-loop.md §5: 外部播报（HA/企微/DDNS）经此端点发声，
             # 必须开 KWS 播放闸门，否则就是潜在的自触发源（本次事故的真正入口）。
+            # 建议 7：记录调用方，回答“是谁让音箱说话的”。
+            logger.info(
+                f"[APIServer] /api/play/text caller={self._caller_tag(request)} "
+                f"blocking={blocking} text={self._redact_text(text)!r}"
+            )
             kws = get_kws()
             if blocking:
                 token = self._gate_kws(kws, "api/play/text blocking")
@@ -215,6 +240,11 @@ class APIServer:
                 )
 
             # incident §5: 任何外部播报都需 KWS 闸门（同 /api/play/text）
+            # 建议 7：记录调用方
+            logger.info(
+                f"[APIServer] /api/play/url caller={self._caller_tag(request)} "
+                f"blocking={blocking} url={self._redact_text(url, 60)!r}"
+            )
             kws = get_kws()
 
             if blocking:
@@ -309,6 +339,8 @@ class APIServer:
                 temp_path = temp_file.name
 
             logger.info(f"[APIServer] Received file: {filename}, size: {total_size} bytes, blocking={blocking}, sample_rate={sample_rate}")
+            # 建议 7：记录调用方（与 /api/play/text|url 一致）
+            logger.info(f"[APIServer] /api/play/file caller={self._caller_tag(request)}")
             logger.info(f"[APIServer] Saved upload to temp file: {temp_path}")
 
             async def play_audio():

@@ -26,7 +26,18 @@ def _load_kws_module():
 
     core.services.audio.kws.__init__ 在导入期即构造单例 `KWS`，会拉起
     sherpa/audio 依赖；这里用 sys.modules 桩把无关依赖替换掉。
+
+    ⚠️ 注意：本函数会**临时覆盖 sys.modules**，调用方必须保存/恢复，
+    否则会污染同进程内其它测试（如 test_wakeup_keywords）。
+    返回 (module, saved_modules)。
     """
+    _STUB_NAMES = [
+        "core.services.audio.kws.sherpa", "core.ref",
+        "core.services.protocols.typing", "core.utils.config",
+        "core.utils.logger", "core.services.audio.stream",
+        "core.services.audio.vad.silero", "core.wakeup_session",
+    ]
+    saved = {n: sys.modules.get(n) for n in _STUB_NAMES}
     # 桩：sherpa 后端
     sherpa_mod = types.ModuleType("core.services.audio.kws.sherpa")
 
@@ -110,14 +121,23 @@ def _load_kws_module():
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    return module, saved
 
 
 class KwsGateTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.mod = _load_kws_module()
+        cls.mod, cls._saved_modules = _load_kws_module()
         cls.kws = cls.mod.KWS
+
+    @classmethod
+    def tearDownClass(cls):
+        # 恢复被桩覆盖的模块，避免污染同进程内其它测试
+        for name, original in cls._saved_modules.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
     def setUp(self):
         # 每个用例前复位闸门与会话状态

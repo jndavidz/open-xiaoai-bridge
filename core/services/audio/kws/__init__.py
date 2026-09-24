@@ -13,6 +13,19 @@ from core.utils.logger import logger
 from core.wakeup_session import EventManager
 
 
+def _fmt_ts(timestamps) -> str:
+    """时间戳列表格式化为 '起始-结束' 字符串（留证用）。"""
+    try:
+        ts = list(timestamps or [])
+    except Exception:
+        return ""
+    if not ts:
+        return ""
+    if len(ts) == 1:
+        return f"{ts[0]:.2f}"
+    return f"{ts[0]:.2f}-{ts[-1]:.2f}"
+
+
 class _KWS:
     def __init__(self):
         set_kws(self)
@@ -36,6 +49,19 @@ class _KWS:
         self._gate_count = 0
         self._gate_reasons: list[str] = []
         self._gate_timer: threading.Timer | None = None
+
+        # 命中留证：语音环形缓冲（incident §5 建议 6，详见 _log_wakeup_evidence）
+        # 保存最近 _AUDIO_SNAPSHOT_SECONDS 秒的 16k/单声道/16bit PCM
+        self._AUDIO_SNAPSHOT_SECONDS = 5
+        self._MAX_SNAPSHOTS = 10
+        self._SNAPSHOT_DIR = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "../../../../data/kws_snapshots"
+        )
+        # 每帧 512 样本 * 2 字节；保留 5s => 5000/32 = 157 帧
+        self._ring_max_frames = int(
+            self._AUDIO_SNAPSHOT_SECONDS * 1000 / ((self.frame_size * 1000) / self.sample_rate)
+        )
+        self._audio_ring: list[bytes] = []
 
         self.apply_runtime_config()
         self.config_manager.add_reload_listener(self._on_config_reload)
@@ -222,6 +248,11 @@ class _KWS:
                 time.sleep(0.01)
                 continue
 
+            # 命中留证环形缓冲（incident §5 建议 6）：保留最近 N 秒音频
+            self._audio_ring.append(frames)
+            if len(self._audio_ring) > self._ring_max_frames:
+                del self._audio_ring[0 : len(self._audio_ring) - self._ring_max_frames]
+
             # 先进行 VAD 检测
             speech_prob = Silero.vad(frames, self.sample_rate) or 0
             is_speech = speech_prob >= self.vad_threshold
@@ -238,8 +269,9 @@ class _KWS:
                 # 只在有语音时才进行 KWS 检测
                 result = SherpaOnnx.kws(frames)
                 if result:
-                    logger.wakeup(result, module="KWS")
-                    self.on_message(result)
+                    self._log_wakeup_evidence(result, speech_prob)
+                    logger.wakeup(result["keyword"], module="KWS")
+                    self.on_message(result["keyword"])
                     # 唤醒后重置状态
                     self.vad_active = False
                     self.vad_silence_frames = 0
@@ -254,8 +286,9 @@ class _KWS:
                         # 继续将音频送入 KWS，允许短暂的静音
                         result = SherpaOnnx.kws(frames)
                         if result:
-                            logger.wakeup(result, module="KWS")
-                            self.on_message(result)
+                            self._log_wakeup_evidence(result, speech_prob)
+                            logger.wakeup(result["keyword"], module="KWS")
+                            self.on_message(result["keyword"])
                             self.vad_active = False
                             self.vad_silence_frames = 0
                     else:
@@ -291,6 +324,62 @@ class _KWS:
                 logger.error(f"[KWS] Wakeup dispatch failed: {type(exc).__name__}: {exc}")
 
         future.add_done_callback(_log_result)
+
+    # ------------------------------------------------------------------
+    # 命中留证（incident-kws-self-trigger-loop.md §5 建议 6）
+    # 事故复盘靠“猜声源”；这里记录命中时的可观测上下文（含音频快照）。
+    # 注：sherpa-onnx 的 KeywordResult 不含置信度，故记 tokens/timestamps 代替。
+    # ------------------------------------------------------------------
+    def _log_wakeup_evidence(self, result: dict, speech_prob: float):
+        """记录 KWS 命中证据：关键词/tokens/时间戳/VAD prob + 前 N 秒音频快照。"""
+        try:
+            snap_path = self._dump_audio_snapshot()
+            logger.info(
+                "[KWS] 命中留证 | "
+                f"keyword={result.get('keyword')!r} "
+                f"vad_prob={speech_prob:.3f} "
+                f"tokens={len(result.get('tokens') or [])} "
+                f"ts=[{_fmt_ts(result.get('timestamps'))}] "
+                f"snapshot={snap_path or '(不可用)'}",
+                module="KWS",
+            )
+        except Exception as exc:
+            # 留证失败绝不能影响唤醒主流程
+            logger.debug(f"[KWS] 命中留证失败: {type(exc).__name__}: {exc}", module="KWS")
+        # 快照后清空环形缓冲（避免下一轮重复）
+        try:
+            self._audio_ring.clear()
+        except Exception:
+            pass
+
+    def _dump_audio_snapshot(self):
+        """将环形缓冲的最近音频写入文件，返回路径（或 None）。
+
+        采样率 16k/单声道/16bit；时长由 _AUDIO_SNAPSHOT_SECONDS 决定。
+        失败返回 None（不影响主流程）。
+        """
+        if not self._audio_ring:
+            return None
+        import os as _os
+        import time as _time
+
+        os.makedirs(self._SNAPSHOT_DIR, exist_ok=True)
+        path = _os.path.join(
+            self._SNAPSHOT_DIR,
+            f"kws_hit_{_time.strftime('%Y%m%d-%H%M%S')}_{int(_time.time()*1000) % 1000:03d}.pcm",
+        )
+        with open(path, "wb") as f:
+            f.write(b"".join(self._audio_ring))
+        # 只保留最近 N 个快照，防磁盘增长
+        try:
+            files = sorted(
+                p for p in _os.listdir(self._SNAPSHOT_DIR) if p.startswith("kws_hit_")
+            )
+            for old in files[: -self._MAX_SNAPSHOTS]:
+                _os.unlink(_os.path.join(self._SNAPSHOT_DIR, old))
+        except Exception:
+            pass
+        return path
 
 
 KWS = _KWS()
