@@ -237,6 +237,14 @@ class XiaoAI:
                         logger.info(
                             f"[Injection] 闸门内丢弃 ASR 结果: {cls._redact_inject_text(text)}"
                         )
+                        # 文本回传：广播给 WS 订阅者（PC 润色后插入光标）
+                        try:
+                            from core.services.api_server import get_relay
+                            relay = get_relay()
+                            if relay:
+                                relay.publish_text(text or "")
+                        except Exception:
+                            pass
                         return
 
                     if EventManager.consume_xiaoai_asr_result(

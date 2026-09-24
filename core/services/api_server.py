@@ -46,12 +46,14 @@ class InjectRelay:
         self.active: bool = False
         self.downstream_writer: asyncio.StreamWriter | None = None
         self._downstream_task: asyncio.Task | None = None
-        self.stats = {"up_bytes": 0, "down_bytes": 0, "sessions": 0}
+        self.text_queues: list[asyncio.Queue] = []   # 文本回传订阅者（WS，多客户端广播）
+        self.stats = {"up_bytes": 0, "down_bytes": 0, "sessions": 0, "texts": 0}
 
     def open_session(self) -> None:
         """开窗：允许上行数据入队。"""
         self.active = True
         self.stats["sessions"] += 1
+        self._notify_subscribers("window_open")
         logger.info("[InjectRelay] 会话开启（上游可推流）")
 
     def close_session(self, reason: str = "closed") -> None:
@@ -59,6 +61,7 @@ class InjectRelay:
         if not self.active and self.downstream_writer is None:
             return
         self.active = False
+        self._notify_subscribers("window_closed")
         # 断开下游：hook 收到 EOF 后按退避重连，窗口未开时连上也只会被立即断开
         w = self.downstream_writer
         if w is not None:
@@ -141,6 +144,67 @@ class InjectRelay:
         if self._downstream_task:
             self._downstream_task.cancel()
 
+    # ---- 文本回传（bridge → PC，WS 广播）----
+
+    def _notify_subscribers(self, event: str) -> None:
+        """窗口状态变化 → 各订阅者队列插一条通知。"""
+        for q in list(self.text_queues):
+            try:
+                q.put_nowait(f"__event__:{event}")
+            except asyncio.QueueFull:
+                pass
+
+    def publish_text(self, text: str) -> None:
+        """闸门拦截点调用：把识别文本广播给所有 WS 订阅者（仅窗口开启期）。"""
+        if not self.active or not text:
+            return
+        self.stats["texts"] += 1
+        for q in list(self.text_queues):
+            try:
+                q.put_nowait(text)
+            except asyncio.QueueFull:
+                logger.warning("[InjectRelay] 文本订阅队列满，丢弃一条")
+
+    async def handle_ws_text(self, request: web.Request) -> web.WebSocketResponse:
+        """GET /api/inject/text (WebSocket) —— PC 订阅识别文本。
+
+        仅窗口开启期有文本；连接保持（窗口开/关事件通知），断线由 PC 重连。
+        """
+        ws = web.WebSocketResponse(heartbeat=15)
+        await ws.prepare(request)
+        q: asyncio.Queue = asyncio.Queue(maxsize=64)
+        self.text_queues.append(q)
+        logger.info(f"[InjectRelay] 文本订阅接入（当前 {len(self.text_queues)} 个）")
+        push_task = asyncio.create_task(self._push_texts(ws, q))
+        try:
+            await self._notify_state(ws)
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    if msg.data == "ping":
+                        await ws.send_json({"event": "pong"})
+                    continue
+                if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                    break
+        finally:
+            push_task.cancel()
+            if q in self.text_queues:
+                self.text_queues.remove(q)
+            logger.info(f"[InjectRelay] 文本订阅断开（剩 {len(self.text_queues)} 个）")
+        return ws
+
+    async def _notify_state(self, ws: web.WebSocketResponse):
+        await ws.send_json({
+            "event": "window_open" if self.active else "window_closed"
+        })
+
+    async def _push_texts(self, ws: web.WebSocketResponse, q: asyncio.Queue):
+        while True:
+            item = await q.get()
+            if isinstance(item, str) and item.startswith("__event__:"):
+                await ws.send_json({"event": item.split(":", 1)[1]})
+            else:
+                await ws.send_json({"event": "text", "text": item})
+
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
             "success": True,
@@ -208,6 +272,7 @@ class APIServer:
         self.app.router.add_get("/api/inject", self.handle_inject_status)
         self.app.router.add_post("/api/inject/stream", self.inject_relay.handle_upstream)  # PC 上行 PCM
         self.app.router.add_get("/api/inject/relay", self.inject_relay.handle_health)  # 中继观测
+        self.app.router.add_get("/api/inject/text", self.inject_relay.handle_ws_text)  # 文本回传 WS
         self.app.router.add_get("/api/health", self.handle_health)
         # TTS endpoints
         self.app.router.add_post("/api/tts/doubao", self.handle_tts_doubao)
