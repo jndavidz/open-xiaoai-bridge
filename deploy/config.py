@@ -68,14 +68,45 @@ async def kodi_launch(speaker):
 
 async def _run_steps(speaker, steps):
     """执行指令表的一步序列：str=播报，("ha",…)=HA 调用，callable=任意函数。
-    kws 免唤醒（DIRECT_COMMANDS）与小爱截胡（XIAOAI_COMMANDS）共用同一执行逻辑。"""
+    kws 免唤醒（DIRECT_COMMANDS）与小爱截胡（XIAOAI_COMMANDS）共用同一执行逻辑。
+
+    incident-kws-self-trigger-loop.md §5 建议 1：每逢 `str` 播报都开/关 KWS 播放闸门，
+    防止播报文案命中自身词表形成自触发回环（本次事故的直接根因）。
+    """
     for step in steps:
         if isinstance(step, str):
-            await speaker.play(text=step)
+            token = _gate_kws("run_steps TTS", max_seconds=60)
+            try:
+                await speaker.play(text=step)
+            finally:
+                _ungate_kws(token)
         elif isinstance(step, tuple) and step[0] == "ha":
             await hass_action(step[1], step[2], step[3] if len(step) > 3 else None)
         elif callable(step):
             await step(speaker)
+
+
+def _gate_kws(reason: str, max_seconds: float = 60.0):
+    """开启 KWS 播放闸门（失败不阻断播报）。返回 token 或 None。"""
+    kws = get_kws()
+    if not kws:
+        return None
+    try:
+        return kws.gate_on(reason=reason, max_seconds=max_seconds)
+    except Exception as e:
+        logger.warning(f"[home] KWS gate_on failed ({reason}): {e}")
+        return None
+
+
+def _ungate_kws(token):
+    """关闭 KWS 播放闸门（失败不抛）。"""
+    kws = get_kws()
+    if not kws:
+        return
+    try:
+        kws.gate_off(token)
+    except Exception as e:
+        logger.warning(f"[home] KWS gate_off failed: {e}")
 
 
 # ---------- 学科辅导导师人设（「你好老师」专属会话） ----------
@@ -102,8 +133,8 @@ DIRECT_COMMANDS = {
     # --- 调试 ---
     "测试模式": ["桥接正常，家庭中枢在线"],
     # --- HIFI 场景（HA script 内部：WOL 唤醒 NUC -> LMS 播放 -> 完成后经 :9092 播报）---
-    "音乐模式": ["正在开启高保真模式", ha_script("hifi_mode")],
-    "高保真模式": ["正在开启高保真模式", ha_script("hifi_mode")],
+    "音乐模式": ["正在准备客厅音响", ha_script("hifi_mode")],
+    "高保真模式": ["正在准备客厅音响", ha_script("hifi_mode")],
     # --- 音乐播放控制（对应 HA script，内部调 Music Assistant / LMS）---
     "停止音乐": [ha_script("music_stop")],
     "暂停音乐": [ha_script("music_stop")],
@@ -126,7 +157,7 @@ DIRECT_COMMANDS = {
     "暂停播放": [ha_script("music_stop")],
     "先暂停一下": [ha_script("music_stop")],
     "停止播放音乐": [ha_script("music_stop")],
-    "开启高保真": ["正在开启高保真模式", ha_script("hifi_mode")],
+    "开启高保真": ["正在准备客厅音响", ha_script("hifi_mode")],
 }
 
 
@@ -145,8 +176,8 @@ XIAOAI_COMMANDS = {
     "打开电脑": ["正在唤醒客厅电脑", ha_switch("switch.nuc_hifi_wol")],
     # Hi-Fi 模式：复用现有 script.hifi_mode（无需新 HA 实体）；走小爱截胡，
     # 因 KWS 离线模型不识别含英文的「HiFi模式」，改由「小爱同学，Hi-Fi模式」触发
-    "HiFi模式": ["正在开启高保真模式", ha_script("hifi_mode")],
-    "Hi-Fi模式": ["正在开启高保真模式", ha_script("hifi_mode")],
+    "HiFi模式": ["正在准备客厅音响", ha_script("hifi_mode")],
+    "Hi-Fi模式": ["正在准备客厅音响", ha_script("hifi_mode")],
     # 网络层：KODI 启动（ADB 控电视，不依赖红外）。需电视开机 + KODI 已装（见 kodi_launch 注释）。
     # 走小爱截胡：原生小爱无法 ADB 启动电视端 KODI，属跨系统编排，命中即截胡。
     "打开Kodi": ["正在打开 Kodi", kodi_launch],

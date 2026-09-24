@@ -34,7 +34,7 @@ open-xiaoai-bridge/
 │   │   │   ├── stream.py          # GlobalStream 全局音频流（多路输入广播）
 │   │   │   ├── codec.py           # 音频编解码
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
-│   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关）
+│   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
 │   │   ├── tts/doubao.py          # 豆包 TTS 客户端（火山引擎）
 │   │   └── protocols/
@@ -283,7 +283,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 |------|------|------|
 | GlobalStream | `audio/stream.py` | 多路输入广播（模拟 PyAudio API） |
 | VAD | `audio/vad/silero.py` | Silero ONNX 语音活动检测 |
-| KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒（信心度 2.0，阈值 0.2） |
+| KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒（信心度 2.0，阈值 0.2）；`kws/__init__` 含 `listen_disabled` 持久开关 + **播放闸门**（`gate_on`/`gate_off`） |
 | ASR | `audio/asr/sherpa.py` | Sherpa SenseVoice 离线语音识别（懒加载，INT8 量化） |
 | TTS | `tts/doubao.py` | 豆包 TTS（流式/一次性，PCM/MP3 自适应） |
 
@@ -433,6 +433,41 @@ python3 tests/test_admin_panel.py
 3. `SpeakerManager.stop_device_audio()` — 停止阻塞 TTS / 非阻塞 TTS / PCM，并重置 PCM 通道
 4. `start_recording` — 恢复录音（KWS 依赖此通道）
 5. `XiaoAI.stop_conversation()` — 停止连续对话
+
+### KWS 播放闸门（TTS 自触发回环防护）
+
+**问题**（2026-09-17 事故，见工作区 `doc/plan/incident-kws-self-trigger-loop.md`）：
+TTS 播报期间 KWS 从未被暂停 → 播报文案命中自身词表 → 音箱听见自己 → 自触发回环。
+
+**实现**：`core/services/audio/kws/__init__.py`
+
+| 方法 | 作用 |
+|---|---|
+| `gate_on(reason, max_seconds)` | 开闸门（引用计数 +1），返回 token；挂兜底 timer |
+| `gate_off(token)` | 关闸门（-1）；归零时 reset Sherpa 流 |
+| `paused`（派生属性） | `_conv_paused or 闸门计数>0` —— 会话暂停与播放闸门**正交** |
+| `gate_status()` | `(计数, 原因列表)`，供可观测性 |
+
+**落点**（两处，覆盖所有播报来源）：
+1. `deploy/config.py` 的 `_run_steps` —— 免唤醒/截胡指令的 `str` 播报
+2. `core/services/api_server.py` 的 `/api/play/text`、`/api/play/url`、`/api/play/file`
+   —— **HA/企业微信/DDNS 等所有外部播报**（事故的真正入口）
+
+**硬约束**：
+- 必须 `try/finally`（异常也要 `gate_off`），否则 KWS 永久失效
+- 闸门归零与 `resume()` 恢复时都必须 `SherpaOnnx.reset()`，丢弃播报回声帧
+  （AGENTS.md「VAD 状态泄漏陷阱」同一教训）
+- 兜底 timer 防调用方遗忘/异常导致 KWS 永久失效
+- **播报文案不得包含任何 KWS 词表词**（见下）
+
+### TTS 文案安全约束（自触发防护第二道）
+
+**播报文案绝不可包含 KWS 词表（`config.py` 的 `wakeup.keywords` / `DIRECT_COMMANDS` 键）中的任意子串。**
+历史教训：`"正在开启高保真模式"` 命中 `高保真模式`+`开启高保真`；`"高保真模式已开启"` 命中 `高保真模式`。
+现文案已改为 `"正在准备客厅音响"`（bridge）/ `"客厅音响已就绪"`（HA `nuc_tts`）。
+
+新增/修改任何 TTS 文案后，必须跑一次词表交叉检查（`tests/test_kws_gate.py` 之外的手工清单见
+工作区 `doc/plan/incident-kws-self-trigger-loop.md` §5 建议 2）。
 
 ### 不可用的中断方式
 

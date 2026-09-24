@@ -31,6 +31,12 @@ class _KWS:
         self.sample_rate = 16000
         self.frame_duration_ms = (self.frame_size * 1000) / self.sample_rate  # 32ms per frame
 
+        # 播放闸门状态（incident §5 建议 1，详见 gate_on/gate_off）
+        self._gate_lock = threading.Lock()
+        self._gate_count = 0
+        self._gate_reasons: list[str] = []
+        self._gate_timer: threading.Timer | None = None
+
         self.apply_runtime_config()
         self.config_manager.add_reload_listener(self._on_config_reload)
 
@@ -58,8 +64,9 @@ class _KWS:
         )
 
         # 启动 KWS 服务
-        self.paused = False
+        self._conv_paused = False   # 会话流程暂停（由 pause()/resume() 控制）
         self.listen_disabled = False  # T7.6「停止聆听」持久开关（高于 paused，resume 不可撤销）
+        # 注：self.paused 是派生属性（_conv_paused or 闸门计数>0），不可直接赋值
         self.thread = threading.Thread(target=self._detection_loop, daemon=True)
         self.thread.start()
         config = ConfigManager.instance()
@@ -73,23 +80,120 @@ class _KWS:
         return os.path.join(current_dir, "../../../models", file_name)
 
     def pause(self):
-        self.paused = True
+        """会话流程暂停（wakeup_session 进入 AI 对话时调用）。"""
+        self._conv_paused = True
 
     def resume(self):
         # T7.6：用户已显式"停止聆听"时，resume 不生效，保持暂停
         if self.listen_disabled:
             return
-        self.paused = False
+        self._conv_paused = False
+        # AGENTS.md:151-158 教训：恢复时必须 reset Sherpa 流，
+        # 否则暂停期间的音频（含刚刚的 TTS 播报回声）会泄漏到下一轮检测。
+        # 仅在闸门也已归零（真正恢复监听）时 reset。
+        if self._gate_count == 0:
+            self._safe_reset()
+
+    @property
+    def paused(self) -> bool:
+        """派生状态：会话暂停 OR 播放闸门计数 > 0。
+
+        incident-kws-self-trigger-loop.md §5: 播报期间必须停 KWS（闸门），
+        而会话流程（pause/resume）也在停 KWS。两者若各写一个 `paused` 标志会互相踩踏，
+        故统一为派生属性：任一来源要求暂停则暂停。"""
+        return self._conv_paused or self._gate_count > 0
+
+    # ------------------------------------------------------------------
+    # 播放闸门（incident-kws-self-trigger-loop.md §5 建议 1）
+    # 目的：TTS 播报期间暂停 KWS，避免播报文案命中自身词表形成自触发回环。
+    # 与 pause()/resume() 的区别：
+    #   - 引用计数（多个播报并发时不互相踩踏；与会话暂停正交）
+    #   - 自动恢复（即使调用方忘记 gate_off / 抛异常，timer 也会兜底）
+    #   - 恢复时 reset Sherpa 流（丢弃播报回声帧，防泄漏到下一轮，见 AGENTS.md:151-158）
+    # ------------------------------------------------------------------
+    def gate_on(self, reason: str = "", max_seconds: float = 120.0, token: str | None = None) -> str:
+        """开启播放闸门。返回 token。引用计数 +1，并挂一个兜底自动恢复 timer。
+
+        max_seconds: 兜底时限（防调用方异常导致 KWS 永久失效）。
+        """
+        with self._gate_lock:
+            self._gate_count += 1
+            self._gate_reasons.append(reason)
+            if self._gate_timer is not None:
+                self._gate_timer.cancel()
+                self._gate_timer = None
+            if token is None:
+                token = f"gate-{int(time.monotonic()*1000)}-{self._gate_count}"
+            self._gate_timer = threading.Timer(max_seconds, self._gate_autoresume, args=(token,))
+            self._gate_timer.daemon = True
+            self._gate_timer.start()
+            count = self._gate_count
+        logger.debug(
+            f"[KWS] 播放闸门 +1 (count={count}, reason={reason!r}, 兜底={max_seconds:.0f}s)",
+            module="KWS",
+        )
+        return token
+
+    def gate_off(self, token: str | None = None):
+        """关闭播放闸门。引用计数 -1；归零时 reset Sherpa 流。"""
+        with self._gate_lock:
+            if self._gate_count > 0:
+                self._gate_count -= 1
+                if self._gate_reasons:
+                    self._gate_reasons.pop()
+            left = self._gate_count
+            if left > 0:
+                return
+            if self._gate_timer is not None:
+                self._gate_timer.cancel()
+                self._gate_timer = None
+        if not self._conv_paused:
+            self._safe_reset()
+            logger.debug("[KWS] 播放闸门归零，KWS 恢复 + Sherpa 流已 reset", module="KWS")
+        else:
+            logger.debug(
+                "[KWS] 播放闸门归零，但会话仍处于暂停态（等 resume）",
+                module="KWS",
+            )
+
+    def _safe_reset(self):
+        """重置 Sherpa 流（丢弃播报回声帧）。失败不抛。"""
+        try:
+            SherpaOnnx.reset()
+        except Exception:
+            pass
+
+    def _gate_autoresume(self, token: str):
+        """兜底：超过 max_seconds 未解除闸门时强制清零，避免 KWS 永久失效。"""
+        with self._gate_lock:
+            if self._gate_count <= 0:
+                return
+            logger.warning(
+                f"[KWS] 播放闸门超时兜底恢复 (count={self._gate_count}, token={token}) "
+                f"——调用方可能未正常 gate_off",
+                module="KWS",
+            )
+            self._gate_count = 0
+            self._gate_reasons.clear()
+            self._gate_timer = None
+        self._safe_reset()
+
+    def is_gated(self) -> bool:
+        return self._gate_count > 0
+
+    def gate_status(self) -> tuple[int, list[str]]:
+        """返回 (计数, 原因列表)，供可观测性使用。"""
+        return self._gate_count, list(self._gate_reasons)
 
     def disable_listening(self):
         """T7.6「停止聆听」：持久停止 KWS 关键词分析（resume 不可撤销）。"""
         self.listen_disabled = True
-        self.paused = True
+        self._conv_paused = True
 
     def enable_listening(self):
         """T7.6 恢复：经 HTTP AUDIO_INPUT 通道解除停止聆听。"""
         self.listen_disabled = False
-        self.paused = False
+        self._conv_paused = False
 
     def is_listening_disabled(self) -> bool:
         return self.listen_disabled

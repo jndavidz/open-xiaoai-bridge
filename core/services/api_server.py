@@ -34,6 +34,33 @@ class APIServer:
         self._setup_routes()
         self.admin_api.register(self.app)
 
+    def _estimate_gate_seconds(self, text: str) -> float:
+        """估算一段文本的 TTS 时长作为闸门兜底时限（中文约 4.5 字/秒，下限 8s）。
+
+        仅用于非阻塞播放的保守释放/兜底；真实播完时间无法从 ubus 获知（无完成回调）。
+        """
+        n = len((text or "").strip())
+        return max(8.0, min(120.0, n / 4.5 + 6.0))
+
+    def _gate_kws(self, kws, reason: str, max_seconds: float = 60.0):
+        """开 KWS 播放闸门（失败不阻断播报）。"""
+        if not kws:
+            return None
+        try:
+            return kws.gate_on(reason=reason, max_seconds=max_seconds)
+        except Exception as e:
+            logger.warning(f"[APIServer] KWS gate_on failed ({reason}): {e}")
+            return None
+
+    def _ungate_kws(self, kws, token):
+        """关 KWS 播放闸门（失败不抛）。"""
+        if not kws:
+            return
+        try:
+            kws.gate_off(token)
+        except Exception as e:
+            logger.warning(f"[APIServer] KWS gate_off failed: {e}")
+
     def _setup_routes(self):
         """Setup API routes"""
         self.app.router.add_post("/api/play/text", self.handle_play_text)
@@ -114,11 +141,33 @@ class APIServer:
                 )
 
             # Run in background to not block the response
+            # incident-kws-self-trigger-loop.md §5: 外部播报（HA/企微/DDNS）经此端点发声，
+            # 必须开 KWS 播放闸门，否则就是潜在的自触发源（本次事故的真正入口）。
+            kws = get_kws()
             if blocking:
-                result = await speaker.play(text=text, blocking=True, timeout=timeout)
+                token = self._gate_kws(kws, "api/play/text blocking")
+                try:
+                    result = await speaker.play(text=text, blocking=True, timeout=timeout)
+                finally:
+                    self._ungate_kws(kws, token)
                 return web.json_response({"success": result})
             else:
-                asyncio.create_task(speaker.play(text=text, blocking=False, timeout=timeout))
+                # 非阻塞：无法预知播放何时结束，用兜底时分自动恢复。
+                token = self._gate_kws(
+                    kws, "api/play/text background",
+                    max_seconds=self._estimate_gate_seconds(text),
+                )
+
+                async def _play_and_ungate():
+                    try:
+                        await speaker.play(text=text, blocking=False, timeout=timeout)
+                    finally:
+                        # 非阻塞播放在音箱内部异步进行，这里给一个保守的释放延时；
+                        # 真正的兜底由闸门 timer 保证（调用方异常也不会永久失效）。
+                        await asyncio.sleep(self._estimate_gate_seconds(text))
+                        self._ungate_kws(kws, token)
+
+                asyncio.create_task(_play_and_ungate())
                 return web.json_response({"success": True, "message": "Playing text in background"})
 
         except json.JSONDecodeError:
@@ -165,11 +214,27 @@ class APIServer:
                     status=503
                 )
 
+            # incident §5: 任何外部播报都需 KWS 闸门（同 /api/play/text）
+            kws = get_kws()
+
             if blocking:
-                result = await speaker.play(url=url, blocking=True, timeout=timeout)
+                token = self._gate_kws(kws, "api/play/url blocking")
+                try:
+                    result = await speaker.play(url=url, blocking=True, timeout=timeout)
+                finally:
+                    self._ungate_kws(kws, token)
                 return web.json_response({"success": result})
             else:
-                asyncio.create_task(speaker.play(url=url, blocking=False, timeout=timeout))
+                token = self._gate_kws(kws, "api/play/url background", max_seconds=120.0)
+
+                async def _play_url_and_ungate():
+                    try:
+                        await speaker.play(url=url, blocking=False, timeout=timeout)
+                    finally:
+                        await asyncio.sleep(120.0)
+                        self._ungate_kws(kws, token)
+
+                asyncio.create_task(_play_url_and_ungate())
                 return web.json_response({"success": True, "message": "Playing URL in background"})
 
         except json.JSONDecodeError:
@@ -247,6 +312,9 @@ class APIServer:
             logger.info(f"[APIServer] Saved upload to temp file: {temp_path}")
 
             async def play_audio():
+                # incident §5: 文件播报也走音箱功放，同样需 KWS 闸门
+                kws_local = get_kws()
+                token = self._gate_kws(kws_local, "api/play/file", max_seconds=300.0)
                 try:
                     success = await speaker.play_server_file(
                         temp_path,
@@ -259,6 +327,7 @@ class APIServer:
                         logger.error(f"[APIServer] Error playing file: {filename}")
                     return success
                 finally:
+                    self._ungate_kws(kws_local, token)
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
 
