@@ -29,7 +29,7 @@
 
 ```bash
 # 在 bridge/ 仓库根（构建上下文 = 仓库根，含 core/ native/）
-cd /mnt/d/repos/open-xiaoai/bridge
+cd /mnt/d/_work/repos/open-xiaoai/bridge
 
 # 沙箱/受限环境：docker CLI 需写 ~/.docker，用 DOCKER_CONFIG 重定向到可写位置
 export DOCKER_CONFIG=/tmp/docker-config
