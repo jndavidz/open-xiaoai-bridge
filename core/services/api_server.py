@@ -20,6 +20,136 @@ from core.utils.config import ConfigManager
 from core.utils.logger import logger
 
 
+# 注入中继单例引用（wakeup_session 的 TTL 失效钩子经 get_relay() 同步关窗；
+# APIServer.__init__ 赋值。避免模块级循环导入，延迟解析。）
+_relay_singleton = None
+
+
+def get_relay():
+    return _relay_singleton
+
+
+class InjectRelay:
+    """注入流式中继（数据面 rendezvous）。
+
+    生产形态（firmware-asr-injection-feasibility.md §6.1/§7）：
+      - PC 经 `POST /api/inject/stream`（chunked）上行 PCM → 本中继缓冲
+      - 音箱 hook 作 TCP 客户端连 `:9093`（INJECT_TCP=bridge:9093）拉流
+      - **闸门强绑定**：仅注入窗口开启期间转发；窗口关/超时 → 断开下游并丢弃上行
+        （PC 侧时序 bug 最多导致流被丢，不可能绕过闸门防护）
+
+    不落盘、纯内存 chunk 转发；LAN 双跳转发延迟 <2ms（相对云端 ASR 数百 ms 可忽略）。
+    """
+
+    def __init__(self):
+        self.chunks: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self.active: bool = False
+        self.downstream_writer: asyncio.StreamWriter | None = None
+        self._downstream_task: asyncio.Task | None = None
+        self.stats = {"up_bytes": 0, "down_bytes": 0, "sessions": 0}
+
+    def open_session(self) -> None:
+        """开窗：允许上行数据入队。"""
+        self.active = True
+        self.stats["sessions"] += 1
+        logger.info("[InjectRelay] 会话开启（上游可推流）")
+
+    def close_session(self, reason: str = "closed") -> None:
+        """关窗：丢弃后续上行 + 断开下游 hook（hook 会自动重连等下一窗）。"""
+        if not self.active and self.downstream_writer is None:
+            return
+        self.active = False
+        # 断开下游：hook 收到 EOF 后按退避重连，窗口未开时连上也只会被立即断开
+        w = self.downstream_writer
+        if w is not None:
+            self.downstream_writer = None
+            try:
+                w.close()
+            except Exception:
+                pass
+        logger.info(f"[InjectRelay] 会话关闭 ({reason})，累计 up={self.stats['up_bytes']} down={self.stats['down_bytes']}")
+
+    async def handle_upstream(self, request: web.Request) -> web.Response:
+        """POST /api/inject/stream —— PC 上行 PCM（chunked body）。
+
+        窗口未开时直接 409 拒绝（客户端应先 POST /api/inject 开窗）。
+        """
+        caller = self._caller(request) if hasattr(self, "_caller") else "?"
+        if not self.active:
+            return web.json_response(
+                {"success": False, "error": "injection window not open"},
+                status=409,
+            )
+        logger.info(f"[InjectRelay] 上行开始 caller={caller}")
+        dropped = 0
+        try:
+            async for chunk in request.content.iter_any():
+                if not self.active:   # 窗口中途关闭 → 停止接收
+                    break
+                self.stats["up_bytes"] += len(chunk)
+                try:
+                    self.chunks.put_nowait(chunk)
+                except asyncio.QueueFull:
+                    dropped += len(chunk)   # 下游阻塞 → 丢弃最旧策略：直接丢新块（保实时性）
+            return web.json_response({
+                "success": True,
+                "up_bytes": self.stats["up_bytes"],
+                "dropped_bytes": dropped,
+            })
+        except Exception as e:
+            logger.warning(f"[InjectRelay] 上行异常: {e}")
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+        finally:
+            logger.info(f"[InjectRelay] 上行结束 up={self.stats['up_bytes']} dropped={dropped}")
+
+    async def downstream_server(self, host: str, port: int) -> None:
+        """hook 下行 TCP 服务端（:9093）：单客户端，连接后持续推送缓冲中的 PCM。"""
+        async def client_connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            peer = writer.get_extra_info("peername")
+            logger.info(f"[InjectRelay] 下游 hook 已连接: {peer}")
+            self.downstream_writer = writer
+            try:
+                while True:
+                    chunk = await self.chunks.get()
+                    if chunk is None:   # 会话结束哨兵
+                        break
+                    if not self.active and not self.chunks.qsize():
+                        break
+                    writer.write(chunk)
+                    self.stats["down_bytes"] += len(chunk)
+                    await writer.drain()
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            finally:
+                self.downstream_writer = None
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                logger.info("[InjectRelay] 下游连接结束")
+
+        server = await asyncio.start_server(client_connected, host, port)
+        logger.info(f"[InjectRelay] 下游 TCP 服务端就绪 :{port}（hook 客户端拉流）")
+        async with server:
+            await server.serve_forever()
+
+    async def start(self, host: str, port: int) -> None:
+        self._downstream_task = asyncio.create_task(self.downstream_server(host, port))
+
+    async def stop(self) -> None:
+        self.close_session("relay stop")
+        if self._downstream_task:
+            self._downstream_task.cancel()
+
+    async def handle_health(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "success": True,
+            "active": self.active,
+            "stats": self.stats,
+            "queue": self.chunks.qsize(),
+        })
+
+
 class APIServer:
     """HTTP API Server to control XiaoZhi speaker remotely"""
 
@@ -32,6 +162,9 @@ class APIServer:
         self.app = web.Application(middlewares=[self.admin_api.auth_middleware])
         self.runner = None
         self.site = None
+        self.inject_relay = InjectRelay()   # 注入流式中继（数据面）
+        global _relay_singleton
+        _relay_singleton = self.inject_relay
         self._setup_routes()
         self.admin_api.register(self.app)
 
@@ -73,6 +206,8 @@ class APIServer:
         self.app.router.add_post("/api/audio_input", self.handle_audio_input)  # T7.6 恢复通道
         self.app.router.add_post("/api/inject", self.handle_inject)  # ASR 注入窗口（闸门A + P2唤醒）
         self.app.router.add_get("/api/inject", self.handle_inject_status)
+        self.app.router.add_post("/api/inject/stream", self.inject_relay.handle_upstream)  # PC 上行 PCM
+        self.app.router.add_get("/api/inject/relay", self.inject_relay.handle_health)  # 中继观测
         self.app.router.add_get("/api/health", self.handle_health)
         # TTS endpoints
         self.app.router.add_post("/api/tts/doubao", self.handle_tts_doubao)
@@ -102,9 +237,13 @@ class APIServer:
         self.site = web.TCPSite(self.runner, self.host, self.port)
         await self.site.start()
         logger.info(f"[APIServer] HTTP server started at http://{self.host}:{self.port}")
+        # 注入流式中继：下游 TCP（hook 拉流）端口 = HTTP 端口 + 1
+        relay_port = self.port + 1
+        await self.inject_relay.start(self.host, relay_port)
 
     async def stop(self):
         """Stop the HTTP server"""
+        await self.inject_relay.stop()
         if self.runner:
             await self.runner.cleanup()
             logger.info("[APIServer] HTTP server stopped")
@@ -569,6 +708,7 @@ class APIServer:
                     except (TypeError, ValueError):
                         duration = None
                 ttl = EventManager.open_injection_gate(duration)
+                self.inject_relay.open_session()   # 数据面：允许上游推流
 
                 # P2 唤醒路径：复用 xiaoai_asr 模式的静默唤醒，使引擎进入 ASR 出流态。
                 speaker = get_speaker()
@@ -590,6 +730,7 @@ class APIServer:
                 })
 
             EventManager.close_injection_gate()
+            self.inject_relay.close_session("api close")   # 数据面：断下游 + 丢上行
             logger.info(f"[APIServer] /api/inject 关窗 caller={caller}")
             return web.json_response({"success": True, "gate": "closed", "remaining": 0})
 

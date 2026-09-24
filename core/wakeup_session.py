@@ -142,6 +142,14 @@ class WakeupSessionManager:
         if cls._injection_gate_until and time.time() >= cls._injection_gate_until:
             cls._injection_gate_until = 0.0
             logger.warning("[Injection] 闸门 TTL 到期自动恢复（PC 侧可能未正常关闸）")
+            # 数据面同步关窗（避免循环依赖，延迟导入）
+            try:
+                from core.services.api_server import get_relay
+                relay = get_relay()
+                if relay:
+                    relay.close_session("gate TTL expiry")
+            except Exception:
+                pass
             return False
         return cls._injection_gate_until > 0.0
 
