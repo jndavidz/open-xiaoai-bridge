@@ -115,6 +115,10 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   `keywords_score=3.0`（原 2.0）· `keywords_threshold=0.35`（原 0.2）· `vad.threshold=0.4`（原 0.3）
 - ⚠️ **`keywords_score`/`keywords_threshold` 改动需重启容器**（`SherpaOnnx.start()` 只在启动时建 KeywordSpotter；
   config 热重载只刷 `vad.threshold`/`min_silence`）；词表改动同理（`keywords.txt` 启动时编译）
+  ✅ **已上线 2026-09-24**：新 config.py 同步至 NAS + 新镜像（含播放闸门/命中留证/caller 审计）推送 +
+  `docker compose up -d --force-recreate`；启动日志确认 `KWS: [score:3.0, threshold:0.35], VAD:[threshold:0.4]`；
+  容器内验证 `_gate_kws` 落点齐全（`_run_steps` / `api/play/{text,url,file}`）、`/api/audio_input` 恢复接口正常。
+  旧镜像自动保留可回滚；旧 config.py 备份为 `config.py.bak-20260924104901`。
 - 短词（4 字以下）易误触发，优先用「下一首歌曲」而非「下一首」
 - ⚠️ **播报文案不得含词表词**（否则形成自触发回环，见 `bridge/AGENTS.md` 「TTS 文案安全约束」
   及工作区 `doc/plan/incident-kws-self-trigger-loop.md`）
