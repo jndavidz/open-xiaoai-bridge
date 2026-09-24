@@ -102,6 +102,10 @@ class XiaoAIWakeupKeywordTest(unittest.TestCase):
                 return False
 
             @staticmethod
+            def injection_gate_active():
+                return False
+
+            @staticmethod
             async def wakeup(text, source):
                 calls.append((text, source))
 

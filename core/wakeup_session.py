@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from core.ref import (
     get_app,
@@ -13,6 +14,13 @@ from core.utils.logger import logger
 
 class WakeupSessionManager:
     """Dispatches wakeup events to XiaoZhi or external backend controllers."""
+
+    # ---- 注入窗口（firmware-asr-injection-feasibility.md §3.4 机制 A：闸门）----
+    # PC 经 LD_PRELOAD 向固件 ASR 链路注入 PCM 时，bridge 必须吞掉随之而来的
+    # RecognizeResult（否则注入内容会被当作用户指令交给 Agent / 对话后端）。
+    # 闸门带 TTL 自恢复：PC 崩溃/断网未发关闭请求时，到期自动失效，不会永久卡死。
+    INJECTION_GATE_TTL = 30.0  # 秒；PC 侧每次注入前需重新开闸
+    _injection_gate_until: float = 0.0  # unix 时间戳，闸门有效期至
 
     def __init__(self):
         self.config = ConfigManager.instance()
@@ -105,6 +113,42 @@ class WakeupSessionManager:
     def on_silence(self):
         """Called by VAD when silence is detected."""
         pass
+
+    # ---- 注入闸门（机制 A）----
+
+    @classmethod
+    def open_injection_gate(cls, duration: float | None = None) -> float:
+        """开启注入窗口：bridge 在窗口内吞掉原生 ASR 结果。
+
+        Returns: 闸门实际有效期（秒）。duration<=0 立即关闸。
+        """
+        ttl = cls.INJECTION_GATE_TTL if duration is None else float(duration)
+        cls._injection_gate_until = time.time() + ttl if ttl > 0 else 0.0
+        logger.info(
+            f"[Injection] 闸门开启 {ttl:.0f}s（注入期间 RecognizeResult 将被丢弃）"
+        )
+        return ttl
+
+    @classmethod
+    def close_injection_gate(cls) -> None:
+        """关闭注入窗口（PC 侧 finally 应显式调用；超时 TTL 也会自恢复）。"""
+        if cls._injection_gate_until:
+            cls._injection_gate_until = 0.0
+            logger.info("[Injection] 闸门关闭")
+
+    @classmethod
+    def injection_gate_active(cls) -> bool:
+        """闸门是否有效（含 TTL 到期惰性失效）。"""
+        if cls._injection_gate_until and time.time() >= cls._injection_gate_until:
+            cls._injection_gate_until = 0.0
+            logger.warning("[Injection] 闸门 TTL 到期自动恢复（PC 侧可能未正常关闸）")
+            return False
+        return cls._injection_gate_until > 0.0
+
+    @classmethod
+    def injection_gate_remaining(cls) -> float:
+        """闸门剩余秒数（观测用，0 = 未开）。"""
+        return max(0.0, cls._injection_gate_until - time.time()) if cls._injection_gate_until else 0.0
 
     def consume_xiaoai_asr_result(
         self,

@@ -68,6 +68,30 @@ class XiaoAI:
         normalized = cls._normalize_text(text)
         return bool(normalized) and normalized in cls._external_wakeup_keywords
 
+    # ---- 注入标记（firmware-asr-injection-feasibility.md §3.4 机制 B）----
+    INJECTION_MARKER = "注入输入"
+
+    @classmethod
+    def _strip_injection_marker(cls, text: str) -> str | None:
+        """命中注入前缀则返回剥离后的内容，否则 None。
+
+        宽松匹配：允许 ASR 把标记识别成同音/近形词、或标记后带标点/空格。
+        不匹配时返回 None，不影响正常语音流。
+        """
+        if not text:
+            return None
+        t = text.strip()
+        for head in ("注入输入", "朱入输入", "注入书入", "主入输入", "柱入输入"):
+            if t.startswith(head):
+                return t[len(head):].lstrip(" ，,。.、").strip()
+        return None
+
+    @staticmethod
+    def _redact_inject_text(text: str, limit: int = 40) -> str:
+        """注入内容日志脱敏：仅截断，不写完整内容。"""
+        t = (text or "").strip().replace("\n", " ")
+        return t[:limit] + ("…" if len(t) > limit else "")
+
     @classmethod
     async def _suppress_dialog(cls, dialog_id: str, reason: str):
         if not dialog_id:
@@ -205,6 +229,16 @@ class XiaoAI:
                     is_final = payload.get("is_final")
                     is_vad_begin = payload.get("is_vad_begin")
 
+                    # ---- 注入防护（firmware-asr-injection-feasibility.md §3.4）----
+                    # 闸门(A)：PC 注入期间吞掉所有 RecognizeResult，防注入内容被当
+                    # 用户指令进 Agent/对话后端。必须在此之前 return，否则会落入下
+                    # 方分支被转交 handle_text_command。
+                    if EventManager.injection_gate_active():
+                        logger.info(
+                            f"[Injection] 闸门内丢弃 ASR 结果: {cls._redact_inject_text(text)}"
+                        )
+                        return
+
                     if EventManager.consume_xiaoai_asr_result(
                         dialog_id=dialog_id,
                         text=text,
@@ -215,6 +249,20 @@ class XiaoAI:
                             await cls._suppress_dialog(
                                 dialog_id,
                                 f"Bridge 接管原生 ASR",
+                            )
+                        return
+
+                    # 标记(B)：注入音频自带的可识别前缀（双保险，闸门失效时仍可拦截）。
+                    # 命中后剥前缀，仅记录（后续可经 WS/SSE 回传 PC，不进 Agent）。
+                    stripped = cls._strip_injection_marker(text or "")
+                    if stripped is not None:
+                        logger.info(
+                            f"[Injection] 标记命中(闸门外)，已拦截: {cls._redact_inject_text(stripped)}"
+                        )
+                        if dialog_id and is_final:
+                            await cls._suppress_dialog(
+                                dialog_id,
+                                "注入标记拦截",
                             )
                         return
                     

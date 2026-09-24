@@ -13,6 +13,7 @@ from typing import Any
 import open_xiaoai_server
 from aiohttp import web
 from core.ref import get_speaker, get_xiaoai, get_kws
+from core.wakeup_session import EventManager
 from core.services.admin_api import AdminAPI
 from core.services.tts.doubao import DoubaoTTS
 from core.utils.config import ConfigManager
@@ -70,6 +71,8 @@ class APIServer:
         self.app.router.add_post("/api/wakeup", self.handle_wakeup)
         self.app.router.add_post("/api/interrupt", self.handle_stop)
         self.app.router.add_post("/api/audio_input", self.handle_audio_input)  # T7.6 恢复通道
+        self.app.router.add_post("/api/inject", self.handle_inject)  # ASR 注入窗口（闸门A + P2唤醒）
+        self.app.router.add_get("/api/inject", self.handle_inject_status)
         self.app.router.add_get("/api/health", self.handle_health)
         # TTS endpoints
         self.app.router.add_post("/api/tts/doubao", self.handle_tts_doubao)
@@ -537,6 +540,76 @@ class APIServer:
                 {"success": False, "error": str(e)},
                 status=500,
             )
+
+    async def handle_inject(self, request: web.Request) -> web.Response:
+        """
+        POST /api/inject
+        PC 侧 ASR 注入窗口控制（firmware-asr-injection-feasibility.md §3.4/§3.5）。
+
+        开窗 = 开注入闸门（机制 A）+ P2 静默唤醒引擎（pnshelper event_notify）。
+        唤醒后引擎 enable asr=1，云端 ASR 才会出流；闸门保证识别结果不会
+        被当成用户指令交给 Agent/对话后端。
+
+        请求体：
+            {"on": true,  "duration": 30}   # 开窗（duration 可选，默认/上限见 TTL）
+            {"on": false}                    # 关窗（PC finally 必须调用）
+
+        Response:
+            {"success": true, "gate": "open"/"closed", "remaining": <秒>}
+        """
+        try:
+            data = await request.json() if request.can_read_body else {}
+            caller = self._caller(request)
+
+            if data.get("on"):
+                duration = data.get("duration")
+                if duration is not None:
+                    try:
+                        duration = min(max(float(duration), 1.0), EventManager.INJECTION_GATE_TTL)
+                    except (TypeError, ValueError):
+                        duration = None
+                ttl = EventManager.open_injection_gate(duration)
+
+                # P2 唤醒路径：复用 xiaoai_asr 模式的静默唤醒，使引擎进入 ASR 出流态。
+                speaker = get_speaker()
+                woken = None
+                if speaker:
+                    try:
+                        woken = await speaker.wake_up(awake=True, silent=True)
+                    except Exception as e:
+                        logger.warning(f"[APIServer] inject wake_up failed: {e}")
+
+                logger.info(
+                    f"[APIServer] /api/inject 开窗 caller={caller} ttl={ttl:.0f}s wake_up={woken}"
+                )
+                return web.json_response({
+                    "success": True,
+                    "gate": "open",
+                    "remaining": EventManager.injection_gate_remaining(),
+                    "wakeup": woken,
+                })
+
+            EventManager.close_injection_gate()
+            logger.info(f"[APIServer] /api/inject 关窗 caller={caller}")
+            return web.json_response({"success": True, "gate": "closed", "remaining": 0})
+
+        except Exception as e:
+            logger.error(f"[APIServer] Error in inject: {e}")
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500,
+            )
+
+    async def handle_inject_status(self, request: web.Request) -> web.Response:
+        """
+        GET /api/inject
+        注入闸门状态观测（机制 A 的可观测性要求）。
+        """
+        return web.json_response({
+            "success": True,
+            "gate": "open" if EventManager.injection_gate_active() else "closed",
+            "remaining": EventManager.injection_gate_remaining(),
+        })
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """
