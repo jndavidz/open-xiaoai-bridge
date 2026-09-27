@@ -485,3 +485,13 @@ TTS 播报期间 KWS 从未被暂停 → 播报文案命中自身词表 → 音�
 - 项目主页: https://github.com/coderzc/open-xiaoai-bridge
 - 刷机教程: https://github.com/idootop/open-xiaoai/blob/main/docs/flash.md
 - Client 端补丁: https://github.com/idootop/open-xiaoai/blob/main/packages/client-rust/README.md
+
+## Agent skills
+
+### Issue tracker
+
+Issues are local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain.md`.
