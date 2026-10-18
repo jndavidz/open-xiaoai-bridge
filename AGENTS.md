@@ -222,7 +222,7 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 | 优先级 | 能力 | ubus | 验证状态 | 备注 |
 |---|---|---|---|---|
 | **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验** | 全新维度；固件内**无本地码库**，码值需外部提供 |
-| **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../deploy/lx06/mediaplayer-api.md`](../deploy/lx06/mediaplayer-api.md)** |
+| **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md)** |
 | **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop` | ⚠️ 静态解出 | ⚠️ **`code:0` ≠ 播放成功**，需状态回读确认 |
 | **4** | 离线本地指令（断网可用） | `ai_crontab new` | ✅ 真机已验 | ⚠️ ubus 是 **root-only**；`duration` **实测无效** |
 | **5** | 闹钟/提醒（断电持久） | `alarm` 27 方法 | 部分已验 | ⚠️ `chime_hourly_set` 的 `OFF` 返回 `code:0` 但**不写** |
