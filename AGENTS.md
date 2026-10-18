@@ -211,6 +211,36 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 **边界约束**:
 - `stop_device_audio()` 只负责"停播放"，不负责恢复录音；`start_recording()` 属于会话层恢复逻辑，应由 `WakeupSessionManager` / `OpenClawConversationController` 等上层按场景决定
 
+#### ⚠️ 设备能力扩展面（逆向已解出，但 bridge **尚未接入**）
+
+> 来源：固件逆向任务 `D:\_work\dev\reverse\lx06-firmware-reverse\run\open-xiaoai-integration-map.md`
+>
+> **精确盘点**：`grep -rhoE "ubus call [a-z_]+ [a-z_0-9]+" --include=*.py .` ⇒ bridge **只用 4 个** ubus 调用
+> （`pnshelper event_notify` / `mibrain text_to_speech` / `mibrain ai_service` / `mediaplayer player_play_url`），
+> 而设备已解出 **258 个 ubus 方法、138 条 AIVS 指令、`mediaplayer` 43 个方法**。**利用率 ≈2%。**
+
+| 优先级 | 能力 | ubus | 验证状态 | 备注 |
+|---|---|---|---|---|
+| **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验** | 全新维度；固件内**无本地码库**，码值需外部提供 |
+| **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../deploy/lx06/mediaplayer-api.md`](../deploy/lx06/mediaplayer-api.md)** |
+| **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop` | ⚠️ 静态解出 | ⚠️ **`code:0` ≠ 播放成功**，需状态回读确认 |
+| **4** | 离线本地指令（断网可用） | `ai_crontab new` | ✅ 真机已验 | ⚠️ ubus 是 **root-only**；`duration` **实测无效** |
+| **5** | 闹钟/提醒（断电持久） | `alarm` 27 方法 | 部分已验 | ⚠️ `chime_hourly_set` 的 `OFF` 返回 `code:0` 但**不写** |
+
+⛔ **禁止施工（结论已证伪，勿据此开发）**：
+
+| 能力 | 为什么不行 |
+|---|---|
+| `mibrain aivs_event_post` 注入任意 AIVS 指令 | **恒返回 `code:1`**。需云端分配的 `dialog_id`，而 ubus policy 只有 3 字段 ⇒ 协议层无法传入 |
+| 非 root 调 ubus | **root-only**。`/usr/share/acl.d` 不存在 ⇒ ubusd 对 `uid!=0` 一律 `PERMISSION_DENIED` |
+| 用 `external_url` 替换云端 | 实测**文件不存在**，走编译期默认端点。**「自建后端」应是「扩展」而非「替换」**（见 §10 更正） |
+| 依赖 `ai_crontab` 的 `duration` 做定时 | 实测**无效** |
+
+**施工纪律**：
+1. 接新方法前，先查逆向侧 `run/assumptions.md` 对应编号的 `INVALIDATED` 标记 —— **有 5 条结论标题仍是错的、正文已更正**
+2. `code:0` **不等于成功**（`player_play_url` 已实证），批量接入须加**状态回读确认**
+3. 建议抽出一张「设备能力表」（方法名 + policy + 验证状态），避免 `speaker.py` 里硬编码膨胀
+
 ### APIServer (core/services/api_server.py)
 
 HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
@@ -436,7 +466,7 @@ python3 tests/test_admin_panel.py
 
 ### KWS 播放闸门（TTS 自触发回环防护）
 
-**问题**（2026-09-17 事故，见工作区 `doc/plan/incident-kws-self-trigger-loop.md`）：
+**问题**（2026-09-17 事故，见工作区 `docs/plan/incident-kws-self-trigger-loop.md`）：
 TTS 播报期间 KWS 从未被暂停 → 播报文案命中自身词表 → 音箱听见自己 → 自触发回环。
 
 **实现**：`core/services/audio/kws/__init__.py`
@@ -467,7 +497,7 @@ TTS 播报期间 KWS 从未被暂停 → 播报文案命中自身词表 → 音�
 现文案已改为 `"正在准备客厅音响"`（bridge）/ `"客厅音响已就绪"`（HA `nuc_tts`）。
 
 新增/修改任何 TTS 文案后，必须跑一次词表交叉检查（`tests/test_kws_gate.py` 之外的手工清单见
-工作区 `doc/plan/incident-kws-self-trigger-loop.md` §5 建议 2）。
+工作区 `docs/plan/incident-kws-self-trigger-loop.md` §5 建议 2）。
 
 ### 不可用的中断方式
 
@@ -494,4 +524,4 @@ Issues are local markdown files under `.scratch/<feature>/`. See `docs/agents/is
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain.md`.
+Single-context: `GLOSSARY.md` at repo root + `docs/adr/`. See `docs/agents/domain.md`.
