@@ -39,8 +39,12 @@ scp -O -r config.py .env zxsadmin@10.10.10.2:/volume2/docker/open-xiaoai-bridge/
 ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && /usr/local/bin/docker compose up -d'
 ```
 
-## 3.5 ⚠ 设备侧前置：冷启动校时（**必做，否则一次断电即失联**）
+## 3.5 ⚠ 设备侧缺陷：冷启动时钟卡固件构建日 ⇒ 一次断电即失联
 
+> ⚠️ **本节只描述缺陷与修复方案，未对设备做任何改动。**
+> 脚本存于 [`deploy/lx06/timefix.sh`](../../deploy/lx06/timefix.sh)（说明：[`deploy/lx06/README.md`](../../deploy/lx06/README.md)），
+> **何时施工由用户决定**。
+>
 > 取证：逆向侧 `D:\_work\dev\reverse\lx06-firmware-reverse\run\clock-desync-boot-deadlock.md`
 > 安全通告：`doc/plan/security-advisory-lx06-local-dos-and-creds.md` §15
 
@@ -53,45 +57,8 @@ ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && /usr/local/bin
 - `mico_aivs_lab` 卡在 `wait for time sync`，`usock/` 不创建 ⇒ **语音全链路不可用**
 - 第 4 步的 `curl https://gitee.com/...` **会直接失败**
 
-**修法**：用**明文 HTTP `Date:` 头**校时（不校验证书，坏时钟下可用），挂到 `/data/init.sh`。
-
-```bash
-cat > /data/timefix.sh <<'EOS'
-#!/bin/sh
-LOGF=/data/timefix.log
-log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGF"; }
-fetch() {
-    hdr=$(curl -sI -m 6 "$1" 2>/dev/null | grep -i '^date:' | tr -d '\r')
-    [ -z "$hdr" ] && return 1
-    raw=$(echo "$hdr" | cut -d' ' -f2-)
-    utc=$(date -u -D '%a, %d %b %Y %H:%M:%S' -d "$raw" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
-    [ -z "$utc" ] && return 1; echo "$utc"
-}
-i=0
-while [ $i -lt 20 ]; do
-    i=$((i+1))
-    for u in http://223.5.5.5 http://1.1.1.1 http://www.baidu.com http://connect.rom.miui.com/generate_204; do
-        utc=$(fetch "$u") || continue
-        tgt=$(date -u -D '%Y-%m-%d %H:%M:%S' -d "$utc" +%s 2>/dev/null) || continue
-        loc=$(date -u +%s); d=$(( tgt - loc )); [ $d -lt 0 ] && d=$(( -d ))
-        [ $d -le 3600 ] && { log "skip: drift=${d}s"; exit 0; }
-        date -u -s "$utc" && { log "sync ok via $u drift_was=${d}s"; exit 0; }
-    done
-    sleep 3
-done
-log "GIVE UP"
-exit 1
-EOS
-chmod 755 /data/timefix.sh
-
-# 挂到 init.sh（网络就绪后；/etc 是 squashfs 只读，唯一可持久落点是 /data）
-cp /data/init.sh /data/init.sh.bak
-# 在 `echo "✅ 网络连接成功"` 那行之后插入：
-#   [ -x /data/timefix.sh ] && sh /data/timefix.sh
-
-# 立即验证
-sh /data/timefix.sh && date && tail -1 /data/timefix.log
-```
+**修法（备选，未部署）**：用**明文 HTTP `Date:` 头**校时（不校验证书，坏时钟下可用），挂到 `/data/init.sh`。
+完整脚本见 `deploy/lx06/timefix.sh`，此处不重复贴全文。
 
 > **判据用「与 `Date:` 头偏差 > 3600s」**，不要写「年份 < 2026」——后者 2027 年即失效。
 > busybox `date` **没有 `-f`**，必须用 `-D FMT -d TIME`。设备**没有 `base64`/sftp-server**，
@@ -124,7 +91,7 @@ reboot
 
 ## 5. 验收清单（按序）
 
-0. **设备时钟正确**：`ssh root@10.10.10.20 date` → 当前年月；`ls /tmp/mico_aivs_lab/usock/` → 有 `speech.usock`（先完成 §3.5）
+0. **设备时钟正确**（若已断电过则需先处理 §3.5）：`ssh root@10.10.10.20 date` → 当前年月；`ls /tmp/mico_aivs_lab/usock/` → 有 `speech.usock`
 
 1. `curl http://10.10.10.2:9092/api/health` → 200
 2. 浏览器打开 **http://10.10.10.2:9092/admin** → 输入 `.env` 里的 `ADMIN_TOKEN` → 总览页各卡片正常、`MONITOR_SERVICES` 配置的外部服务显示在线
