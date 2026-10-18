@@ -258,6 +258,17 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 | `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |
 
+> 🔒 **架构级依据（2026-10-19 逆向互证）**：此路径的「唯一性」不只是"静音后喊不了"（功能推理），
+> 而是**设备架构决定的** —— 两条独立证据：
+> 1. **语音总线层**：LX06 的 protobuf（`libaivs-message-util.so`）**根本没有 `MIC_ON`/`MIC_OFF` 消息**
+>    （`strings` 零命中；对比 L05B 同族固件**有**这两个）
+> 2. **指令分发层**：`Microphone` 命名空间**只有 `TurnOff`，没有 `TurnOn`**
+>    （`MicrophoneInstructionHandle::TurnOffHandle` + `UnknownHandle`）
+>
+> ⇒ 设备**不提供任何原生开麦通道**。`/api/audio_input` 因此是**架构级唯一路径，务必保持高可用，
+> 不可视为可重构的临时方案**。取证：`docs/devices/lx06/ai-crontab-cmds.md` §4.1、
+> 逆向侧 `run/l05b-cross-check-backref.md` §1。
+
 ### 后台管理面板 (core/services/admin_api.py)
 
 内嵌 Web 控制台（`GET /admin`，单页零依赖），随 APIServer 同端口启动。
