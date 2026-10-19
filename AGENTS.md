@@ -226,6 +226,40 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 **边界约束**:
 - `stop_device_audio()` 只负责"停播放"，不负责恢复录音；`start_recording()` 属于会话层恢复逻辑，应由 `WakeupSessionManager` / `OpenClawConversationController` 等上层按场景决定
 
+#### ⭐ ASR 事件的真实来源（2026-10-19 首次逆向 client 端）
+
+> 取证：`D:\_work\dev\reverse\lx06-firmware-reverse\run\client-monitor-reverse.md`
+> 对象：`/data/open-xiaoai/client`（851 KB，ELF32 ARM，**Rust + tokio 1.47.1**，2104 函数）
+
+**`xiaoai_asr` 模式的 ASR 文本不是走任何 IPC，而是「轮询设备 tmpfs 上的日志文件」**：
+
+```
+client（设备侧）
+  └─ loop { read_line; if EOF { sleep } }        ← 轮询，inotify 出现 0 次
+       ├─ /tmp/mico_aivs_lab/instruction.log     ← ASR 结果（SpeechRecognizer.RecognizeResult）
+       └─ /tmp/open-xiaoai/kws.log               ← 唤醒词
+  └─ arecord 子进程 → PCM 16k                    ← 音频（不是 ALSA API）
+```
+
+**排查含义（重要）**：
+
+| 症状 | 先查什么 | 不要查 |
+|---|---|---|
+| ASR 偶发丢结果 | 设备上 `instruction.log` **是否被截断/重建**（`ls -i` + size 变化） | ❌ 网络 RTT / token / 后端 |
+| 唤醒词丢事件 | `/tmp/open-xiaoai/kws.log` 同上 | ❌ KWS 模型参数 |
+| 解析失败 | ✅ 已排除：真机日志与 `core/xiaoai.py` 的解析链**逐字段兼容** | ❌ 别再怀疑格式 |
+
+**两个坑**：
+
+1. **`arecord` 会抢 ALSA 设备**：client 用 `arecord --quiet -t raw -D -f -r -c …` 抓麦克风，
+   与 bridge 的 `arecord -D noop`（8ch）**不能同时开**。这正是 `hw:0,3` → `noop` patch 的另一面。
+2. **延迟下限由轮询间隔决定**，不是网络。若调 `xiaoai_asr` 的响应延迟，先看 `sleep` 的
+   `Duration`，别去优化网络。
+
+> ⚠️ 未收口：`mico_aivs_lab` 写 `instruction.log` 是**追加还是截断**尚未定论
+> （`ofstream::open(path, mode)` 显式传 mode，需看调用点传 `0x30` 还是 `0x11`）。
+> 一分钟零风险判定法：说一句话前后比 `ls -i` 与 size。
+
 #### ⚠️ 设备能力扩展面（逆向已解出，但 bridge **尚未接入**）
 
 > 来源：固件逆向任务 `D:\_work\dev\reverse\lx06-firmware-reverse\run\open-xiaoai-integration-map.md`
