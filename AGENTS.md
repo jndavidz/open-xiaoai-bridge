@@ -257,10 +257,21 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
 | 唤醒词丢事件 | `/tmp/open-xiaoai/kws.log` 同上 | ❌ KWS 模型参数 |
 | 解析失败 | ✅ 已排除：client **不做 JSON 解析**（`NewLine(String)` 原文透传），bridge 侧用 `.get()` 容错 | ❌ 别再怀疑格式 |
 
-**两个坑**：
+**三个坑**：
+
+0. **LX06 硬件是 6 麦，不是 8 麦**（真机逐通道实测：ch0~ch5 有信号，**ch6/ch7 恒零**；
+   `hw:0,3` 的 8ch 只是音频格式）。6 路底噪接近（−59~−55 dBFS）⇒ 环形阵列等权、
+   无明显主通道 ⇒ 不要指望「取单通道最优」能提升识别率。
+   详见 [`../docs/plan/asr-input-reliability.md`](../docs/plan/asr-input-reliability.md) §1.1
+
 
 1. **`arecord` 抢 ALSA 设备**：client 用 `arecord --quiet -t raw -D -f -r -c …` 抓麦克风，
-   与 bridge 的 `arecord -D noop`（8ch）**不能同时开** —— 这是 `hw:0,3` → `noop` patch 的另一面。
+   与 bridge 的 `arecord -D noop` 采集**不能同时在 client 级并发** ——
+   这是 `hw:0,3` → `noop` patch 的另一面（`dsnoop` 让 1ch 与 6ch 可同时**打开**，
+   但两次独立 `arecord` 进程仍可能互抢）。
+1.5 🔴 **自己调 `arecord` 必须加 `-t raw`**：实测不加时 `-d 1` 产出 **32,044 字节**
+   （预期 32,000）⇒ 多出 **44 字节 WAVE 头**，会把 ASR 的 PCM 流整体打歪。
+   这是「低成本高杀伤」的坑（client 源码里有 `-t raw`，所以它没问题）。
 2. **延迟下限 = 10 ms 轮询**（不是网络）。调 `xiaoai_asr` 响应延迟先看这个。
 
 **⚠ 已知缺陷（不改，但要知道）**：`position = metadata.len()` 让 client 启动时跳过历史
