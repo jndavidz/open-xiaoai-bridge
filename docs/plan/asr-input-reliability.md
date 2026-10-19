@@ -223,6 +223,54 @@ client 源码里加了 `-t raw`，所以**当前无问题**。
 
 ---
 
+## 3.5 ⚠ `kws.log` 是**死通道**（别被 `kws.rs` 误导）
+
+读 client 源码时很容易以为「唤醒事件从 `/tmp/open-xiaoai/kws.log` 来」。**实测不是。**
+
+| 项 | 事实 |
+|---|---|
+| `/tmp/open-xiaoai/kws.log` | **不存在**（连目录都没有） |
+| 谁写它 | 只有 `examples/kws` 那套**独立方案**的 `monitor` 二进制（`examples/kws/init.sh:73`）；**当前未安装** |
+| bridge 读它吗 | ❌ 不读。bridge 用**自己的 sherpa-onnx**（`core/services/audio/kws/sherpa.py`，消费 WS 上来的 PCM） |
+| bridge 处理 `kws` 事件吗 | ❌ 不处理。`core/xiaoai.py` 只分支 `instruction` 与 `playing` |
+
+⇒ client 的 `kws_monitor` 永远卡在
+`while !Path::new(path).exists() { sleep(10ms) }` 空转，**不产生事件、无副作用**。
+
+**两条技术路线二选一，当前选的是 bridge 侧 sherpa-onnx。**
+`examples/kws`（设备侧 monitor）是另一条，未启用。
+
+⚠ **启用前必须先修 panic**（`kws.rs:52-53`）：
+
+```rust
+let timestamp = data[0].parse::<u64>().unwrap();   // 格式不符即 panic
+let keyword = data[1].to_string();                 // 无 '@' 时越界 panic
+```
+
+tokio task panic 后**不会自动重启** ⇒ 一行坏数据就让唤醒通道永久死亡。
+（当前不触发，因为文件根本不存在。）
+
+## 3.6 🔴 排障前置判据：先确认 4399 已建立
+
+真机实测（2026-10-19）：
+
+```
+$ netstat -tn | grep 4399
+tcp  0  1  10.10.10.20:49106  10.10.10.2:4399  SYN_SENT    ← 一直连不上
+```
+
+| 观测 | 值 |
+|---|---|
+| 设备 uptime | 4073 s |
+| client 启动 | 开机即起 |
+| `instruction.log` mtime | 13:09（观测 14:15 ⇒ **1 小时无新写入**） |
+
+⇒ **client 活着，但连不上 NAS 的 bridge**（AX6S 单向阻断）。
+**没有音频上来 ⇒ 没有 ASR ⇒ `instruction.log` 不再增长。**
+
+**判据**：做任何「修 ASR / 调 KWS」的实验前，先看 `netstat` 里 4399 是否 `ESTABLISHED`。
+没有它，一切下游现象都无意义——你会把网络故障误判成 ASR 缺陷。
+
 ## 4. 建议的施工顺序
 
 | 步骤 | 内容 | 依赖 | 风险 |
