@@ -329,11 +329,23 @@ ubus 解析失败（`exit 1`）或文本被静默截断。
 
 | 优先级 | 能力 | ubus | 验证状态 | 备注 |
 |---|---|---|---|---|
-| **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验** | 全新维度；固件内**无本地码库**，码值需外部提供。<br>⭐ **另有一条更短的路**：`echo "<µs序列>" > /sys/ir_tx_gpio/ir_data`（**不需 daemon、不需 heatshrink**）。<br>内核语义已解出：**偶数索引=载波（`val/26.4` 周期）、奇数索引=静默** ⇒ 任意 IR 协议可直接由规格生成，**无需码值库**。⚠ 发送期间关中断 ⇒ 须串行化、限长、不与播放/TTS 并发。详见 [`../docs/devices/lx06/kernel-surface.md`](../docs/devices/lx06/kernel-surface.md) §4 |
+| **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验**，🔴 **但 bridge 内零引用**（`grep ir_agent\|ir_tx → 0`），且**跨机不可达是落地真阻塞**（见下） | 全新维度；固件内**无本地码库**，码值需外部提供。<br>⭐ **另有一条更短的路**：`echo "<µs序列>" > /sys/ir_tx_gpio/ir_data`（**不需 daemon、不需 heatshrink**）。<br>内核语义已解出：**偶数索引=载波（`val/26.4` 周期）、奇数索引=静默** ⇒ 任意 IR 协议可直接由规格生成，**无需码值库**。⚠ 发送期间关中断 ⇒ 须串行化、限长、不与播放/TTS 并发。详见 [`../docs/devices/lx06/kernel-surface.md`](../docs/devices/lx06/kernel-surface.md) §4 |
 | **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md)** |
 | **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop` | ⚠️ 静态解出 | ⚠️ **`code:0` ≠ 播放成功**，需状态回读确认 |
 | **4** | 离线本地指令（断网可用） | `ai_crontab new` | ✅ 真机已验 | ⚠️ ubus 是 **root-only**；`duration` **实测无效** |
 | **5** | 闹钟/提醒（断电持久） | `alarm` 27 方法 | 部分已验 | ⚠️ `chime_hourly_set` 的 `OFF` 返回 `code:0` 但**不写** |
+
+⚠️ **红外落地的真阻塞 = 网络（不是代码）**：
+执行层 `deploy/lx06/ir/`（`ir_tx.py`/`ir_protocols.py`/`ir_probe.py`）已就绪且真机端到端验证通过，
+但**只有 WSL 宿主能连到音箱**：
+
+```
+NAS(10.10.10.2, 有线) → LX06(10.10.10.20, AX6S 无线)   FAIL FAIL FAIL
+WSL宿主(10.10.10.6)  → LX06                            9/9 OK
+```
+
+⇒ 在打通 NAS→LX06 **之前**，不要把红外接进 bridge（bridge 跑在 NAS docker 上）。
+详见 [`../deploy/lx06/ir/README.md`](../deploy/lx06/ir/README.md) §1。
 
 ⛔ **禁止施工（结论已证伪，勿据此开发）**：
 
