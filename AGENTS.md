@@ -236,7 +236,7 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 
 | 优先级 | 能力 | ubus | 验证状态 | 备注 |
 |---|---|---|---|---|
-| **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验** | 全新维度；固件内**无本地码库**，码值需外部提供 |
+| **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验** | 全新维度；固件内**无本地码库**，码值需外部提供。<br>⭐ **另有一条更短的路**：`echo "<µs序列>" > /sys/ir_tx_gpio/ir_data`（**不需 daemon、不需 heatshrink**）。<br>内核语义已解出：**偶数索引=载波（`val/26.4` 周期）、奇数索引=静默** ⇒ 任意 IR 协议可直接由规格生成，**无需码值库**。⚠ 发送期间关中断 ⇒ 须串行化、限长、不与播放/TTS 并发。详见 [`../docs/devices/lx06/kernel-surface.md`](../docs/devices/lx06/kernel-surface.md) §4 |
 | **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md)** |
 | **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop` | ⚠️ 静态解出 | ⚠️ **`code:0` ≠ 播放成功**，需状态回读确认 |
 | **4** | 离线本地指令（断网可用） | `ai_crontab new` | ✅ 真机已验 | ⚠️ ubus 是 **root-only**；`duration` **实测无效** |
@@ -250,9 +250,21 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 | 非 root 调 ubus | **root-only**。`/usr/share/acl.d` 不存在 ⇒ ubusd 对 `uid!=0` 一律 `PERMISSION_DENIED` |
 | 用 `external_url` 替换云端 | 实测**文件不存在**，走编译期默认端点。**「自建后端」应是「扩展」而非「替换」**（见 §10 更正） |
 | 依赖 `ai_crontab` 的 `duration` 做定时 | 实测**无效** |
+| **按「LX06」名字推断 WiFi/BT 芯片** | 🔴 **本机（board_id=10）实载 8987，不是 8821cs**。`8821cs`/`sd8xxx`/`cfg80211`/`compat`/`bt8xxx`/`rtk_btuart`/`et6037` 共 **8 个模块永不加载**。判断依据用 `/proc/mwlan` vs `/proc/rtl8821cs` 的**存在性**，见 [`../docs/devices/lx06/kernel-surface.md`](../docs/devices/lx06/kernel-surface.md) §1 |
+
+⛔ **禁止暴露（内核面，root-only 高危）**：
+
+| 节点 | 为什么不能进 bridge 能力表 |
+|---|---|
+| `/proc/mwlan/adapter0/config` | 19 个内核命令字：`tx_continuous`+`channel`+`tx_power` = **定频干扰源**；`fwdump_file=<path>` = **任意路径 `O_TRUNC` 写**（root）；`sdcmd52rw` = 直发 SDIO CMD52 |
+| `/proc/mwlan/adapter0/wlan0/debug` · `log` | 驱动调试写接口，会触发 dump / 刷屏 |
+
+> ✅ 但 `/proc/mwlan/adapter0/wlan0/info` 是 `0444`（**非 root 可读**），含驱动级
+> `num_tx/rx_bytes`、`num_*_dropped/err`、`channel`、`essid` ⇒ **推荐**作为健康探针接入；
+> ⚠ 它同时泄露 MAC/BSSID/ESSID，**不得写日志或上报云端**。
 
 **施工纪律**：
-1. 接新方法前，先查逆向侧 `run/assumptions.md` 对应编号的 `INVALIDATED` 标记 —— **有 5 条结论标题仍是错的、正文已更正**
+1. 接新方法前，先查逆向侧 `run/assumptions.md` 对应编号的 `INVALIDATED` 标记 —— **有 6 条结论标题仍是错的、正文已更正**（含「8821cs 是主 WiFi」）
 2. `code:0` **不等于成功**（`player_play_url` 已实证），批量接入须加**状态回读确认**
 3. 建议抽出一张「设备能力表」（方法名 + policy + 验证状态），避免 `speaker.py` 里硬编码膨胀
 
