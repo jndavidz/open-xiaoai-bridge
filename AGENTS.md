@@ -208,6 +208,21 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 - `ask_xiaoai(text, silent)` → 让小爱执行指令
 - `run_shell(command, timeout)` → RPC shell
 
+> 🔴 **`set_mic(on=...)` 的语义与设备行为相反（2026-10-19 真机实证，未修）**
+>
+> | bridge 调用 | ubus | 设备实际行为 |
+> |---|---|---|
+> | `set_mic(on=True)`「开麦」 | `pnshelper event_notify {src:3,event:7}` | **创建 `/tmp/mipns/mute` ⇒ 静音** |
+> | `set_mic(on=False)`「关麦」 | `pnshelper event_notify {src:3,event:8}` | **删除 `/tmp/mipns/mute` ⇒ 解除静音** |
+>
+> 设备侧依据：`pns_ubus_helper:sub_11ED8()` —— `a1!=0` → `creat("/tmp/mipns/mute",0600)`；`a1==0` → `unlink()`。
+> **该文件的存在性 = 唤醒静音开关。**
+>
+> 影响：`get_mic()` 读同一文件且**逻辑正确**，与 `set_mic` **互相矛盾**；
+> `T7.6`「停止聆听」用 `set_mic(False)` + `kws.disable_listening()`，
+> ⇒ 表面功能正常（KWS 停了），但**设备级静音从未生效**。
+> **动手前先确认 T7.6 的真实期望**（只要 KWS 停？还是要设备级静音？）。
+> 详见 [`../docs/plan/lx06-set-mic-semantics-reversed.md`](../docs/plan/lx06-set-mic-semantics-reversed.md)
 **边界约束**:
 - `stop_device_audio()` 只负责"停播放"，不负责恢复录音；`start_recording()` 属于会话层恢复逻辑，应由 `WakeupSessionManager` / `OpenClawConversationController` 等上层按场景决定
 
