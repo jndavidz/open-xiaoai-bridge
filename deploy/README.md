@@ -4,7 +4,7 @@
 > 实现：免唤醒/截胡双指令表场景控制 + 「你好贾维斯」OpenAI 兼容大模型连续对话（当前 DeepSeek，可经 admin 面板热切换）+ 「你好老师」
 > 学科辅导（独立人设）+ Agent 工具层（weather/hass/music 只读工具）+ 「停止聆听」隐私开关
 > + HA↔音箱双向 TTS + 后台管理面板。
-> 对应总方案：`../../doc/plan/home-theater-automation-plan.md` Phase C/D；构建与镜像边界见 [REBUILD.md](REBUILD.md)。
+> 对应总方案：`../../docs/plan/home-theater-automation-plan.md` Phase C/D；构建与镜像边界见 [REBUILD.md](REBUILD.md)。
 
 ## 1. 前置
 
@@ -46,7 +46,7 @@ ssh zxsadmin@10.10.10.2 'cd /volume2/docker/open-xiaoai-bridge && /usr/local/bin
 > **何时施工由用户决定**。
 >
 > 取证：逆向侧 `D:\_work\dev\reverse\lx06-firmware-reverse\run\clock-desync-boot-deadlock.md`
-> 安全通告：`doc/plan/security-advisory-lx06-local-dos-and-creds.md` §15
+> 安全通告：`docs/plan/security-advisory-lx06-local-dos-and-creds.md` §15
 
 **问题**：LX06 的 RTC 无效（`rtc0` = `2015-01-01`），`/etc/init.d/boot` 的 `time_init_buildtime()`
 每次冷启动都把系统时钟设成**固件构建日**（`2025-09-17`）。该时间早于云端证书 `notBefore`
@@ -148,7 +148,7 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   旧镜像自动保留可回滚；旧 config.py 备份为 `config.py.bak-20260924104901`。
 - 短词（4 字以下）易误触发，优先用「下一首歌曲」而非「下一首」
 - ⚠️ **播报文案不得含词表词**（否则形成自触发回环，见 `bridge/AGENTS.md` 「TTS 文案安全约束」
-  及工作区 `doc/plan/incident-kws-self-trigger-loop.md`）
+  及工作区 `docs/plan/incident-kws-self-trigger-loop.md`）
 - 命中留证：
   - `data/kws_snapshots/kws_hit_*.pcm`（命中前 5 秒 16k/单声道，最多保留 10 个）
   - 日志行 `[KWS] 命中留证 | keyword=... vad_prob=... tokens=... ts=[...]`

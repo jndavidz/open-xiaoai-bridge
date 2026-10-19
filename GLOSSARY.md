@@ -21,5 +21,5 @@ _Avoid_: 多轮对话
 _Avoid_: 指令路由（路由钩子另指 config 中的代码钩子）
 
 **自触发回环**:
-事故档案 `doc/plan/incident-kws-self-trigger-loop.md`（位于上层仓库 doc/plan/）定名的缺陷模式：TTS 播报文案命中 KWS（免唤醒词）词表 + 播放期间 KWS 无闸门，导致音箱无故自我播报。全量播报闸门落点在 `_run_steps` 与 `/api/play/text` 两个入口。
+事故档案 `docs/plan/incident-kws-self-trigger-loop.md`（位于上层仓库 docs/plan/）定名的缺陷模式：TTS 播报文案命中 KWS（免唤醒词）词表 + 播放期间 KWS 无闸门，导致音箱无故自我播报。全量播报闸门落点在 `_run_steps` 与 `/api/play/text` 两个入口。
 _Avoid_: 死循环
