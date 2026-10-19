@@ -305,6 +305,17 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
 ⇒ **monitor 重启 = 丢那段时间的 ASR**。改成 `position = 0` 会重放全部历史（可能重复执行指令），
 **当前取舍更安全，不建议改**。排障时把它当成「已知丢事件窗口」，别误判为后端故障。
 
+**🔴 另一个已知缺陷：`Speaker.play(blocking=True)` 的 TTS 文本未做 JSON 转义**
+
+`core/services/speaker.py:75` 只做了 shell 单引号转义，而 `tts_play.sh` 内部把 `$1`
+**直接插进 `{"text":"$1"}`**（无 JSON 转义）⇒ 文本含 `"` / `\` / 换行时 **JSON 破裂**：
+ubus 解析失败（`exit 1`）或文本被静默截断。
+
+- `blocking=False` 分支**安全**（走 `json_encode` = `json.dumps`）；
+- 因播报文案多为中文短句，**该缺陷一直未暴露**——属潜伏；
+- 完整取证与修法（**注意：必须先 JSON 转义、后 shell 转义，顺序反了会被破坏**）见
+  [`../docs/devices/lx06/tts-text-escaping-defect.md`](../../docs/devices/lx06/tts-text-escaping-defect.md)。
+
 > 方法论：Rust 二进制去符号后反编译（2104 个匿名 `poll` 状态机）性价比很低。
 > **先 `git clone` 找上游源码**是正确顺序——本轮 5 个文件就拿到了比逆向更确定的答案。
 
