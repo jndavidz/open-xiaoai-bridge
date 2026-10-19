@@ -256,6 +256,32 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 2. `code:0` **不等于成功**（`player_play_url` 已实证），批量接入须加**状态回读确认**
 3. 建议抽出一张「设备能力表」（方法名 + policy + 验证状态），避免 `speaker.py` 里硬编码膨胀
 
+#### ⭐ 优先复用原厂 CLI：`mphelper`（别自己拼 ubus）
+
+> 取证：逆向侧 `run/mphelper-playback-cli.md`；落地参考 [`../docs/devices/lx06/mphelper-playback-cli.md`](../docs/devices/lx06/mphelper-playback-cli.md)
+
+原厂提供了一个**完整的播控 CLI**（`/usr/bin/mphelper`，shell 脚本），
+把播放/音量操作都封装好了，且包含 bridge 自己拼 ubus 时**缺失的三样东西**：
+
+| `mphelper` 提供 | bridge 自己拼 ubus 的缺口 |
+|---|---|
+| **voip 通话闸门**（`voip_call`） | 通话中也可能被 bridge 播放打断 |
+| **声纹注册闸门**（`voice_print_registing`） | 声纹注册中可能被打断 |
+| **按键提示音 + `aivs_track_post` 埋点** | 行为与原厂不一致（云端看不到这些操作） |
+
+**常用命令**：`play` / `pause` / `toggle` / `toggle_quiet` / `next` / `prev` /
+**`iot_next` / `iot_prev`**（无提示音无埋点，IoT 场景更干净）/ `mute_stat` /
+`volume_get` / `volume_set N [beep]` / `continuous_volume_set` / `volume_up` / `volume_down` / `tone <url>`
+
+**三条容易踩错的点**：
+1. ⚠️ 取当前音量用 **`mediaplayer player_get_context`**（解析 `info.volume`），**不是** `get_media_volume`
+2. ⚠️ **`mute_stat` 名不副实** —— 它返回 `player_get_play_status` 的 `info.status`（**播放状态**），不是静音状态
+3. ⚠️ **LX06 的音量步进是 4**（`mphelper` 默认 4；仅 LX01/LX05A/LX05/L07A 是 8）；
+   且原厂 `volume_up/down` **没做 0–100 clamp**，bridge 自己实现时要加
+
+⇒ **建议**：`speaker.py` 的播放/音量类操作**改调 `mphelper`**，
+可免费获得上述闸门与一致性；同时修掉 §SpeakerManager 的 `set_mic` 语义反转。
+
 ### APIServer (core/services/api_server.py)
 
 HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
