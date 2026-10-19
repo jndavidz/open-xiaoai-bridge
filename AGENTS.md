@@ -226,39 +226,49 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 **边界约束**:
 - `stop_device_audio()` 只负责"停播放"，不负责恢复录音；`start_recording()` 属于会话层恢复逻辑，应由 `WakeupSessionManager` / `OpenClawConversationController` 等上层按场景决定
 
-#### ⭐ ASR 事件的真实来源（2026-10-19 首次逆向 client 端）
+#### ⭐ ASR 事件的真实来源（源码级确认，2026-10-19）
 
 > 取证：`D:\_work\dev\reverse\lx06-firmware-reverse\run\client-monitor-reverse.md`
-> 对象：`/data/open-xiaoai/client`（851 KB，ELF32 ARM，**Rust + tokio 1.47.1**，2104 函数）
+> 上游源码：`coderzc/open-xiaoai` `packages/client-rust/src/services/monitor/file.rs`
 
-**`xiaoai_asr` 模式的 ASR 文本不是走任何 IPC，而是「轮询设备 tmpfs 上的日志文件」**：
+**`xiaoai_asr` 的 ASR 文本不经任何 IPC，是 client 轮询设备 tmpfs 上的日志文件**：
 
 ```
-client（设备侧）
-  └─ loop { read_line; if EOF { sleep } }        ← 轮询，inotify 出现 0 次
-       ├─ /tmp/mico_aivs_lab/instruction.log     ← ASR 结果（SpeechRecognizer.RecognizeResult）
-       └─ /tmp/open-xiaoai/kws.log               ← 唤醒词
-  └─ arecord 子进程 → PCM 16k                    ← 音频（不是 ALSA API）
+client（设备侧，Rust + tokio）
+  └─ loop { read_line; if EOF { sleep(10ms) } }     ← 10ms 轮询，无 inotify
+       ├─ /tmp/mico_aivs_lab/instruction.log         ← ASR 结果（原文透传，不做 JSON 解析）
+       └─ /tmp/open-xiaoai/kws.log                   ← 唤醒词
+  └─ arecord 子进程 → PCM 16k                        ← 音频（不是 ALSA API）
 ```
 
-**排查含义（重要）**：
+**`file.rs` 的关键三行语义**：
+
+```rust
+let mut position = metadata.len();   // ★ 启动时跳到末尾 ⇒ 不重放历史
+if current_size < position { position = 0; }      // 检测截断/重建
+sleep(Duration::from_millis(10)).await;           // 轮询间隔
+```
+
+**排障对照表**：
 
 | 症状 | 先查什么 | 不要查 |
 |---|---|---|
-| ASR 偶发丢结果 | 设备上 `instruction.log` **是否被截断/重建**（`ls -i` + size 变化） | ❌ 网络 RTT / token / 后端 |
+| ASR 偶发丢结果 | ① **monitor 是否重启过**（每次 WS 重连 `start()` 都会 abort 旧 task，新 task 从文件末尾起 ⇒ 重启窗口内的 ASR 永久丢失）；② 设备上 `instruction.log` 是否被截断 | ❌ 网络 RTT / token / 后端 / 模型参数 |
 | 唤醒词丢事件 | `/tmp/open-xiaoai/kws.log` 同上 | ❌ KWS 模型参数 |
-| 解析失败 | ✅ 已排除：真机日志与 `core/xiaoai.py` 的解析链**逐字段兼容** | ❌ 别再怀疑格式 |
+| 解析失败 | ✅ 已排除：client **不做 JSON 解析**（`NewLine(String)` 原文透传），bridge 侧用 `.get()` 容错 | ❌ 别再怀疑格式 |
 
 **两个坑**：
 
-1. **`arecord` 会抢 ALSA 设备**：client 用 `arecord --quiet -t raw -D -f -r -c …` 抓麦克风，
-   与 bridge 的 `arecord -D noop`（8ch）**不能同时开**。这正是 `hw:0,3` → `noop` patch 的另一面。
-2. **延迟下限由轮询间隔决定**，不是网络。若调 `xiaoai_asr` 的响应延迟，先看 `sleep` 的
-   `Duration`，别去优化网络。
+1. **`arecord` 抢 ALSA 设备**：client 用 `arecord --quiet -t raw -D -f -r -c …` 抓麦克风，
+   与 bridge 的 `arecord -D noop`（8ch）**不能同时开** —— 这是 `hw:0,3` → `noop` patch 的另一面。
+2. **延迟下限 = 10 ms 轮询**（不是网络）。调 `xiaoai_asr` 响应延迟先看这个。
 
-> ⚠️ 未收口：`mico_aivs_lab` 写 `instruction.log` 是**追加还是截断**尚未定论
-> （`ofstream::open(path, mode)` 显式传 mode，需看调用点传 `0x30` 还是 `0x11`）。
-> 一分钟零风险判定法：说一句话前后比 `ls -i` 与 size。
+**⚠ 已知缺陷（不改，但要知道）**：`position = metadata.len()` 让 client 启动时跳过历史
+⇒ **monitor 重启 = 丢那段时间的 ASR**。改成 `position = 0` 会重放全部历史（可能重复执行指令），
+**当前取舍更安全，不建议改**。排障时把它当成「已知丢事件窗口」，别误判为后端故障。
+
+> 方法论：Rust 二进制去符号后反编译（2104 个匿名 `poll` 状态机）性价比很低。
+> **先 `git clone` 找上游源码**是正确顺序——本轮 5 个文件就拿到了比逆向更确定的答案。
 
 #### ⚠️ 设备能力扩展面（逆向已解出，但 bridge **尚未接入**）
 
