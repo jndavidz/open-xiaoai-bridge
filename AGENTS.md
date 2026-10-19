@@ -274,6 +274,25 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
    这是「低成本高杀伤」的坑（client 源码里有 `-t raw`，所以它没问题）。
 2. **延迟下限 = 10 ms 轮询**（不是网络）。调 `xiaoai_asr` 响应延迟先看这个。
 
+**🚫 死通道：`kws.log`（别被 `kws.rs` 误导）**
+
+`/tmp/open-xiaoai/` 目录**根本不存在**（实测）⇒ client 的 `kws_monitor` 永远卡在
+`while !exists { sleep(10ms) }` 空转，不产生事件、无副作用。
+
+- 唯一写入方是 `examples/kws` 那套**独立方案**的 `monitor` 二进制，**当前未安装**；
+- bridge 的唤醒走**自己的 sherpa-onnx**（`core/services/audio/kws/sherpa.py`，消费 WS 的 PCM）；
+- `core/xiaoai.py` 只分支 `instruction` 与 `playing`，**从不处理 `kws` 事件**。
+
+⇒ 两条技术路线二选一，当前选 bridge 侧。**读 `kws.rs` 会以为「唤醒从这来」，实际没走过。**
+⚠ 若将来启用，先修 `kws.rs` 的 `data[0].parse().unwrap()` + `data[1]` 直接索引
+（一行坏数据即 panic，tokio task 不会自动重启）。
+
+**🔴 排障前置判据：先确认 4399 是 `ESTABLISHED`**
+
+实测 `SYN_SENT`（持续重连）时：client 活着，但连不上 NAS 的 bridge
+⇒ 没有音频 ⇒ 没有 ASR ⇒ `instruction.log` 不再增长（实测 1 小时无新写入）。
+**没有这条连接，一切下游现象都无意义**，否则会把网络故障误判成 ASR 缺陷。
+
 **⚠ 已知缺陷（不改，但要知道）**：`position = metadata.len()` 让 client 启动时跳过历史
 ⇒ **monitor 重启 = 丢那段时间的 ASR**。改成 `position = 0` 会重放全部历史（可能重复执行指令），
 **当前取舍更安全，不建议改**。排障时把它当成「已知丢事件窗口」，别误判为后端故障。
