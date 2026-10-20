@@ -336,3 +336,8 @@ procd respawn 语义**，是权威探针。`respawn.retry=0` = **无限重启**�
 - 旧文档的某句话还算数吗 → §7；
 - 设备接口参数/取值域 → `docs/devices/lx06/`；
 - 逆向侧还剩什么活 → `D:\_work\dev\reverse\lx06-firmware-reverse\run\plan\ROADMAP.md` §3。
+🔴 **取回 TTS 音频一律 `ssh … 'cat <path>'`；`nano_httpd` 8888 为「取完即删」的一次性通道，禁用。**
+每次成功 GET（含中途断连）后它会 `unlink` 请求的文件本身（`nano_httpd` 的 `sub_10FD0:0x116d0`；原厂
+`player_play_url http://localhost:8888/…` 也在播放开始前就删），同一文件第二次恒 `000` ⇒ **无重试窗口**。
+取证：`docs/devices/lx06/tts-audio-direct-fetch.md` §0.0 · 逆向侧 `run/device-local-http-and-event-source-correction.md` §1.4。
+
