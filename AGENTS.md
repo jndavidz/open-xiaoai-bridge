@@ -277,13 +277,15 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
    这是「低成本高杀伤」的坑（client 源码里有 `-t raw`，所以它没问题）。
 2. **延迟下限 = 10 ms 轮询**（不是网络）。调 `xiaoai_asr` 响应延迟先看这个。
 
-3. 🔴 **`InjectRelay` 的 WS 文本订阅可能整窗收不到**（bridge 侧第二根因，与上表
+3. 🔴 **`InjectRelay` 的 WS 文本订阅曾整窗收不到**（bridge 侧第二根因，与上表
    「monitor 重启」并列）：`publish_text()` 只做实时广播，而 `text_queues` 的订阅者是
    **WS 连接时才创建** ⇒ 订阅晚于 ASR 结果产生时，那段文本永久丢失。
    判据：bridge 日志 `[InjectRelay] texts=N`（N>0）但 WS 客户端什么都没收到。
-   修法与**顺序陷阱**见
-   [`docs/plan/inject-relay-text-buffer-replay.md`](docs/plan/inject-relay-text-buffer-replay.md)；待办见 [`docs/plan/README.md`](docs/plan/README.md) B-09。
-   ⚠ 该文档对应的代码改动**尚未提交**（用户未授权改 bridge 代码），当前工作区为改动态。
+   ✅ **已修（2026-10-21）**：改为 `seq` + `?since=N` 断点续取 + 有界回放（`MAX_TEXT_LOG=200`），
+   且**先回放后订阅实时队列**（结构性消除顺序陷阱）。
+   ⚠️ **不要**用「窗口期 buffer + `open_session` 清空」的方案：清空时机与新窗口绑定，
+   会误杀「窗口结束后才连 WS」这个正常场景（详见
+   [`docs/plan/inject-relay-text-buffer-replay.md`](docs/plan/inject-relay-text-buffer-replay.md) §5）。
 
 **🚫 死通道：`kws.log`（别被 `kws.rs` 误导）**
 

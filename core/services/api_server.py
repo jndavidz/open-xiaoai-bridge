@@ -39,7 +39,24 @@ class InjectRelay:
         （PC 侧时序 bug 最多导致流被丢，不可能绕过闸门防护）
 
     不落盘、纯内存 chunk 转发；LAN 双跳转发延迟 <2ms（相对云端 ASR 数百 ms 可忽略）。
+
+    ## 文本回传：单调序号 + 有界回放（2026-10-21）
+
+    文本回传是 **pull-ish 语义**：WS 订阅者晚于 ASR 结果连上是常态
+    （推流→出结果往往同一瞬间完成，而 WS 建连/订阅有调度延迟）。
+
+    因此不能用「窗口缓冲 + 清空」：清空时机与它要修的晚连是同类问题——
+    PC 在窗口结束后才连 WS（正常操作：松开快捷键后工具才连），
+    此时缓冲已被 `open_session` 清掉。
+
+    改用：
+      - `_seq` 单调递增（永不复位）→ 客户端可去重/排序/断点续取
+      - `_text_log` 有界裁剪（只保留最近 MAX_TEXT_LOG 条）→ 内存有上界
+      - 实时通道同样带 seq → 重放与实时靠 seq 对齐，不依赖时序运气
     """
+
+    # 文本回放缓冲上限（条）。一条 ASR 文本通常 ≤ 数百字节，200 条 ≈ 数十 KB。
+    MAX_TEXT_LOG = 200
 
     def __init__(self):
         self.chunks: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -47,10 +64,16 @@ class InjectRelay:
         self.downstream_writer: asyncio.StreamWriter | None = None
         self._downstream_task: asyncio.Task | None = None
         self.text_queues: list[asyncio.Queue] = []   # 文本回传订阅者（WS，多客户端广播）
+        self._text_log: list[tuple[int, str]] = []   # 有界文本日志 [(seq, text)]，不随窗口清
+        self._seq: int = 0                            # 文本序号，单调递增，永不复位
         self.stats = {"up_bytes": 0, "down_bytes": 0, "sessions": 0, "texts": 0}
 
     def open_session(self) -> None:
-        """开窗：允许上行数据入队。"""
+        """开窗：允许上行数据入队。
+
+        ⚠️ 不清理 `_text_log`——文本回放跨窗口保留（见类文档）。
+        窗口语义只约束「上行音频是否转发」与「实时闸门」，不约束文本历史。
+        """
         self.active = True
         self.stats["sessions"] += 1
         self._notify_subscribers("window_open")
@@ -155,29 +178,79 @@ class InjectRelay:
                 pass
 
     def publish_text(self, text: str) -> None:
-        """闸门拦截点调用：把识别文本广播给所有 WS 订阅者（仅窗口开启期）。"""
+        """闸门拦截点调用：把识别文本广播给所有 WS 订阅者（仅窗口开启期）。
+
+        同时写入 `_text_log`（带单调 seq）——WS 订阅者连接晚于 ASR 结果时
+        （推流瞬间完成），连上后按 seq 回放，保证不丢文本且可去重。
+        """
         if not self.active or not text:
             return
         self.stats["texts"] += 1
+        self._seq += 1
+        seq = self._seq
+        self._text_log.append((seq, text))
+        if len(self._text_log) > self.MAX_TEXT_LOG:
+            # 有界裁剪：只保留最近 MAX_TEXT_LOG 条，保证内存上界
+            del self._text_log[: len(self._text_log) - self.MAX_TEXT_LOG]
         for q in list(self.text_queues):
             try:
-                q.put_nowait(text)
+                q.put_nowait((seq, text))
             except asyncio.QueueFull:
-                logger.warning("[InjectRelay] 文本订阅队列满，丢弃一条")
+                logger.warning(
+                    "[InjectRelay] 文本订阅队列满，丢弃实时推送"
+                    "（客户端可经 ?since= 重连补拉）"
+                )
 
     async def handle_ws_text(self, request: web.Request) -> web.WebSocketResponse:
-        """GET /api/inject/text (WebSocket) —— PC 订阅识别文本。
+        """GET /api/inject/text?since=N (WebSocket) —— PC 订阅识别文本。
 
-        仅窗口开启期有文本；连接保持（窗口开/关事件通知），断线由 PC 重连。
+        `since` 语义与回放/实时顺序保证见 `_serve_text_subscription`。
         """
         ws = web.WebSocketResponse(heartbeat=15)
         await ws.prepare(request)
+        since = self.parse_since(request.query.get("since"))
+        await self._serve_text_subscription(ws, since)
+        return ws
+
+    @staticmethod
+    def parse_since(raw) -> int:
+        """解析 `?since=`；非法/缺省 → 0（= 回放全部保留历史）。"""
+        try:
+            value = int(raw or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, value)
+
+    async def _serve_text_subscription(self, ws, since: int) -> None:
+        """在已准备好的 WS 上服务文本订阅（与传输层解耦，便于测试）。
+
+        回放语义（为什么不是「窗口缓冲」）：
+          - `since` 0        → 回放当前保留的全部历史（最多 MAX_TEXT_LOG 条）
+          - `since` N (>0)   → 只回放 seq > N 的文本（断点续取，客户端记最后 seq）
+        每条文本都带 `seq`，客户端可据此去重与排序。
+
+        ⚠️ 顺序保证：**先回放，再订阅实时队列**。若先 `create_task` 再回放，
+        `await ws.send_json` 会让出控制权 ⇒ 实时推送可能插到回放中途 ⇒ 乱序。
+        （即使如此，客户端也能靠 seq 纠正，但服务端应保证不乱序。）
+        """
         q: asyncio.Queue = asyncio.Queue(maxsize=64)
-        self.text_queues.append(q)
-        logger.info(f"[InjectRelay] 文本订阅接入（当前 {len(self.text_queues)} 个）")
-        push_task = asyncio.create_task(self._push_texts(ws, q))
+        push_task: asyncio.Task | None = None
         try:
             await self._notify_state(ws)
+            # ① 先回放历史（此时尚未订阅实时队列，不可能有实时插队）
+            replayed = 0
+            for seq, t in list(self._text_log):
+                if seq > since:
+                    await ws.send_json({"event": "text", "seq": seq, "text": t})
+                    replayed += 1
+            # ② 回放完再订阅实时队列（消除顺序陷阱）
+            self.text_queues.append(q)
+            push_task = asyncio.create_task(self._push_texts(ws, q))
+            logger.info(
+                f"[InjectRelay] 文本订阅接入（当前 {len(self.text_queues)} 个，"
+                f"since={since} 回放 {replayed} 条）"
+            )
+
             async for msg in ws:
                 if msg.type == web.WSMsgType.TEXT:
                     if msg.data == "ping":
@@ -186,11 +259,11 @@ class InjectRelay:
                 if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
                     break
         finally:
-            push_task.cancel()
+            if push_task is not None:
+                push_task.cancel()
             if q in self.text_queues:
                 self.text_queues.remove(q)
             logger.info(f"[InjectRelay] 文本订阅断开（剩 {len(self.text_queues)} 个）")
-        return ws
 
     async def _notify_state(self, ws: web.WebSocketResponse):
         await ws.send_json({
@@ -203,7 +276,8 @@ class InjectRelay:
             if isinstance(item, str) and item.startswith("__event__:"):
                 await ws.send_json({"event": item.split(":", 1)[1]})
             else:
-                await ws.send_json({"event": "text", "text": item})
+                seq, text = item
+                await ws.send_json({"event": "text", "seq": seq, "text": text})
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
@@ -235,7 +309,16 @@ class APIServer:
     def _estimate_gate_seconds(self, text: str) -> float:
         """估算一段文本的 TTS 时长作为闸门兜底时限（中文约 4.5 字/秒，下限 8s）。
 
-        仅用于非阻塞播放的保守释放/兜底；真实播完时间无法从 ubus 获知（无完成回调）。
+        仅用于非阻塞播放的保守释放/兜底。
+
+        ⚠️ 2026-10-20 更正：本函数注释原写「真实播完时间无法从 ubus 获知（无完成回调）」
+        **已被推翻** —— 设备**有**完成回调：`ubus listen` 收
+        `play_status_broadcast_event`（`{"status":1}` 开始 / `{"status":0}` 播完）。
+        详见 `docs/devices/lx06/ubus-events-play-status.md`。
+
+        注意该回调的三条边界（并发不可用 / `status:0` 也可能是失败 /
+        HTTP 源不可达时只发 `status:1`）⇒ 本估算应**保留为超时兜底上限**，
+        而非被完全替换。
         """
         n = len((text or "").strip())
         return max(8.0, min(120.0, n / 4.5 + 6.0))

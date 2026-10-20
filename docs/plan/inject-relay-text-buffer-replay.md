@@ -1,7 +1,9 @@
 # 建议：`InjectRelay` 补窗口期文本缓冲，修 WS 晚连丢 ASR 文本
 
 > 本文的「待办 / 授权 / 排序」已并入 [`README.md`](README.md)（**项目侧计划唯一权威**）；本文只保留**深度取证与方案细节**，过时断言已在 `README.md` §7 取代链登记。
-> 状态：**待用户定夺**（代码改动**未提交**，见 §4）
+> 状态：🟢 **已被取代（2026-10-21）**——最终实现改用 `seq` + `?since=` 断点续取，**不是**本文的 `text_buffer` 方案。原因见 §5。
+> 本文保留为**问题取证与推理过程**（问题本身成立，§1–§2 仍有效）。
+> 现行实现与状态追踪 → [`README.md`](README.md) **B-09**。
 > 提出时间：2026-10-19
 > 关联：[`asr-input-reliability.md`](asr-input-reliability.md) §WS 重连窗口（A1–A4 同族问题）
 
@@ -112,23 +114,47 @@ push_task = asyncio.create_task(self._push_texts(ws, q))   # ② 再开实时
 
 ---
 
-## 4. ⚠️ 当前状态：代码改动未提交（现由 `README.md` B-09 跟踪）
+## 4. ⚠️ 状态（2026-10-21 更新：本文方案已被取代）
 
-`core/services/api_server.py` 已有上述改动的**工作区版本**（`git diff` 可见），
-但用户只授权「建议落到 `bridge/docs/plan`」，**未授权改 bridge 代码**
-⇒ 该改动**保留未提交状态**，等定夺：**保留并提交** / **回退**。
+本文的 `text_buffer` 方案**未采用**。最终实现见 §5。
 
-现行跟踪项 = [`README.md`](README.md) **B-09**（含「保留前必须先修 §3.2 顺序陷阱」这一前置）。
+（历史：`core/services/api_server.py` 曾留有本文对应的未提交改动；
+已于 2026-10-21 被 `seq` + `?since=` 方案重写并提交。）
 
-### 4.1 若要回退
+---
 
-```bash
-cd bridge && git checkout -- core/services/api_server.py
+## 5. 🟢 最终实现（2026-10-21）：为什么不用 `text_buffer`
+
+本文 §3.2 已识别「顺序陷阱」，但还有**第二个更根本的缺陷**：
+
+```python
+def open_session(self):
+    self.text_buffer.clear()   # ← 开新窗口就清空历史
 ```
 
-### 4.2 若要保留
+**PC 在窗口结束之后才连 WS 是正常操作**（松开快捷键 → 工具才建立连接）。
+此时上一窗口的文本已被清掉 ⇒ **本文方案害的正是它想修的那类场景**，
+只是把时间窗从「几十毫秒」拉长到「一个会话」。
 
-需补：
-1. **先修 §3.2 的顺序陷阱**（重放挪到 `push_task` 之前）；
-2. 一次真机/容器验证（WS 晚连场景：先推流后连 WS，确认收到历史文本且顺序正确）；
-3. 补一条说明到 `bridge/AGENTS.md` 的坑清单（WS 订阅晚于 ASR ⇒ 靠 text_buffer 兜底）。
+因此改为 **拉取（pull）语义**：
+
+| 模型 | 例子 | 晚到者 |
+|---|---|---|
+| push（广播） | 原 `publish_text` 的 `text_queues` | ❌ 永久丢失 |
+| pull（带序号） | 现 `?since=N` + `_text_log` | ✅ 可补拉 |
+
+实现要点：
+
+| 机制 | 作用 |
+|---|---|
+| `_seq` 单调递增、永不复位 | 去重 / 排序 / 断点续取 |
+| `_text_log` 有界裁剪（`MAX_TEXT_LOG=200`） | 内存有界，且**不随窗口清空** |
+| `GET /api/inject/text?since=N` | 只回放 `seq > N` |
+| 每帧带 `seq` | 实时/回放同一序号空间，乱序可被纠正 |
+| 先回放、后订阅实时队列 | **结构性**消除 §3.2 的顺序陷阱 |
+
+⚠️ **消费端尚未实现**：全仓检索确认 `/api/inject/text` 目前**无任何消费方**。
+（aurora 是 NAS 上的对话后端，与注入链路正交，**不订阅此 WS**。）
+未来 PC 侧输入工具实现时，应记最后 `seq` 并在重连时带 `?since=`。
+
+测试：`tests/test_inject_text_replay.py`（13 条，纯内存 asyncio，不出声、不碰设备）。
