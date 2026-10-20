@@ -230,7 +230,17 @@ command = f"/usr/sbin/tts_play.sh '{_safe}'"
 （aurora 是 NAS 上的对话后端，与注入链路正交，**不订阅此 WS**）。
 未来 PC 侧输入工具实现时，应记最后 `seq` 并在重连时带 `?since=`。
 
-测试：`tests/test_inject_text_replay.py`（13 条，纯内存 asyncio，不出声不碰设备）。
+**2026-10-21 真机实测补充（`is_final`）**：对一句话，云端会发**多条** `RecognizeResult`，
+且 `text` 是**累积快照**（「今天天气怎么样」实测 **8 条**：`今`→`今天天气`→…）。
+`is_final=true` **只在最后一条**；第 7 条（`is_nlp_request`+`is_stop`）与第 8 条**文本相同**。
+
+⇒ 帧格式扩为 `{"event":"text","seq":N,"text":"...","is_final":bool}`：
+PC 端按 `is_final` 区分「预览」与「提交」，且必须**覆盖**而非追加（因为是快照）。
+中间快照**不过滤**——语音输入法需要边说话边出字。
+
+设备事实：[`docs/devices/lx06/recognize-result-event-sequence.md`](../../../docs/devices/lx06/recognize-result-event-sequence.md)
+
+测试：`tests/test_inject_text_replay.py`（17 条，纯内存 asyncio，不出声不碰设备）。
 
 **B-06 的判据设计**（音频静默检测，避免误报）：正常 30 ms 一帧；**无帧告警 3 s**（=100 帧空窗）；
 **连续静音告警 30 s**（用户不说话也有空帧）；收到 1 帧即恢复。恢复动作 = `stop_recording` → `start_recording`

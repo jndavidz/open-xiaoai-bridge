@@ -238,11 +238,13 @@ class XiaoAI:
                             f"[Injection] 闸门内丢弃 ASR 结果: {cls._redact_inject_text(text)}"
                         )
                         # 文本回传：广播给 WS 订阅者（PC 润色后插入光标）
+                        # is_final 必须透传（真机实测：一句话会产生多条 RecognizeResult，
+                        # 且为累积快照；中间快照供「边说边出字」，is_final=true 才是最终结果）。
                         try:
                             from core.services.api_server import get_relay
                             relay = get_relay()
                             if relay:
-                                relay.publish_text(text or "")
+                                relay.publish_text(text or "", is_final=bool(is_final))
                         except Exception:
                             pass
                         return

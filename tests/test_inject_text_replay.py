@@ -151,8 +151,12 @@ class FakeWS:
         yield  # pragma: no cover  (使其成为 async generator)
 
     def texts(self):
-        """按发送顺序返回 (seq, text) 列表。"""
-        return [(o["seq"], o["text"]) for o in self.sent if o.get("event") == "text"]
+        """按发送顺序返回 (seq, text, is_final) 列表。"""
+        return [
+            (o["seq"], o["text"], o.get("is_final"))
+            for o in self.sent
+            if o.get("event") == "text"
+        ]
 
 
 class FakeRequest:
@@ -227,7 +231,7 @@ class LateSubscriptionTest(_TextReplayTestBase):
         relay.publish_text("第二句")
 
         task, ws = await self._connect(relay)
-        self.assertEqual([t for _, t in ws.texts()], ["第一句", "第二句"])
+        self.assertEqual([t for _, t, _ in ws.texts()], ["第一句", "第二句"])
         await self._stop(relay, task, ws)
 
     async def test_replay_precedes_realtime(self):
@@ -247,7 +251,7 @@ class LateSubscriptionTest(_TextReplayTestBase):
             if len(ws.texts()) >= 2:
                 break
 
-        self.assertEqual([t for _, t in ws.texts()], ["历史", "实时"])
+        self.assertEqual([t for _, t, _ in ws.texts()], ["历史", "实时"])
         await self._stop(relay, task, ws)
 
 
@@ -261,7 +265,7 @@ class SequenceTest(_TextReplayTestBase):
             relay.publish_text(f"第{i}句")
 
         task, ws = await self._connect(relay)
-        seqs = [s for s, _ in ws.texts()]
+        seqs = [s for s, _, _ in ws.texts()]
         self.assertEqual(seqs, [1, 2, 3, 4, 5])
         self.assertEqual(len(seqs), len(set(seqs)), "seq 必须唯一，客户端才能去重")
         await self._stop(relay, task, ws)
@@ -273,7 +277,7 @@ class SequenceTest(_TextReplayTestBase):
             relay.publish_text(f"t{i}")
 
         task, ws = await self._connect(relay, since=3)
-        self.assertEqual(ws.texts(), [(4, "t4"), (5, "t5")])
+        self.assertEqual([(s, t) for s, t, _ in ws.texts()], [(4, "t4"), (5, "t5")])
         await self._stop(relay, task, ws)
 
     async def test_since_beyond_head_returns_nothing(self):
@@ -295,7 +299,7 @@ class SequenceTest(_TextReplayTestBase):
         self.assertEqual(invalid, 0, "非法 since 必须回退为 0（全量回放）")
         task = asyncio.create_task(relay._serve_text_subscription(ws, invalid))
         await self._settle(relay, ws, expected_at_least=1)
-        self.assertEqual([t for _, t in ws.texts()], ["a"])
+        self.assertEqual([t for _, t, _ in ws.texts()], ["a"])
         await self._stop(relay, task, ws)
 
 
@@ -318,7 +322,7 @@ class BoundedLogTest(_TextReplayTestBase):
             relay.publish_text(f"x{i}")
 
         task, ws = await self._connect(relay, wait_texts=limit)
-        got = [t for _, t in ws.texts()]
+        got = [t for _, t, _ in ws.texts()]
         self.assertEqual(len(got), limit)
         # 最新一条必须还在
         self.assertEqual(got[-1], f"x{limit + 4}")
@@ -338,7 +342,7 @@ class CrossWindowTest(_TextReplayTestBase):
 
         # 用户松开快捷键后工具才连 WS：此时窗口已关、新窗口未开
         task, ws = await self._connect(relay)
-        self.assertEqual([t for _, t in ws.texts()], ["窗口A的文本"],
+        self.assertEqual([t for _, t, _ in ws.texts()], ["窗口A的文本"],
                          "文本不应随窗口清空")
         await self._stop(relay, task, ws)
 
@@ -352,7 +356,7 @@ class CrossWindowTest(_TextReplayTestBase):
         self.assertEqual(len(relay._text_log), 1)
 
         task, ws = await self._connect(relay)
-        self.assertEqual([t for _, t in ws.texts()], ["A"])
+        self.assertEqual([t for _, t, _ in ws.texts()], ["A"])
         await self._stop(relay, task, ws)
 
 
@@ -383,13 +387,96 @@ class GateSemanticsTest(_TextReplayTestBase):
         relay.publish_text("实时")
         for _ in range(50):
             await asyncio.sleep(0)
-            if all(any(t == "实时" for _, t in ws.texts()) for ws in (ws1, ws2)):
+            if all(any(t == "实时" for _, t, _ in ws.texts()) for ws in (ws1, ws2)):
                 break
 
         for ws in (ws1, ws2):
-            self.assertIn("实时", [t for _, t in ws.texts()])
+            self.assertIn("实时", [t for _, t, _ in ws.texts()])
         await self._stop(relay, task1, ws1)
         await self._stop(relay, task2, ws2)
+
+
+class IsFinalTest(_TextReplayTestBase):
+    """`is_final` 透传（2026-10-21 真机实测驱动）。
+
+    真机证据：对「今天天气怎么样」一句话，云端发 **8 条** RecognizeResult，
+    且为**累积快照**（不是增量）：
+
+        1-2  "":                        is_final=false
+        3    "今":                      is_vad_begin=true
+        4    "今天天气":                  is_final=false
+        5    "今天天气怎么":              is_final=false
+        6    "今天天气怎么样":            is_final=false
+        7    "今天天气怎么样":            is_nlp_request=true, is_stop=true
+        8    "今天天气怎么样":            **is_final=true**
+
+    ⇒ 必须透传 is_final：否则 PC 端无法判断"说完了"，且第 7/8 条文本相同会重复插入。
+    """
+
+    # 真机实测序列（text, is_final）
+    REAL_DEVICE_SEQUENCE = [
+        ("今", False),
+        ("今天天气", False),
+        ("今天天气怎么", False),
+        ("今天天气怎么样", False),
+        ("今天天气怎么样", False),
+        ("今天天气怎么样", True),
+    ]
+
+    async def test_is_final_passed_through(self):
+        relay = self.InjectRelay()
+        relay.open_session()
+        for text, final in self.REAL_DEVICE_SEQUENCE:
+            relay.publish_text(text, is_final=final)
+
+        task, ws = await self._connect(relay, wait_texts=len(self.REAL_DEVICE_SEQUENCE))
+        got = ws.texts()
+
+        self.assertEqual(len(got), len(self.REAL_DEVICE_SEQUENCE))
+        # 只有最后一条 is_final=True
+        self.assertEqual([f for _, _, f in got],
+                         [f for _, f in self.REAL_DEVICE_SEQUENCE])
+        self.assertEqual(sum(1 for _, _, f in got if f), 1,
+                         "一句话只应有一条 is_final=True")
+        # 文本是累积快照：最后一条是完整文本
+        self.assertEqual(got[-1][1], "今天天气怎么样")
+
+    async def test_default_is_final_is_false(self):
+        """不传 is_final 时默认为 False（向后兼容旧调用方）。"""
+        relay = self.InjectRelay()
+        relay.open_session()
+        relay.publish_text("legacy")
+
+        task, ws = await self._connect(relay, wait_texts=1)
+        self.assertEqual(ws.texts(), [(1, "legacy", False)])
+        await self._stop(relay, task, ws)
+
+    async def test_is_final_survives_replay(self):
+        """晚连回放时 is_final 不能丢（否则客户端无法判断终态）。"""
+        relay = self.InjectRelay()
+        relay.open_session()
+        for text, final in self.REAL_DEVICE_SEQUENCE:
+            relay.publish_text(text, is_final=final)
+
+        # 全部历史都在，晚连者必须能看到哪条是 final
+        task, ws = await self._connect(relay, wait_texts=len(self.REAL_DEVICE_SEQUENCE))
+        finals = [(seq, t) for seq, t, f in ws.texts() if f]
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0][1], "今天天气怎么样")
+        await self._stop(relay, task, ws)
+
+    async def test_since_replay_preserves_is_final(self):
+        relay = self.InjectRelay()
+        relay.open_session()
+        for text, final in self.REAL_DEVICE_SEQUENCE:
+            relay.publish_text(text, is_final=final)
+
+        # 从倒数第二条之后续取：只应拿到最后一条（且 is_final=True）
+        task, ws = await self._connect(relay, since=len(self.REAL_DEVICE_SEQUENCE) - 1,
+                                       wait_texts=1)
+        self.assertEqual(ws.texts(), [(len(self.REAL_DEVICE_SEQUENCE),
+                                       "今天天气怎么样", True)])
+        await self._stop(relay, task, ws)
 
 
 if __name__ == "__main__":

@@ -283,6 +283,8 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
    判据：bridge 日志 `[InjectRelay] texts=N`（N>0）但 WS 客户端什么都没收到。
    ✅ **已修（2026-10-21）**：改为 `seq` + `?since=N` 断点续取 + 有界回放（`MAX_TEXT_LOG=200`），
    且**先回放后订阅实时队列**（结构性消除顺序陷阱）。
+   ⚠️ **同一轮实测**：一句话会产生**多条** `RecognizeResult`（累积快照），`is_final` 只在最后一条
+   ⇒ 帧里必须带 `is_final`，客户端要区分「预览/提交」并**覆盖**而非追加。
    ⚠️ **不要**用「窗口期 buffer + `open_session` 清空」的方案：清空时机与新窗口绑定，
    会误杀「窗口结束后才连 WS」这个正常场景（详见
    [`docs/plan/inject-relay-text-buffer-replay.md`](docs/plan/inject-relay-text-buffer-replay.md) §5）。

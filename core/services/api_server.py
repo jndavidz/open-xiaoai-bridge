@@ -177,24 +177,37 @@ class InjectRelay:
             except asyncio.QueueFull:
                 pass
 
-    def publish_text(self, text: str) -> None:
+    def publish_text(self, text: str, is_final: bool = False) -> None:
         """闸门拦截点调用：把识别文本广播给所有 WS 订阅者（仅窗口开启期）。
 
         同时写入 `_text_log`（带单调 seq）——WS 订阅者连接晚于 ASR 结果时
         （推流瞬间完成），连上后按 seq 回放，保证不丢文本且可去重。
+
+        `is_final` 语义（2026-10-21 真机实测）：云端 ASR 对**一句话**会发**多条**
+        `RecognizeResult`，且是「累积快照」不是增量。实测「今天天气怎么样」的一句：
+
+            第1–2 条 text=""            （is_final=false）
+            第3 条   text="今"          （is_vad_begin=true）
+            第4–6 条 text="今天天气"/"今天天气怎么"/"今天天气怎么样"
+            第7 条   text="今天天气怎么样"（is_nlp_request=true, is_stop=true）
+            第8 条   text="今天天气怎么样"（**is_final=true**）
+
+        ⇒ **必须把 `is_final` 透传给客户端**：否则 PC 端无法区分「还在说」与「说完了」，
+        且第 7/8 条文本相同（不区分就会重复插入）。
+        中间快照**不过滤**：语音输入法需要边说话边出字。
         """
         if not self.active or not text:
             return
         self.stats["texts"] += 1
         self._seq += 1
         seq = self._seq
-        self._text_log.append((seq, text))
+        self._text_log.append((seq, text, bool(is_final)))
         if len(self._text_log) > self.MAX_TEXT_LOG:
             # 有界裁剪：只保留最近 MAX_TEXT_LOG 条，保证内存上界
             del self._text_log[: len(self._text_log) - self.MAX_TEXT_LOG]
         for q in list(self.text_queues):
             try:
-                q.put_nowait((seq, text))
+                q.put_nowait((seq, text, bool(is_final)))
             except asyncio.QueueFull:
                 logger.warning(
                     "[InjectRelay] 文本订阅队列满，丢弃实时推送"
@@ -239,9 +252,11 @@ class InjectRelay:
             await self._notify_state(ws)
             # ① 先回放历史（此时尚未订阅实时队列，不可能有实时插队）
             replayed = 0
-            for seq, t in list(self._text_log):
+            for seq, t, is_final in list(self._text_log):
                 if seq > since:
-                    await ws.send_json({"event": "text", "seq": seq, "text": t})
+                    await ws.send_json(
+                        {"event": "text", "seq": seq, "text": t, "is_final": is_final}
+                    )
                     replayed += 1
             # ② 回放完再订阅实时队列（消除顺序陷阱）
             self.text_queues.append(q)
@@ -276,8 +291,10 @@ class InjectRelay:
             if isinstance(item, str) and item.startswith("__event__:"):
                 await ws.send_json({"event": item.split(":", 1)[1]})
             else:
-                seq, text = item
-                await ws.send_json({"event": "text", "seq": seq, "text": text})
+                seq, text, is_final = item
+                await ws.send_json(
+                    {"event": "text", "seq": seq, "text": text, "is_final": is_final}
+                )
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
