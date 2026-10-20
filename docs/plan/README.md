@@ -226,9 +226,13 @@ command = f"/usr/sbin/tts_play.sh '{_safe}'"
 | 每条帧带 `seq` | 实时/回放用同一序号空间，**不再依赖时序运气** |
 | **先回放、后订阅实时队列** | 结构性消除顺序陷阱（非靠调用顺序约束） |
 
-⚠️ **消费端尚未实现**：全仓检索确认 `/api/inject/text` 目前**没有任何消费方**
-（aurora 是 NAS 上的对话后端，与注入链路正交，**不订阅此 WS**）。
-未来 PC 侧输入工具实现时，应记最后 `seq` 并在重连时带 `?since=`。
+⚠️ **消费端已存在但尚未适配新协议**：`scripts/pc-inject/pc_inject.py`（**workspace 层**，
+不在 bridge 子仓——早前「无消费方」的结论因只搜 bridge 仓而错误）。
+它的 `collect_text()` 目前靠**启发式猜「说完」**（累计字数达估算值 / 3 秒无新文本），
+还没用 `seq`/`is_final` ⇒ 应改为等 `is_final:true` + 记 `seq` 带 `?since=`，
+可消除 3 秒静默等待。
+
+（aurora 是 NAS 上的对话后端，与注入链路正交，**不订阅此 WS**。）
 
 **2026-10-21 真机实测补充（`is_final`）**：对一句话，云端会发**多条** `RecognizeResult`，
 且 `text` 是**累积快照**（「今天天气怎么样」实测 **8 条**：`今`→`今天天气`→…）。
@@ -239,6 +243,13 @@ PC 端按 `is_final` 区分「预览」与「提交」，且必须**覆盖**而�
 中间快照**不过滤**——语音输入法需要边说话边出字。
 
 设备事实：[`docs/devices/lx06/recognize-result-event-sequence.md`](../../../docs/devices/lx06/recognize-result-event-sequence.md)
+
+**端到端延迟实测（2026-10-21）**：设备自报埋点 `asr_send_end_2_nlp` = **51 ms**，
+设备侧共 **62 ms**，端到端 **≈90–175 ms（典型 120）** —— 比原估 0.3–0.8 s **快 2–6 倍**。
+⚠️ 两次实测该段 **51 / 529 ms**（10 倍波动，含云端排队）⇒ **不可按 51 ms 做 SLA，按 ~600 ms 做超时兜底**。
+额度：**设备侧不可见**（`aivs_config` 无 quota 字段），只有 `TOO_MANY_*` 错误码 + `hijack_detect` 探针；
+`realSingleLossy=100` 说明设备自己在降采样省额度。
+数据 → [`docs/devices/lx06/voice-input-latency-and-quota.md`](../../../docs/devices/lx06/voice-input-latency-and-quota.md)
 
 测试：`tests/test_inject_text_replay.py`（17 条，纯内存 asyncio，不出声不碰设备）。
 
