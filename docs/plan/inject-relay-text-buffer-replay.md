@@ -1,5 +1,6 @@
 # 建议：`InjectRelay` 补窗口期文本缓冲，修 WS 晚连丢 ASR 文本
 
+> 本文的「待办 / 授权 / 排序」已并入 [`README.md`](README.md)（**项目侧计划唯一权威**）；本文只保留**深度取证与方案细节**，过时断言已在 `README.md` §7 取代链登记。
 > 状态：**待用户定夺**（代码改动**未提交**，见 §4）
 > 提出时间：2026-10-19
 > 关联：[`asr-input-reliability.md`](asr-input-reliability.md) §WS 重连窗口（A1–A4 同族问题）
@@ -111,13 +112,13 @@ push_task = asyncio.create_task(self._push_texts(ws, q))   # ② 再开实时
 
 ---
 
-## 4. ⚠️ 当前状态：代码改动未提交
+## 4. ⚠️ 当前状态：代码改动未提交（现由 `README.md` B-09 跟踪）
 
 `core/services/api_server.py` 已有上述改动的**工作区版本**（`git diff` 可见），
-但：
+但用户只授权「建议落到 `bridge/docs/plan`」，**未授权改 bridge 代码**
+⇒ 该改动**保留未提交状态**，等定夺：**保留并提交** / **回退**。
 
-- 用户只授权「建议落到 `bridge/docs/plan`」，**未授权改 bridge 代码**；
-- 因此该改动**保留未提交状态**，等用户定夺：**保留并提交** / **回退**。
+现行跟踪项 = [`README.md`](README.md) **B-09**（含「保留前必须先修 §3.2 顺序陷阱」这一前置）。
 
 ### 4.1 若要回退
 

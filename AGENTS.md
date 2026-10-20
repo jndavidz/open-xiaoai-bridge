@@ -222,7 +222,7 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 > `T7.6`「停止聆听」用 `set_mic(False)` + `kws.disable_listening()`，
 > ⇒ 表面功能正常（KWS 停了），但**设备级静音从未生效**。
 > **动手前先确认 T7.6 的真实期望**（只要 KWS 停？还是要设备级静音？）。
-> 详见 [`../docs/plan/lx06-set-mic-semantics-reversed.md`](../docs/plan/lx06-set-mic-semantics-reversed.md)
+> 施工落点见 [`docs/plan/README.md`](docs/plan/README.md) **B-02**；取证见 [`../docs/plan/lx06-set-mic-semantics-reversed.md`](../docs/plan/lx06-set-mic-semantics-reversed.md)
 **边界约束**:
 - `stop_device_audio()` 只负责"停播放"，不负责恢复录音；`start_recording()` 属于会话层恢复逻辑，应由 `WakeupSessionManager` / `OpenClawConversationController` 等上层按场景决定
 
@@ -262,7 +262,7 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
 0. **LX06 硬件是 6 麦，不是 8 麦**（真机逐通道实测：ch0~ch5 有信号，**ch6/ch7 恒零**；
    `hw:0,3` 的 8ch 只是音频格式）。6 路底噪接近（−59~−55 dBFS）⇒ 环形阵列等权、
    无明显主通道 ⇒ 不要指望「取单通道最优」能提升识别率。
-   详见 [`../docs/plan/asr-input-reliability.md`](../docs/plan/asr-input-reliability.md) §1.1
+   详见 [`docs/plan/asr-input-reliability.md`](docs/plan/asr-input-reliability.md) §1.1；待办见 [`docs/plan/README.md`](docs/plan/README.md) B-03
 
 
 1. **`arecord` 抢 ALSA 设备**：client 用 `arecord --quiet -t raw -D -f -r -c …` 抓麦克风，
@@ -279,7 +279,7 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
    **WS 连接时才创建** ⇒ 订阅晚于 ASR 结果产生时，那段文本永久丢失。
    判据：bridge 日志 `[InjectRelay] texts=N`（N>0）但 WS 客户端什么都没收到。
    修法与**顺序陷阱**见
-   [`../docs/plan/inject-relay-text-buffer-replay.md`](../docs/plan/inject-relay-text-buffer-replay.md)。
+   [`docs/plan/inject-relay-text-buffer-replay.md`](docs/plan/inject-relay-text-buffer-replay.md)；待办见 [`docs/plan/README.md`](docs/plan/README.md) B-09。
    ⚠ 该文档对应的代码改动**尚未提交**（用户未授权改 bridge 代码），当前工作区为改动态。
 
 **🚫 死通道：`kws.log`（别被 `kws.rs` 误导）**
@@ -314,7 +314,7 @@ ubus 解析失败（`exit 1`）或文本被静默截断。
 - `blocking=False` 分支**安全**（走 `json_encode` = `json.dumps`）；
 - 因播报文案多为中文短句，**该缺陷一直未暴露**——属潜伏；
 - 完整取证与修法（**注意：必须先 JSON 转义、后 shell 转义，顺序反了会被破坏**）见
-  [`../docs/devices/lx06/tts-text-escaping-defect.md`](../../docs/devices/lx06/tts-text-escaping-defect.md)。
+  [`../docs/devices/lx06/tts-text-escaping-defect.md`](../docs/devices/lx06/tts-text-escaping-defect.md)；待办见 [`docs/plan/README.md`](docs/plan/README.md) B-04。
 
 > 方法论：Rust 二进制去符号后反编译（2104 个匿名 `poll` 状态机）性价比很低。
 > **先 `git clone` 找上游源码**是正确顺序——本轮 5 个文件就拿到了比逆向更确定的答案。
@@ -333,7 +333,35 @@ ubus 解析失败（`exit 1`）或文本被静默截断。
 | **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md)** |
 | **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop` | ⚠️ 静态解出 | ⚠️ **`code:0` ≠ 播放成功**，需状态回读确认 |
 | **4** | 离线本地指令（断网可用） | `ai_crontab new` | ✅ 真机已验 | ⚠️ ubus 是 **root-only**；`duration` **实测无效** |
-| **5** | 闹钟/提醒（断电持久） | `alarm` 27 方法 | 部分已验 | ⚠️ `chime_hourly_set` 的 `OFF` 返回 `code:0` 但**不写** |
+| **5** | 闹钟/提醒（断电持久） | `alarm` 25 方法 | 部分已验 | ⚠️ `chime_hourly_set` 的 `OFF` 返回 `code:0` 但**不写** |
+| **6** | ⭐ **播放完成回调**（免轮询） | `ubus listen` → `play_status_broadcast_event`（`status:1` 开始 / `0` 结束） | ✅ **2026-10-20 真机已验** | 🔴 **推翻** `api_server.py:247`「无完成回调」的注释。⚠️ **不带 id ⇒ 并发不可用（只适合串行）**；⚠️ **HTTP 源不可达时只发 `status:1` ⇒ 必须保留超时兜底**。详见 [`../docs/devices/lx06/ubus-events-play-status.md`](../docs/devices/lx06/ubus-events-play-status.md) |
+| **7** | 本地音频直放（零网络） | `qplayer <本地文件>` | ✅ 2026-10-20 实测（opus/wav，ALSA 直通） | 同步阻塞=音频时长；**不产生广播事件**；⚠️ **任何参数都被当文件名**（无 help）⇒ 勿传外部输入 |
+
+> 🔴 **音量回读的口径坑（2026-10-20）**：`player_set_volume` 用**档位**，
+> 而 `get_media_volume` 返回**百分比**（设 6→读 25，设 8→读 40），且 `amixer` 恒定 85% 完全无关。
+> ⇒ **`set` 之后必须用 `player_get_context` 回读**，不能用 `get_media_volume` 校验。
+> 详见 [`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md) §2.4。
+>
+> 🔴 **内存红线与存活检测（2026-10-20 真机事故）**：设备**只有 118 MB 内存、无 swap**，
+> 常态 free 仅 2.8–5.9 MB ⇒ 内存临界时 `mediaplayer` 会反复崩，表现为
+> `ubus list` 里对象消失 + 调用返回 **`code:-1`**。
+> 🔴 **`respawn.retry=0` 在 procd 里意为「不设重启上限」= 无限重启，不是「不重启」**
+> （实测 `kill -9` 后 t+5 s 自动拉起）⇒ **会自愈**，缺的是「发现」不是「拉起」。
+> 同样 `retry:0` 的还有 `mico_aivs_lab`/`mibrain_service`/`pns_ubus_helper`（均会自动拉起）。
+> ⇒ bridge **应做**：①播报串行 ②存活检测（`service list {"name":"mediaplayer"}` 判 `running`）
+> ③轮询 `system info` 的 `memory.free`，**free<10 MB 时降级播报并发** ④收到 `code:-1` 立刻查存活。
+> ⚠️ **不要手动 `/etc/init.d/mediaplayer start`**（procd 已会自愈；只在确认 procd 未拉起时才用）。
+> **当前 bridge 没有存活检测。** 详见 [`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md) §2.6；
+> 待办见 [`docs/plan/README.md`](docs/plan/README.md) **B-07**。
+>
+> 🔴 **复位纪律（2026-10-20 故障复盘，见逆向侧 `run/fault-postmortem-2026-10-20.md`）**：
+> 本轮故障是**断电上电才彻底消失**的 ⇒ 排障时**优先建议用户断电上电**（最彻底、最省时），
+> 不要反复 ubus 试探延长故障窗口。
+> ⚠️ 订正：初版曾写"本设备 reboot 走 kexec 不清驱动"——已证伪（本机 `reboot_mode=cold_boot`、
+> 无 kexec、内核无 KEXEC，软重启本应走冷启动）。那次"软重启后仍在"更可能是该软重启
+> **根本没真正发生**（uptime 矛盾）。故**不再断言软重启无效**，只保留"断电最彻底"。
+> 另：`led_position` 只反映「最后操作的灯索引」，
+> **不代表全灭**，不能作为设备健康/灭灯判据（用 `led status` 的 effect 表或监控 `show_led` 事件）。
 
 ⚠️ **红外落地的真阻塞 = 网络（不是代码）**：
 执行层 `deploy/lx06/ir/`（`ir_tx.py`/`ir_protocols.py`/`ir_probe.py`）已就绪且真机端到端验证通过，
@@ -395,6 +423,9 @@ WSL宿主(10.10.10.6)  → LX06                            9/9 OK
 2. ⚠️ **`mute_stat` 名不副实** —— 它返回 `player_get_play_status` 的 `info.status`（**播放状态**），不是静音状态
 3. ⚠️ **LX06 的音量步进是 4**（`mphelper` 默认 4；仅 LX01/LX05A/LX05/L07A 是 8）；
    且原厂 `volume_up/down` **没做 0–100 clamp**，bridge 自己实现时要加
+   ⚠️ **2026-10-20 修正**：「步进 4」**不严格** —— 实测档位 0/2/4/6 的 `get_media_volume` 全是 25，
+   8/10 全是 40 ⇒ **存在平台段**，`v` 与 `v+4` 不一定差一档。
+   ⚠️ 另：`player_set_volume` 的 `unit`/`type` 字段**不能切换量纲**（传 `unit:"percent"` 仍按档位映射）
 
 ⇒ **建议**：`speaker.py` 的播放/音量类操作**改调 `mphelper`**，
 可免费获得上述闸门与一致性；同时修掉 §SpeakerManager 的 `set_mic` 语义反转。
