@@ -56,9 +56,19 @@ def _load_kws_module():
 
     sherpa_mod.SherpaOnnx = _FakeSherpa()
     # 桩：其余被 __init__ 顶层 import 的模块
-    for name in ("core.ref", "core.services.protocols.typing", "core.utils.config"):
-        if name not in sys.modules:
-            sys.modules[name] = types.ModuleType(name)
+    # ⚠️ 必须无条件替换为新建 stub，而不能 `if name not in sys.modules`——
+    # 真实模块已加载时，后续的属性赋值会直接改写真实模块对象；
+    # tearDownClass 把同一对象赋回 sys.modules 无法撤销属性污染。
+    for name in (
+        "core.ref",
+        "core.services.protocols.typing",
+        "core.utils.config",
+        "core.utils.logger",
+        "core.services.audio.stream",
+        "core.services.audio.vad.silero",
+        "core.wakeup_session",
+    ):
+        sys.modules[name] = types.ModuleType(name)
     # core.ref: 提供 set_kws / get_app / get_xiaoai / get_xiaozhi
     ref = sys.modules["core.ref"]
     ref.set_kws = lambda k: None
@@ -93,8 +103,8 @@ def _load_kws_module():
             return lambda *a, **k: None
 
     logmod.logger = _L()
-    sys.modules.setdefault("core.utils.logger", logmod)
-    # 队列/流/会话
+    sys.modules["core.utils.logger"] = logmod
+    # 队列/流/会话（stream/silero/wakeup_session 已在上面预置为空 stub，这里补属性）
     for name in (
         "core.services.audio.stream",
         "core.services.audio.vad.silero",
@@ -132,7 +142,9 @@ class KwsGateTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # 恢复被桩覆盖的模块，避免污染同进程内其它测试
+        # 恢复被桩覆盖的模块，避免污染同进程内其它测试。
+        # saved 里存的是真实模块对象，其属性从未被改写（上面无条件用新建 stub），
+        # 因此直接赋回 sys.modules 即可干净恢复。
         for name, original in cls._saved_modules.items():
             if original is None:
                 sys.modules.pop(name, None)

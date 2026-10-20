@@ -30,10 +30,13 @@ class InjectionGateTest(unittest.TestCase):
         }
         cls._saved = saved
 
-        for name, mod in saved.items():
-            if mod is None:
-                stub = types.ModuleType(name)
-                sys.modules[name] = stub
+        # 无条件用新建 stub 替换 sys.modules 条目（即使真实模块已加载）。
+        # 若只替换「尚未加载」的条目，后续对 sys.modules[x] 的属性赋值会落在
+        # 真实模块对象上；tearDownClass 把同一对象赋回 sys.modules 无法撤销
+        # 这些属性改写，会污染同进程后续测试（实测：ConfigManager.instance
+        # 被残留成 lambda: None，导致 test_openai_tts 的 patch 失败）。
+        for name in saved:
+            sys.modules[name] = types.ModuleType(name)
         sys.modules["core.ref"].get_app = lambda: None
         sys.modules["core.ref"].get_kws = lambda: None
         sys.modules["core.ref"].get_speaker = lambda: None
@@ -111,8 +114,9 @@ class InjectionMarkerTest(unittest.TestCase):
             "core.utils.logger", "core.utils.config", "open_xiaoai_server",
         ]
         cls._saved = {n: sys.modules.get(n) for n in stub_names}
+        # 同 InjectionGateTest：无条件替换为新建 stub，避免原地改写真实模块属性。
         for name in stub_names:
-            sys.modules.setdefault(name, types.ModuleType(name))
+            sys.modules[name] = types.ModuleType(name)
         sys.modules["core.ref"].get_speaker = lambda: None
         sys.modules["core.ref"].get_xiaoai = lambda: None
         sys.modules["core.ref"].set_xiaoai = lambda x: None

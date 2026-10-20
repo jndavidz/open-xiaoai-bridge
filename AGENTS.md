@@ -36,7 +36,10 @@ open-xiaoai-bridge/
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
 │   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
+│   │   ├── tts/router.py           # 统一 TTS provider 路由与播放
 │   │   ├── tts/doubao.py          # 豆包 TTS 客户端（火山引擎）
+│   │   ├── tts/openai.py           # OpenAI-compatible TTS 协议客户端
+│   │   ├── tts/mlx_audio.py        # MLX-Audio TTS provider（复用 OpenAI 协议客户端）
 │   │   └── protocols/
 │   │       ├── websocket_protocol.py  # 小智 WebSocket 协议实现
 │   │       └── typing.py              # 协议类型定义
@@ -123,7 +126,7 @@ OpenClaw 网关客户端，管理 WebSocket 连接、消息分发、自动重连
 - WebSocket ping/pong + tick 事件监控连接健康
 - 指数退避重连（初始 1s，最大 60s）
 - 请求 ID 映射 `_pending: dict[str, asyncio.Future]` 追踪响应
-- TTS 播放：`tts_speaker` 为 `"xiaoai"` 时使用小爱原生 TTS，否则使用豆包 TTS（支持流式）
+- TTS 播放：通过共享 TTS Router 选择 `xiaoai`、`doubao`、`openai` 或 `mlx_audio` provider；缺省时保持 `tts_speaker` 的旧选择逻辑
 - Rust TTS 播放使用单一活动 `playback_token`：开始新的 Rust TTS 会使旧 token 失效；`stop_tts_playback(token)` 只应由持有该 token 的调用方定向停止自己的播放
 
 **连接参数限制**:
@@ -515,7 +518,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | VAD | `audio/vad/silero.py` | Silero ONNX 语音活动检测 |
 | KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒（信心度 2.0，阈值 0.2）；`kws/__init__` 含 `listen_disabled` 持久开关 + **播放闸门**（`gate_on`/`gate_off`） |
 | ASR | `audio/asr/sherpa.py` | Sherpa SenseVoice 离线语音识别（懒加载，INT8 量化） |
-| TTS | `tts/doubao.py` | 豆包 TTS（流式/一次性，PCM/MP3 自适应） |
+| TTS | `tts/openai.py`, `tts/mlx_audio.py`, `tts/doubao.py` | OpenAI-compatible TTS、MLX-Audio 与豆包 TTS（一次性/本地音频播放） |
 
 ### Rust 原生扩展 (native/)
 

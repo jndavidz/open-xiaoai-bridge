@@ -252,6 +252,20 @@ APP_CONFIG = {
     },
     # TTS (Text-to-Speech) Configuration
     "tts": {
+        # 可选 provider 段落（配合各后端的 tts_provider 使用）：
+        # "openai": {            # OpenAI 官方或任意兼容 /v1/audio/speech 的服务
+        #     "base_url": "https://api.openai.com/v1",
+        #     "api_key": "sk-xxxx",
+        #     "model": "gpt-4o-mini-tts",
+        #     "voice": "alloy",
+        #     "response_format": "mp3",  # 仅 mp3/flac/wav/ogg/pcm 可被音箱播放
+        # },
+        # "mlx_audio": {         # Apple Silicon 本地的 MLX-Audio 服务
+        #     "base_url": "http://host.docker.internal:8000/v1",
+        #     "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit",
+        #     "mode": "voice_design",  # 或 "custom_voice"
+        #     "response_format": "wav",
+        # },
         "doubao": {
             # 豆包语音合成 API 配置
             # 文档地址: https://www.volcengine.com/docs/6561/1598757?lang=zh
@@ -280,6 +294,11 @@ APP_CONFIG = {
         "identity_path": "/app/openclaw/identity/device.json",  # 设备身份文件路径；容器部署时建议挂载持久化目录
         "tts_speed": 1.0,  # TTS 语速 (0.5-2.0)，仅豆包 TTS 生效，小爱原生 TTS 不支持调速
         "tts_speaker": "xiaoai",  # "xiaoai" = 小爱原生 TTS；填豆包音色 ID 则用豆包 TTS；不设置则使用 tts.doubao.default_speaker
+        # tts_provider: 显式指定 TTS 供应商，覆盖 tts_speaker 的隐式推断。
+        #   可选 "xiaoai" / "doubao" / "openai" / "mlx_audio"；不填则保持旧逻辑
+        #   （"xiaoai" 音色→小爱原生，其他音色 ID→豆包）。
+        #   openai/mlx_audio 需另外配置 tts.openai / tts.mlx_audio 段。
+        # "tts_provider": "doubao",
         # 可按 agentId 单独覆盖音色，优先级高于 tts_speaker
         # agentId 来自 session_key，格式为：agent:<agentId>:<rest>
         # 示例：
@@ -324,6 +343,7 @@ APP_CONFIG = {
         "response_timeout": 120,
         "tts_speed": 1.0,
         "tts_speaker": "xiaoai",
+        # "tts_provider": "doubao",  # 可选 xiaoai/doubao/openai/mlx_audio；不填保持旧逻辑
         "session_tts_speakers": {},
         "exit_keywords": ["退出", "停止", "再见"],
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
@@ -357,6 +377,7 @@ APP_CONFIG = {
         "poll_interval": 0.5,
         "tts_speed": 1.0,
         "tts_speaker": "xiaoai",
+        # "tts_provider": "doubao",  # 可选 xiaoai/doubao/openai/mlx_audio；不填保持旧逻辑
         "session_tts_speakers": {},
         "exit_keywords": ["退出", "停止", "再见"],
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
