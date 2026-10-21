@@ -721,7 +721,7 @@ TTS 播报期间 KWS 从未被暂停 → 播报文案命中自身词表 → 音�
 
 - 项目主页: https://github.com/coderzc/open-xiaoai-bridge
 - 刷机教程: https://github.com/idootop/open-xiaoai/blob/main/docs/flash.md
-- Client 端补丁: https://github.com/idootop/open-xiaoai/blob/main/packages/client-rust/README.md
+- Client 端补丁: [docs/client-rust.md](docs/client-rust.md)（协议契约、idootop/coderzc 版本谱系、部署与更新判据、已知缺陷——排障/升级 client 前先读）
 
 ## Agent skills
 

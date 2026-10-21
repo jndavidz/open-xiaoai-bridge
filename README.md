@@ -47,6 +47,7 @@
    - [刷机教程](https://github.com/idootop/open-xiaoai/blob/main/docs/flash.md)
 2. **🛠️ 音箱补丁程序安装 Client** — 在音箱上运行 Rust Client 端
    - [补丁程序安装教程](https://github.com/coderzc/open-xiaoai/blob/main/packages/client-rust/README.md)
+   - [client-rust 说明（版本谱系 / 更新判据 / 已知缺陷）](docs/client-rust.md)
 
 ### 📥 模型文件
 
@@ -1248,7 +1249,7 @@ APP_CONFIG = {
 | 资源              | 链接                                                                                                                                                                                                                                                       |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 🔧 刷机教程         | [刷机教程](https://github.com/idootop/open-xiaoai/blob/main/docs/flash.md)                                                                                                                                                                                   |
-| 🛠️ Client 端安装  | [Client 端安装](https://github.com/idootop/open-xiaoai/blob/main/packages/client-rust/README.md)                                                                                                                                                            |
+| 🛠️ Client 端安装  | [Client 端说明](docs/client-rust.md)（含上游安装/编译链接）                                                                                                                                                            |
 | 🎙️ 豆包 TTS 音色列表 | [火山引擎文档](https://www.volcengine.com/docs/6561/1257544)                                                                                                                                                                                                   |
 
 ***
