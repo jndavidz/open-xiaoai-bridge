@@ -87,7 +87,7 @@ CAPABILITIES: dict[str, CapabilitySpec] = {
     # ---- 只读查询 ----
     "mic_get": CapabilitySpec(
         name="mic_get",
-        method="shell:test -f /tmp/mipns/mute",
+        method="shell:[ ! -f /tmp/mipns/mute ] && echo on || echo off",
         params=(),
         success=SuccessCriterion.STDOUT_CONTAINS,
         group=CapabilityGroup.READ,

@@ -78,13 +78,13 @@ class SpeakerManager:
             else:
                 res = await self.device.play_text_blocking(text, timeout_ms=timeout)
             # 历史判据（阻塞 TTS 脚本成功时 rc 也可能是 1）：ticket 03 修。
-            return res.request.exit_code == 0
+            return res.request is not None and res.request.exit_code == 0
 
         if url:
             res = await self.device.play_url(url, timeout_ms=timeout)
         else:
             res = await self.device.tts_speak(text, timeout_ms=timeout)
-        return '"code": 0' in res.request.stdout
+        return '"code": 0' in res.stdout
 
     async def play_server_file(
         self,
