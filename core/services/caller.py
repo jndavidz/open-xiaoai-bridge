@@ -9,7 +9,8 @@
     - 默认（`TRUST_PROXY` 未配置）只认 TCP peer（aiohttp 的 `request.remote`）。
       该值来自连接本身，客户端无法伪造。
     - 仅在显式 `TRUST_PROXY=1`（部署在受控反代之后）时才读
-      `X-Forwarded-For`（取最左一跳）/ `X-Real-IP`。
+      `X-Forwarded-For`（取**最右一跳**，即最近受信代理追加的值）/ `X-Real-IP`。
+      取最左是客户端可伪造的值（ticket 10 §4）。
     - 头部存在却不可信时**不写日志告警**：避免攻击者刷日志；
       运维用 `/api/health` 与网络拓扑判断是否需要开 `TRUST_PROXY`。
 """
@@ -43,15 +44,15 @@ def resolve_caller_tag(
     `transport.get_extra_info("peername")` —— 前者在 Unix socket 等场景下更稳定，
     且不会把端口掺进日志口径。
 
-    当 `trust_proxy=True` 时，`X-Forwarded-For` 取**最左**一跳（原始客户端）；
-    该值仅在受控反代后面才有意义，否则是客户端可任意伪造的字符串。
+    当 `trust_proxy=True` 时，`X-Forwarded-For` 取**最右**一跳（最近受信代理
+    追加的值）；取最左是客户端可伪造的字符串。该值仅在受控反代后面才有意义。
     """
     if trust_proxy and headers:
         for name in _PROXY_HEADERS:
             value = headers.get(name)
             if value:
-                first = str(value).split(",")[0].strip()
-                if first:
-                    return first
+                last = str(value).split(",")[-1].strip()
+                if last:
+                    return last
     peer = str(remote or "").strip()
     return peer or "unknown"

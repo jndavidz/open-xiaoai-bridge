@@ -5,7 +5,7 @@
 
 覆盖：
   1. 默认（TRUST_PROXY 未配置/假值）只认 TCP peer，伪造头被忽略
-  2. `TRUST_PROXY=1` 时才读 XFF（取最左一跳）/ X-Real-IP
+  2. `TRUST_PROXY=1` 时才读 XFF（取**最右**一跳，防客户端伪造最左值）/ X-Real-IP
   3. peer 缺失 / 空头 / 空值 → "unknown"，不抛异常
   4. 多跳 XFF 只取第一段；头部值去空白
 
@@ -26,7 +26,7 @@ from core.services.caller import (  # noqa: E402
     trust_proxy_enabled,
 )
 
-XFF = {"X-Forwarded-For": "203.0.113.7, 10.10.10.2"}
+XFF = {"X-Forwarded-For": "203.0.113.7, 198.51.100.9"}
 
 
 class TrustProxyFlagTest(unittest.TestCase):
@@ -60,8 +60,9 @@ class CallerTagTest(unittest.TestCase):
         )
 
     def test_xff_used_only_when_trusted(self):
+        # 取最右跳：最左值是客户端可伪造的，不能作为审计身份
         self.assertEqual(
-            resolve_caller_tag("10.10.10.2", XFF, trust_proxy=True), "203.0.113.7"
+            resolve_caller_tag("10.10.10.2", XFF, trust_proxy=True), "198.51.100.9"
         )
         self.assertEqual(
             resolve_caller_tag("10.10.10.2", {"X-Real-IP": " 198.51.100.9 "},
