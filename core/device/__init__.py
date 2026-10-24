@@ -14,6 +14,7 @@
 """
 
 from core.device.client import (
+    TTS_TEMP_PREFIX,
     DeviceCapabilities,
     get_device,
     reset_device,
@@ -49,6 +50,7 @@ __all__ = [
     "ParamSpec",
     "ShellTransport",
     "SuccessCriterion",
+    "TTS_TEMP_PREFIX",
     "UnknownCapabilityError",
     "XiaoAIShellTransport",
     "capability_table",
