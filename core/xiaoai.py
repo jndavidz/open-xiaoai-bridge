@@ -572,7 +572,14 @@ class XiaoAI:
                 return
 
             playing_status = event_data.lower()
-            
+
+            # ticket 05：把 client 事件喂给播放事件适配器（影子比对 / 可切主源）。
+            # 只做观测，不改下面的会话逻辑。延迟导入：独立加载本模块的测试
+            # 只桩掉 core.ref 等子模块，不应因新的事件面依赖而失败。
+            from core.device import get_playback_events
+
+            get_playback_events().feed_client_status(playing_status)
+
             get_speaker().status = playing_status
             await cls.conversation.handle_playing_status(
                 playing_status,
