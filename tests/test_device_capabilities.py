@@ -182,6 +182,19 @@ class MicCapabilityTest(_Base):
         self.assertEqual(res.readback["mic"], "on")
         self.device.assert_called("[ ! -f /tmp/mipns/mute ]")
 
+    def test_mic_get_unreadable_is_not_off(self) -> None:
+        # 设备无响应时不能把「读不到」伪报成 off，否则 mic_set 的回读会假成功。
+        self.device.on("mipns/mute", timeout=True)
+        res = _run(self.caps.mic_get())
+        self.assertFalse(res.ok)
+        self.assertIsNone(res.readback["mic"])
+
+    def test_mic_set_fails_when_readback_unreadable(self) -> None:
+        self.device.on("event_notify", '{"code":0}')
+        self.device.on("mipns/mute", timeout=True)
+        res = _run(self.caps.mic_set(muted=True))
+        self.assertFalse(res.ok)
+
     def test_mic_set_mute_sends_event_7_and_reads_back(self) -> None:
         self.device.on("event_notify", '{"code":0}')
         self.device.on("mipns/mute", "off")

@@ -291,6 +291,11 @@ class XiaoAI:
         cls._watchdog_warned = False
         try:
             await open_xiaoai_server.start_recording()
+            # 录音重启后丢掉上一轮的帧残留，避免半帧错位导致声道轮转。
+            if cls._downmixer is not None:
+                cls._downmixer.reset()
+                cls._current_channel = cls._downmixer.current_channel
+            cls._last_input_frame_time = time.monotonic()
             return True
         except Exception as exc:
             cls._last_recover_error = f"{type(exc).__name__}: {exc}"
@@ -390,6 +395,16 @@ class XiaoAI:
                 f"attempt={cls._recover_failures} error={cls._last_recover_error} "
                 f"retry_in={backoff:.1f}s"
             )
+            # 连续失败说明 6ch 采集路径可能不可用（client 不认 channels 等）；
+            # 自动回退 1ch，避免永远无帧、唤醒全灭。配置热重载可恢复 6ch。
+            if cls._recover_failures >= 3 and cls._audio_channels > 1:
+                cls._audio_channels = 1
+                cls._downmixer = None
+                cls._current_channel = None
+                os.environ["AUDIO_INPUT_CHANNELS"] = "1"
+                logger.error(
+                    "[XiaoAI] 六麦恢复连续失败，已回退单声道（channels=1）"
+                )
         else:
             cls._recover_failures = 0
             cls._last_recover_error = None

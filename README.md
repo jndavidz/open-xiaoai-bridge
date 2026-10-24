@@ -328,6 +328,7 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 - **未配置 `BRIDGE_API_TOKEN` 时写类端点失败关闭（503 + 配置提示）**；`/api/health`、`/api/status`、`GET /api/inject`、`/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取（不返回凭证）。
 - 管理面板继续只用 `ADMIN_TOKEN`，与 `BRIDGE_API_TOKEN` 互不回退。
 - 日志只记录调用方与错误码，不打印 token 明文。
+- `GET /api/health?probe=1` 是例外：它会触发 3 条设备 RPC，配置 `BRIDGE_API_TOKEN` 时必须带 Bearer；未配置 token 时 probe 503（健康读本身仍可用）。
 
 升级顺序：先给所有调用方（HA、企业微信、脚本）配好 `Authorization: Bearer`，再在服务端设置 `BRIDGE_API_TOKEN`（设置即强制）。
 

@@ -7,6 +7,9 @@
 禁区（`FORBIDDEN_METHODS`）不进入能力表；`resolve_capability()` 与
 `ensure_script_allowed()` 两道闸门保证它们无法经能力层调用。
 
+⚠️ 禁区闸门是**防误用**，不是安全沙箱：`shell` 能力本身等价设备 root，
+且正则无法覆盖所有 shell 引号/转义写法。绝不可把外部输入直接传给能力层。
+
 依据：bridge/AGENTS.md「设备能力扩展面」与 docs/devices/lx06/ 的参数契约。
 """
 
@@ -89,13 +92,14 @@ CAPABILITIES: dict[str, CapabilitySpec] = {
         name="mic_get",
         method="shell:[ ! -f /tmp/mipns/mute ] && echo on || echo off",
         params=(),
-        success=SuccessCriterion.STDOUT_CONTAINS,
+        # 命令两个分支都以 echo 结束（退出码 0）；on/off 由 stdout 区分。
+        # 不能在登记项里写 expectation="on"，否则合法的 off 会被判为失败。
+        success=SuccessCriterion.EXIT_CODE,
         group=CapabilityGroup.READ,
         readback=None,
         timeout_ms=6000,
         blocking=False,
         idempotent=True,
-        expectation="on",
         description="读麦克风是否开启（/tmp/mipns/mute 不存在 ⇒ on）",
     ),
     "volume_get": CapabilitySpec(

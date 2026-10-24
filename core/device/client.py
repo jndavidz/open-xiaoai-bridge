@@ -268,8 +268,20 @@ class DeviceCapabilities:
     async def mic_get(self) -> CapabilityResult:
         spec = resolve_capability("mic_get")
         res = await self._invoke(spec, MIC_GET)
-        mic = "on" if "on" in res.stdout else "off"
-        return replace(res, readback={"mic": mic}, readback_ok=(mic == "on"))
+        out = (res.stdout or "").strip()
+        has_on = "on" in out
+        has_off = "off" in out
+        if res.request is None or not res.ok or not (has_on or has_off):
+            # 读不到 ≠ off：不能让 mic_set 的回读把「设备无响应」当成「已闭麦」。
+            return replace(
+                res,
+                ok=False,
+                readback={"mic": None},
+                readback_ok=None,
+                error=res.error or "mic_unreadable",
+            )
+        mic = "on" if has_on else "off"
+        return replace(res, readback={"mic": mic}, readback_ok=True)
 
     async def player_context(self) -> CapabilityResult:
         spec = resolve_capability("player_context")
@@ -405,6 +417,8 @@ class DeviceCapabilities:
         )
 
     async def boot_partition_set(self, partition: str) -> CapabilityResult:
+        if partition not in ("boot0", "boot1"):
+            raise ValueError(f"invalid boot partition: {partition!r}")
         spec = resolve_capability("boot_partition_set")
         return await self._invoke(
             spec,
@@ -431,7 +445,9 @@ class DeviceCapabilities:
         self, url: str, timeout_ms: float = _BLOCKING_PLAY_TIMEOUT_MS
     ) -> CapabilityResult:
         spec = resolve_capability("play_url_blocking")
-        return await self._invoke(spec, f"miplayer -f '{url}'", timeout_ms=timeout_ms)
+        return await self._invoke(
+            spec, f"miplayer -f {_shell_quote(url)}", timeout_ms=timeout_ms
+        )
 
     async def play_file(
         self, path: str, timeout_ms: float = _BLOCKING_PLAY_TIMEOUT_MS
@@ -439,7 +455,9 @@ class DeviceCapabilities:
         if not path:
             raise ValueError("path is required")
         spec = resolve_capability("play_file")
-        return await self._invoke(spec, f"miplayer -f '{path}'", timeout_ms=timeout_ms)
+        return await self._invoke(
+            spec, f"miplayer -f {_shell_quote(path)}", timeout_ms=timeout_ms
+        )
 
     async def play_text_blocking(
         self, text: str, timeout_ms: float = _BLOCKING_PLAY_TIMEOUT_MS

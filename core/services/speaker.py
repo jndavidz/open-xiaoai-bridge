@@ -66,6 +66,9 @@ class SpeakerManager:
 
     def __init__(self):
         self.device = get_capabilities()
+        # 播报串行化：mic_gate 持有期间独占，避免并发播报嵌套导致
+        # 「A 恢复 on、B 恢复 off」把设备永久留在静音态。
+        self._mic_gate_lock = asyncio.Lock()
         set_speaker(self)
 
     async def get_playing(self, sync=False):
@@ -436,40 +439,42 @@ class SpeakerManager:
         - 退出（finally）：恢复快照（on→on、off→off），**绝不无条件开麦**；
           快照读不到时按 KWS `listen_disabled` 推断。
         - 持有超过 `max_seconds`：告警并强制恢复快照。
+        - **串行**：闸门持有期间独占；并发播报会排队，避免嵌套快照互相覆盖。
         """
-        snapshot = await self._read_mic_state()
-        if snapshot is None:
-            logger.warning(
-                f"[Speaker] mic gate opened without snapshot (reason={reason!r})"
-            )
+        async with self._mic_gate_lock:
+            snapshot = await self._read_mic_state()
+            if snapshot is None:
+                logger.warning(
+                    f"[Speaker] mic gate opened without snapshot (reason={reason!r})"
+                )
 
-        muted = False
-        try:
-            muted = await self.set_mic(on=False)
-        except Exception as e:  # noqa: BLE001 - 闭麦失败不阻断播报
-            logger.warning(f"[Speaker] mic gate mute failed (reason={reason!r}): {e}")
-        if not muted:
-            logger.warning(
-                f"[Speaker] mic gate mute not confirmed (reason={reason!r}, "
-                f"snapshot={snapshot})"
-            )
-
-        hold = _MicGateHold()
-        watchdog = asyncio.create_task(
-            self._mic_gate_watchdog(hold, snapshot, reason, max_seconds)
-        )
-        try:
-            yield
-        finally:
-            if not hold.restored:
-                hold.restored = await self._restore_mic_state(snapshot, reason)
-            watchdog.cancel()
+            muted = False
             try:
-                await watchdog
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:  # noqa: BLE001 - 看门狗异常不影响退出
-                logger.warning(f"[Speaker] mic gate watchdog failed: {e}")
+                muted = await self.set_mic(on=False)
+            except Exception as e:  # noqa: BLE001 - 闭麦失败不阻断播报
+                logger.warning(f"[Speaker] mic gate mute failed (reason={reason!r}): {e}")
+            if not muted:
+                logger.warning(
+                    f"[Speaker] mic gate mute not confirmed (reason={reason!r}, "
+                    f"snapshot={snapshot})"
+                )
+
+            hold = _MicGateHold()
+            watchdog = asyncio.create_task(
+                self._mic_gate_watchdog(hold, snapshot, reason, max_seconds)
+            )
+            try:
+                yield
+            finally:
+                if not hold.restored:
+                    hold.restored = await self._restore_mic_state(snapshot, reason)
+                watchdog.cancel()
+                try:
+                    await watchdog
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:  # noqa: BLE001 - 看门狗异常不影响退出
+                    logger.warning(f"[Speaker] mic gate watchdog failed: {e}")
 
     async def reconcile_mic_state(self) -> bool:
         """启动期麦态自愈：清掉 bridge 崩溃遗留的设备级闭麦。

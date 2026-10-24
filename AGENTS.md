@@ -216,8 +216,10 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 - `abort_xiaoai()` → 中断小爱当前操作
 - `ask_xiaoai(text, silent)` → 让小爱执行指令
 - `run_shell(command, timeout)` → RPC shell
-- `mic_gate(reason, max_seconds)` → 播报期间固件闭麦；退出恢复进入前麦态快照（绝无条件开麦）
+- `mic_gate(reason, max_seconds)` → 播报期间固件闭麦；退出恢复进入前麦态快照（绝无条件开麦）；持有期间串行化，避免并发播报嵌套
 - `reconcile_mic_state()` → 首个事件到达后清理 bridge 崩溃遗留的设备级静音
+  > ⚠️ KWS `listen_disabled` 当前是内存态：bridge 重启后无法区分「用户停止聆听」与
+  > 「崩溃遗留静音」，reconcile 会按未停止聆听处理。需要严格区分时须持久化该开关（未实现）。
 
 > ✅ **`set_mic(on=...)` 语义已修正（ticket 03，2026-10-24）**：
 > `on=True` 发 `pnshelper event_notify {src:3,event:8}` 开麦；`on=False` 发 `event:7` 闭麦。
@@ -448,7 +450,7 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/status` | GET | 获取设备状态 |
 | `/api/wakeup` | POST | 唤醒设备 |
 | `/api/interrupt` | POST | 中断播放 |
-| `/api/health` | GET | 健康检查：默认返回录音帧龄/策略、播放事件面、注入状态；`?probe=1` 额外采集 mediaplayer 存活/内存/麦态（总超时 3s） |
+| `/api/health` | GET | 健康检查：默认返回录音帧龄/策略、播放事件面、注入状态；`?probe=1` 额外采集 mediaplayer 存活/内存/麦态（总超时 3s；会打设备 RPC，配置 `BRIDGE_API_TOKEN` 时须带 Bearer，未配置时 probe 503） |
 | `/api/tts/doubao` | POST | Doubao TTS 合成 |
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 | `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |

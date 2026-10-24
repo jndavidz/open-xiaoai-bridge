@@ -76,9 +76,9 @@ async def _run_steps(speaker, steps):
     """
     for step in steps:
         if isinstance(step, str):
-            token = _gate_kws("run_steps TTS", max_seconds=60)
+            token = _gate_kws("run_steps TTS", max_seconds=300)
             try:
-                async with speaker.mic_gate("run_steps TTS", max_seconds=60):
+                async with speaker.mic_gate("run_steps TTS", max_seconds=300):
                     await speaker.play(text=step)
             finally:
                 _ungate_kws(token)

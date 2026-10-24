@@ -98,6 +98,32 @@ class _Base(unittest.TestCase):
         ref.GLOBAL_STATES.clear()
 
 
+class MicGateSerializationTest(_Base):
+    def test_concurrent_gates_are_serialized(self) -> None:
+        """并发播报不得嵌套快照；后进入者必须等前者退出。"""
+
+        self.device.muted = False
+        order: list[str] = []
+
+        async def first() -> None:
+            async with self.speaker.mic_gate("A", max_seconds=5):
+                order.append("A-enter")
+                await asyncio.sleep(0.05)
+                order.append("A-exit")
+
+        async def second() -> None:
+            await asyncio.sleep(0.01)
+            async with self.speaker.mic_gate("B", max_seconds=5):
+                order.append("B-enter")
+
+        async def scenario() -> None:
+            await asyncio.gather(first(), second())
+
+        _run(scenario())
+        self.assertEqual(order, ["A-enter", "A-exit", "B-enter"])
+        self.assertEqual(_run(self.speaker.get_mic()), "on")
+
+
 class MicGateSnapshotTest(_Base):
     def test_snapshot_on_mutes_during_playback_and_restores_on(self) -> None:
         self.device.muted = False

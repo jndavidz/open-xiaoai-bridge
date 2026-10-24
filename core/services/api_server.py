@@ -12,6 +12,7 @@ from typing import Any
 
 import open_xiaoai_server
 from aiohttp import web
+from core.device import get_playback_events
 from core.ref import get_speaker, get_xiaoai, get_kws
 from core.wakeup_session import EventManager
 from core.services.admin_api import AdminAPI
@@ -77,6 +78,7 @@ class InjectRelay:
         self.text_queues: list[asyncio.Queue] = []   # 文本回传订阅者（WS，多客户端广播）
         self._text_log: list[tuple[int, str]] = []   # 有界文本日志 [(seq, text)]，不随窗口清
         self._seq: int = 0                            # 文本序号，单调递增，永不复位
+        self._window_start_seq: int = 0               # 最近一次 open_session 时的 seq
         self.stats = {"up_bytes": 0, "down_bytes": 0, "sessions": 0, "texts": 0}
 
     @staticmethod
@@ -105,6 +107,7 @@ class InjectRelay:
         窗口语义只约束「上行音频是否转发」与「实时闸门」，不约束文本历史。
         """
         self.active = True
+        self._window_start_seq = self._seq
         self.stats["sessions"] += 1
         self._notify_subscribers("window_open")
         logger.info("[InjectRelay] 会话开启（上游可推流）")
@@ -261,13 +264,24 @@ class InjectRelay:
             return self._disabled_response()
         ws = web.WebSocketResponse(heartbeat=15)
         await ws.prepare(request)
-        since = self.parse_since(request.query.get("since"))
+        raw_since = request.query.get("since")
+        # 缺省 since 只回放「最近一次开窗之后」的文本；显式 since=0 才回放全部保留历史。
+        # 避免新窗口/新客户端把上一轮语音文本重新插入光标。
+        since = self.resolve_since(raw_since, self._window_start_seq)
         await self._serve_text_subscription(ws, since)
         return ws
 
     @staticmethod
+    def resolve_since(raw, window_start: int) -> int:
+        """缺省 since 用窗口起点；显式值走 `parse_since`（0 = 全部历史）。"""
+
+        if raw is None or raw == "":
+            return max(0, int(window_start))
+        return InjectRelay.parse_since(raw)
+
+    @staticmethod
     def parse_since(raw) -> int:
-        """解析 `?since=`；非法/缺省 → 0（= 回放全部保留历史）。"""
+        """解析 `?since=`；非法 → 0（显式 0 = 回放全部保留历史）。"""
         try:
             value = int(raw or 0)
         except (TypeError, ValueError):
@@ -369,6 +383,7 @@ class APIServer:
         # 关闭时中继不监听 :9093，控制/数据面端点 fail closed（见 inject_control 文档）。
         self.inject_enabled = resolve_inject_enabled(self.config)
         self.inject_relay = InjectRelay(enabled=self.inject_enabled)   # 注入流式中继（数据面）
+        self._inject_expire_task: asyncio.Task | None = None
         global _relay_singleton
         _relay_singleton = self.inject_relay
         self._setup_routes()
@@ -514,6 +529,7 @@ class APIServer:
 
     async def stop(self):
         """Stop the HTTP server"""
+        self._cancel_inject_expiry()
         await self.inject_relay.stop()
         if self.runner:
             await self.runner.cleanup()
@@ -583,12 +599,15 @@ class APIServer:
             )
             kws = get_kws()
             if blocking:
-                token = self._gate_kws(kws, "api/play/text blocking")
+                gate_seconds = self._mic_gate_seconds(timeout)
+                token = self._gate_kws(
+                    kws, "api/play/text blocking", max_seconds=gate_seconds
+                )
                 try:
                     # ticket 10：软件闸门之外再叠固件级闭麦（播报前闭、播完恢复快照）。
                     async with speaker.mic_gate(
                         "api/play/text blocking",
-                        max_seconds=self._mic_gate_seconds(timeout),
+                        max_seconds=gate_seconds,
                     ):
                         result = await speaker.play(
                             text=text, blocking=True, timeout=timeout
@@ -597,26 +616,27 @@ class APIServer:
                     self._ungate_kws(kws, token)
                 return web.json_response({"success": result})
             else:
-                # 非阻塞：无法预知播放何时结束，用兜底时分自动恢复。
+                # 非阻塞：播放命令立即返回，用事件适配器等真正播完（超时兜底）。
                 estimate = self._estimate_gate_seconds(text)
+                budget = estimate + 5.0
                 token = self._gate_kws(
                     kws, "api/play/text background",
-                    max_seconds=estimate,
+                    max_seconds=budget,
                 )
 
                 async def _play_and_ungate():
                     try:
-                        # 固件闸门要覆盖到估算时长结束（非阻塞播放在设备内部异步进行）。
                         async with speaker.mic_gate(
                             "api/play/text background",
-                            max_seconds=estimate + 5.0,
+                            max_seconds=budget,
                         ):
                             await speaker.play(
                                 text=text, blocking=False, timeout=timeout
                             )
-                            # 非阻塞播放在音箱内部异步进行，这里给一个保守的释放延时；
-                            # 真正的兜底由闸门 timer 保证（调用方异常也不会永久失效）。
-                            await asyncio.sleep(estimate)
+                            # 用播放完成事件/context 回读等真正结束；超时由适配器兜底。
+                            await get_playback_events().wait_for_finish(
+                                budget * 1000.0
+                            )
                     finally:
                         self._ungate_kws(kws, token)
 
@@ -676,12 +696,15 @@ class APIServer:
             kws = get_kws()
 
             if blocking:
-                token = self._gate_kws(kws, "api/play/url blocking")
+                gate_seconds = self._mic_gate_seconds(timeout)
+                token = self._gate_kws(
+                    kws, "api/play/url blocking", max_seconds=gate_seconds
+                )
                 try:
                     # ticket 10：固件级闭麦与软件闸门叠加，播完恢复进入前快照。
                     async with speaker.mic_gate(
                         "api/play/url blocking",
-                        max_seconds=self._mic_gate_seconds(timeout),
+                        max_seconds=gate_seconds,
                     ):
                         result = await speaker.play(
                             url=url, blocking=True, timeout=timeout
@@ -690,18 +713,23 @@ class APIServer:
                     self._ungate_kws(kws, token)
                 return web.json_response({"success": result})
             else:
-                token = self._gate_kws(kws, "api/play/url background", max_seconds=120.0)
+                budget = 125.0
+                token = self._gate_kws(
+                    kws, "api/play/url background", max_seconds=budget
+                )
 
                 async def _play_url_and_ungate():
                     try:
-                        # 固件闸门要覆盖到估算时长结束（非阻塞播放在设备内部异步进行）。
+                        # 固件闸门覆盖到真正播完（事件适配器 + 超时兜底）。
                         async with speaker.mic_gate(
-                            "api/play/url background", max_seconds=125.0
+                            "api/play/url background", max_seconds=budget
                         ):
                             await speaker.play(
                                 url=url, blocking=False, timeout=timeout
                             )
-                            await asyncio.sleep(120.0)
+                            await get_playback_events().wait_for_finish(
+                                120_000.0
+                            )
                     finally:
                         self._ungate_kws(kws, token)
 
@@ -787,7 +815,7 @@ class APIServer:
             async def play_audio():
                 # incident §5: 文件播报也走音箱功放，同样需 KWS 闸门
                 kws_local = get_kws()
-                token = self._gate_kws(kws_local, "api/play/file", max_seconds=300.0)
+                token = self._gate_kws(kws_local, "api/play/file", max_seconds=305.0)
                 try:
                     # ticket 10：再叠固件级闭麦；play_server_file 阻塞到播完。
                     async with speaker.mic_gate(
@@ -984,6 +1012,43 @@ class APIServer:
                 status=500,
             )
 
+    def _cancel_inject_expiry(self) -> None:
+        """取消上一次注入窗口的 TTL 定时器（开新窗/关窗/停机时调用）。"""
+
+        task = self._inject_expire_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._inject_expire_task = None
+
+    def _schedule_inject_expiry(self, remaining: float) -> None:
+        """窗口 TTL 到点主动关闸 + 关中继；不依赖下一次 ASR/health 的懒判定。"""
+
+        self._cancel_inject_expiry()
+
+        async def _expire() -> None:
+            try:
+                await asyncio.sleep(max(1.0, float(remaining)))
+                if EventManager.injection_gate_active():
+                    EventManager.close_injection_gate()
+                    self.inject_relay.close_session("ttl expiry")
+                    logger.warning("[APIServer] 注入窗口 TTL 到期，已自动关窗")
+            except asyncio.CancelledError:
+                raise
+
+        self._inject_expire_task = asyncio.create_task(_expire())
+
+    @staticmethod
+    def _truthy_flag(value) -> bool:
+        """严格解析 JSON 布尔：字符串 "false"/"0" 不得被当成真值。"""
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return False
+
     @staticmethod
     def _parse_inject_duration(raw) -> float | None:
         """解析开窗时长：None/非法 → 默认 TTL；合法值夹在 [1, INJECTION_GATE_TTL]。"""
@@ -1048,7 +1113,7 @@ class APIServer:
             data = await request.json() if request.can_read_body else {}
             caller = self._caller_tag(request)
 
-            if data.get("on"):
+            if self._truthy_flag(data.get("on")):
                 duration = self._parse_inject_duration(data.get("duration"))
                 result = await open_injection_window(
                     EventManager,
@@ -1074,6 +1139,7 @@ class APIServer:
                         status=503,
                     )
 
+                self._schedule_inject_expiry(result.remaining)
                 logger.info(
                     f"[APIServer] /api/inject 开窗 caller={caller} "
                     f"ttl={(result.ttl or 0):.0f}s wake_up={result.wakeup}"
@@ -1089,6 +1155,7 @@ class APIServer:
 
             # 关窗幂等：未开窗时重复调用同样返回 closed，不报错。
             EventManager.close_injection_gate()
+            self._cancel_inject_expiry()
             self.inject_relay.close_session("api close")   # 数据面：断下游 + 丢上行
             logger.info(f"[APIServer] /api/inject 关窗 caller={caller}")
             return web.json_response({
@@ -1172,6 +1239,25 @@ class APIServer:
 
         probe = None
         if request.query.get("probe", "").lower() in ("1", "true", "yes", "on"):
+            # 设备探针会打 3 条设备 RPC，不能随免鉴权的 /api/health 一起裸放。
+            # 用未登记的合成路径走 write 分类：配置了 token 时必须带 Bearer，
+            # 未配置 token 时 503（probe 失败关闭，健康读本身仍可用）。
+            decision = authorize(
+                "/api/health/probe",
+                "GET",
+                authorization=request.headers.get("Authorization"),
+                expected_token=configured_token(),
+            )
+            if not decision.allowed:
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": decision.error,
+                        "code": decision.code,
+                    },
+                    status=decision.status,
+                    headers=decision.header_dict(),
+                )
             speaker = get_speaker()
             if speaker is None:
                 probe = {"speaker": False}

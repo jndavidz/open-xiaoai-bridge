@@ -492,5 +492,18 @@ class IsFinalTest(_TextReplayTestBase):
         await self._stop(relay, task, ws)
 
 
+class ResolveSinceTest(_TextReplayTestBase):
+    """缺省 since 只回放最近一次开窗之后；显式 0 才回放全部历史。"""
+
+    def test_default_uses_window_start(self):
+        self.assertEqual(self.InjectRelay.resolve_since(None, 42), 42)
+        self.assertEqual(self.InjectRelay.resolve_since("", 42), 42)
+
+    def test_explicit_values_use_parse_since(self):
+        self.assertEqual(self.InjectRelay.resolve_since("7", 42), 7)
+        self.assertEqual(self.InjectRelay.resolve_since("0", 42), 0)
+        self.assertEqual(self.InjectRelay.resolve_since("bad", 42), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
