@@ -56,11 +56,34 @@ RESTART_XIAOAI = "/etc/init.d/mico_aivs_lab restart >/dev/null 2>&1"
 
 _BLOCKING_PLAY_TIMEOUT_MS = 600_000
 
+# TTS 合成产物固定落在设备 /tmp/tts/ 下（见 docs/devices/lx06/tts-audio-direct-fetch.md）。
+TTS_TEMP_PREFIX = "/tmp/tts/"
+
 
 def _shell_quote(value: str) -> str:
     """shell 单引号转义（与旧 tts_play.sh 调用保持一致）。"""
 
     return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def _json_string_body(value: str) -> str:
+    """把文本转义成可安全嵌入 JSON 字符串字面量的内容（不含外层引号）。
+
+    `tts_play.sh` 会把 `$1` 直接插进 `{"text":"$1"}`，所以回退路径必须先做
+    JSON 转义、再做 shell 转义；顺序反了会被 shell 层破坏。
+    """
+
+    text = str(value)
+    encoded = json_encode(text)
+    if isinstance(encoded, str) and len(encoded) >= 2:
+        return encoded[1:-1]
+    return (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
 
 
 def _json_payload(data: dict[str, Any]) -> str:
@@ -70,6 +93,16 @@ def _json_payload(data: dict[str, Any]) -> str:
 def _json_obj(text: str) -> dict[str, Any] | None:
     data = json_decode(text)
     return data if isinstance(data, dict) else None
+
+
+def _clamp_volume(level: int) -> int:
+    """百分比音量钳位到设备允许的 0-100（原厂 volume_up/down 不做钳位）。"""
+
+    try:
+        value = int(level)
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, min(100, value))
 
 
 def _decode_info(request: CommandResult | None) -> dict[str, Any]:
@@ -275,7 +308,18 @@ class DeviceCapabilities:
         spec = resolve_capability("service_status")
         script = f"ubus call service list '{_json_payload({'name': name})}'"
         res = await self._invoke(spec, script)
-        instance = _find_instance(_json_obj(res.stdout)) if res.ok else None
+        data = _json_obj(res.stdout) if res.request is not None else None
+        if data is None:
+            # 传输失败 / 响应不可解析 ⇒ 无法判断存活（返回 None 由上层处理），
+            # 不能把「读不到」当成「已死」。
+            return replace(
+                res,
+                ok=False,
+                readback=None,
+                readback_ok=False,
+                error=res.error or "invalid_response",
+            )
+        instance = _find_instance(data)
         if instance is None:
             return replace(
                 res,
@@ -344,16 +388,20 @@ class DeviceCapabilities:
         )
 
     async def volume_set(self, level: int) -> CapabilityResult:
+        """百分比音量通道：`player_set_continuous_volume` 不走档位映射。"""
+
         spec = resolve_capability("volume_set")
+        target = _clamp_volume(level)
+        payload: dict[str, Any] = {"volume": target, "media": "mediaplayer"}
         script = (
-            "ubus call mediaplayer player_set_volume "
-            f"'{_json_payload({'volume': int(level)})}'"
+            "ubus call mediaplayer player_set_continuous_volume "
+            f"'{_json_payload(payload)}'"
         )
         return await self._invoke(
             spec,
             script,
             readback_fn=self.volume_get,
-            readback_expect={"volume": int(level)},
+            readback_expect={"volume": target},
         )
 
     async def boot_partition_set(self, partition: str) -> CapabilityResult:
@@ -396,8 +444,12 @@ class DeviceCapabilities:
     async def play_text_blocking(
         self, text: str, timeout_ms: float = _BLOCKING_PLAY_TIMEOUT_MS
     ) -> CapabilityResult:
+        """兜底阻塞播报：先 JSON 转义、再 shell 转义（顺序不可反）。"""
+
         spec = resolve_capability("play_text_blocking")
-        script = f"/usr/sbin/tts_play.sh {_shell_quote(text or '你好')}"
+        script = (
+            f"/usr/sbin/tts_play.sh {_shell_quote(_json_string_body(text or '你好'))}"
+        )
         return await self._invoke(spec, script, timeout_ms=timeout_ms)
 
     async def tts_speak(
@@ -440,6 +492,14 @@ class DeviceCapabilities:
         )
         exists = "yes" in res.stdout
         return replace(res, readback={"exists": exists}, readback_ok=exists)
+
+    async def tts_cleanup(self, path: str) -> CapabilityResult:
+        """删除合成临时文件；前缀不是 `/tmp/tts/` 一律拒绝（防误删）。"""
+
+        if not path or not path.startswith(TTS_TEMP_PREFIX):
+            raise ValueError(f"refusing to remove non-tts temp file: {path!r}")
+        spec = resolve_capability("tts_cleanup")
+        return await self._invoke(spec, f"rm -f {_shell_quote(path)}")
 
     # ---- 播放 / 服务控制 ----
 

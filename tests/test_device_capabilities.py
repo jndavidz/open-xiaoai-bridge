@@ -7,8 +7,8 @@
   2. 每个能力发出的命令形状正确，判据与回读符合登记表；
   3. 禁区方法无法经能力层调用；业务层不再出现裸 ubus / mphelper 字符串。
 
-同时锁定 `SpeakerManager` 的**现有对外行为**（含 ticket 03 才修的判据缺陷），
-确认本次改造是纯 prefactor。
+同时锁定 `SpeakerManager` 的对外行为；ticket 03 之后，阻塞播报、音量量纲、
+麦克风语义的判据已按设备真值修正（见 `tests/test_judgement_fixes.py`）。
 """
 
 from __future__ import annotations
@@ -212,17 +212,18 @@ class MicCapabilityTest(_Base):
         self.assertFalse(res.ok)
         self.assertEqual(res.error, "readback_mismatch")
 
-    def test_speaker_set_mic_keeps_legacy_code_judge(self) -> None:
-        self.device.on("event_notify", '{"code":0}')
-        self.device.on("mipns/mute", "off")
-        self.assertTrue(_run(self.speaker.set_mic(True)))
-        self.device.assert_called('"event":7')
-
-        self.device.reset()
+    def test_speaker_set_mic_follows_device_truth_and_readback(self) -> None:
+        # on=True ⇒ event:8（开麦）；回读为 on 即成功，返回码不参与判定。
         self.device.on("event_notify", '{"code": -1}')
         self.device.on("mipns/mute", "on")
-        # 现有缺陷（ticket 03 修）：回读为开麦，但返回码判据给出 False。
-        self.assertFalse(_run(self.speaker.set_mic(False)))
+        self.assertTrue(_run(self.speaker.set_mic(True)))
+        self.device.assert_called('"event":8')
+
+        self.device.reset()
+        self.device.on("event_notify", '{"code": 0}')
+        self.device.on("mipns/mute", "off")
+        self.assertTrue(_run(self.speaker.set_mic(False)))
+        self.device.assert_called('"event":7')
 
     def test_mic_clear_flag_removes_mute_file(self) -> None:
         self.device.on("rm -f", "", exit_code=0)
@@ -240,17 +241,20 @@ class VolumeCapabilityTest(_Base):
         self.assertEqual(res.readback["volume"], 39)
         self.device.assert_called("ubus call mediaplayer player_get_context")
 
-    def test_volume_set_sends_level_and_reads_back(self) -> None:
-        self.device.on("player_set_volume", '{"code":0}')
+    def test_volume_set_uses_continuous_percent_and_reads_back(self) -> None:
+        self.device.on("player_set_continuous_volume", '{"code":0}')
         self.device.on("player_get_context", _context(volume=35))
         res = _run(self.caps.volume_set(35))
-        self.assertIn("ubus call mediaplayer player_set_volume", self.device.calls[0][0])
-        self.assertIn('{"volume": 35}', self.device.calls[0][0])
+        self.assertIn(
+            "ubus call mediaplayer player_set_continuous_volume", self.device.calls[0][0]
+        )
+        self.assertIn('"volume": 35', self.device.calls[0][0])
+        self.device.assert_not_called("player_set_volume")
         self.assertEqual(res.readback["volume"], 35)
         self.assertTrue(res.ok)
 
     def test_volume_set_readback_mismatch_is_failure(self) -> None:
-        self.device.on("player_set_volume", '{"code":0}')
+        self.device.on("player_set_continuous_volume", '{"code":0}')
         self.device.on("player_get_context", _context(volume=20))
         res = _run(self.caps.volume_set(35))
         self.assertFalse(res.ok)
@@ -404,15 +408,19 @@ class HealthCapabilityTest(_Base):
 
 
 class SpeakerFacadeTest(_Base):
-    """对外方法签名与现有行为必须保持不变（含已知判据缺陷）。"""
+    """对外方法签名与设备真值行为（判据修正见 test_judgement_fixes）。"""
 
-    def test_play_blocking_text_keeps_exit_code_judge(self) -> None:
-        self.device.on("tts_play.sh", "", exit_code=1)
-        self.assertFalse(_run(self.speaker.play(text="你好", blocking=True)))
-
-        self.device.reset()
-        self.device.on("tts_play.sh", "", exit_code=0)
-        self.assertTrue(_run(self.speaker.play(text="你好", blocking=True)))
+    def test_play_blocking_text_synthesizes_and_plays_local_file(self) -> None:
+        self.device.on("text_to_speech", _tts_response())
+        self.device.on("[ -f", "yes")
+        self.device.on("player_play_url", '{"code":0}')
+        self.device.on("player_get_context", _context(status=0))
+        self.assertTrue(
+            _run(self.speaker.play(text="你好", blocking=True, timeout=60))
+        )
+        self.device.assert_called('"save": 1')
+        self.device.assert_called("player_play_url")
+        self.device.assert_called("rm -f '/tmp/tts/")
 
     def test_play_blocking_url_uses_miplayer(self) -> None:
         self.device.on("miplayer", "", exit_code=0)
