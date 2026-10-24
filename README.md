@@ -118,6 +118,7 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `OPEN_XIAOAI_TOKEN`  | Client 鉴权 token（必填），未配置时服务端拒绝所有 Client 连接（fail closed） | 必填 |
 | `BRIDGE_API_TOKEN`   | 业务 API token（写类端点必带 `Authorization: Bearer`）；未配置时写类端点 503、读类/健康检查仍可用 | 未配置（写类失败关闭） |
 | `ADMIN_TOKEN`        | 后台管理面板 token（与业务 token 分离） | 未配置（面板 API 全拒） |
+| `INJECT_ENABLE`      | PC 语音注入开关（可选）：留空=关闭；1/true/yes/on=开启并监听 :9093 | 关闭 |
 | `CONFIG_PATH`        | 自定义配置文件路径   | `./config.py` |
 | `LOGLEVEL`           | 日志级别        | `INFO`        |
 

@@ -22,13 +22,16 @@ open-xiaoai-bridge/
 │   ├── openclaw_conversation.py   # OpenClaw 连续对话循环（VAD → ASR → Agent → TTS）
 │   ├── wakeup_session.py          # 小智唤醒会话状态机
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
-│   ├── device/                    # 类型化设备能力层（registry/client/results/transport，ticket 02）
+│   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + hass/weather/music 只读工具（阶段 1.5）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
-│   │   ├── speaker.py             # SpeakerManager 音箱硬件控制
-│   │   ├── api_server.py          # HTTP REST API（aiohttp；含 /api/audio_input 停麦恢复通道）
+│   │   ├── speaker.py             # SpeakerManager 音箱硬件控制（含 mic_gate 播报闭麦/恢复快照）
+│   │   ├── api_server.py          # HTTP REST API（鉴权/注入/健康；含 /api/audio_input 恢复通道）
+│   │   ├── auth.py                # 业务 API Bearer 鉴权（纯函数，失败关闭）
+│   │   ├── health.py              # /api/health 纯函数组装（内存态 + 可选设备探针）
+│   │   ├── inject_control.py      # PC 注入开关判定 + 原子开窗/回滚（纯逻辑）
 │   │   ├── admin_api.py           # 后台面板 API（/admin 页面 + /api/admin/*）
 │   │   ├── admin_static/index.html# 面板单页前端（零外部依赖）
 │   │   ├── audio/
@@ -213,6 +216,8 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 - `abort_xiaoai()` → 中断小爱当前操作
 - `ask_xiaoai(text, silent)` → 让小爱执行指令
 - `run_shell(command, timeout)` → RPC shell
+- `mic_gate(reason, max_seconds)` → 播报期间固件闭麦；退出恢复进入前麦态快照（绝无条件开麦）
+- `reconcile_mic_state()` → 首个事件到达后清理 bridge 崩溃遗留的设备级静音
 
 > ✅ **`set_mic(on=...)` 语义已修正（ticket 03，2026-10-24）**：
 > `on=True` 发 `pnshelper event_notify {src:3,event:8}` 开麦；`on=False` 发 `event:7` 闭麦。
@@ -443,7 +448,7 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/status` | GET | 获取设备状态 |
 | `/api/wakeup` | POST | 唤醒设备 |
 | `/api/interrupt` | POST | 中断播放 |
-| `/api/health` | GET | 健康检查 |
+| `/api/health` | GET | 健康检查：默认返回录音帧龄/策略、播放事件面、注入状态；`?probe=1` 额外采集 mediaplayer 存活/内存/麦态（总超时 3s） |
 | `/api/tts/doubao` | POST | Doubao TTS 合成 |
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 | `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |
@@ -527,6 +532,17 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | 录音看门狗 | `audio/watchdog.py` + `core/xiaoai.py` | 1s 无帧判死 → 先停后启 + 指数退避；`audio_health()` 暴露帧龄/策略/恢复计数 |
 | ASR | `audio/asr/sherpa.py` | Sherpa SenseVoice 离线语音识别（懒加载，INT8 量化） |
 | TTS | `tts/openai.py`, `tts/mlx_audio.py`, `tts/doubao.py` | OpenAI-compatible TTS、MLX-Audio 与豆包 TTS（一次性/本地音频播放） |
+
+### 音频 / 事件面 / 注入配置
+
+- `audio_input.channels`（默认 6）、`channel_strategy`（strongest/average/fixed）、
+  `fixed_channel`、`watchdog_seconds`（默认 1.0）；bridge 自动把声道数同步到 native
+  的 `AUDIO_INPUT_CHANNELS`，改 1 即回退单声道。
+- `event_plane.source`（context/client/native，默认 context）、`shadow_sources`
+  （默认 ["client"]）、`poll_interval_ms`、`start_grace_ms`、`native_cmd`（默认空 =
+  不启动 native 源；运行时镜像无 ssh，勿加依赖）。适配器支持热重载。
+- `inject.enabled`（默认 false）或环境变量 `INJECT_ENABLE`：关闭时不监听 `:9093`，
+  注入端点 503；开启时窗口 = 闸门 + 中继 + 唤醒，三者同开同关。
 
 ### Rust 原生扩展 (native/)
 

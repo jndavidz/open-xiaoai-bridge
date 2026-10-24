@@ -16,6 +16,7 @@ from core.ref import get_speaker, get_xiaoai, get_kws
 from core.wakeup_session import EventManager
 from core.services.admin_api import AdminAPI
 from core.services.auth import authorize, configured_token
+from core.services.health import build_health_payload
 from core.services.inject_control import (
     INJECT_DISABLED_CODE,
     INJECT_DISABLED_ERROR,
@@ -1136,15 +1137,68 @@ class APIServer:
         """
         GET /api/health
         Health check endpoint（保留只读、可无鉴权；不暴露凭证/完整文本）
+
+        默认只返回内存态：录音帧龄/策略、播放事件面、注入状态。
+        `?probe=1` 时额外采集设备探针（mediaplayer 存活 / 内存 / 麦态），
+        总超时 3s；探针失败不影响整体健康响应。
         """
-        return web.json_response({
-            "success": True,
-            "data": {
-                "status": "healthy",
-                "speaker_ready": get_speaker() is not None,
-                "inject": self._inject_health(),
+        audio: dict = {}
+        try:
+            from core.xiaoai import XiaoAI
+
+            audio = XiaoAI.audio_health()
+        except Exception as e:  # noqa: BLE001 - 健康接口不得因单段失败整体 500
+            logger.debug(f"[APIServer] health audio snapshot failed: {e}")
+
+        playback: dict = {}
+        try:
+            from core.device import get_playback_events
+
+            snap = get_playback_events().snapshot()
+            playback = {
+                key: snap.get(key)
+                for key in (
+                    "source",
+                    "shadow_sources",
+                    "native_cmd_configured",
+                    "native_running",
+                    "waits",
+                    "mismatch_count",
+                    "last_result",
+                )
             }
-        })
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[APIServer] health playback snapshot failed: {e}")
+
+        probe = None
+        if request.query.get("probe", "").lower() in ("1", "true", "yes", "on"):
+            speaker = get_speaker()
+            if speaker is None:
+                probe = {"speaker": False}
+            else:
+                async def _collect_probe() -> dict:
+                    return {
+                        "mediaplayer_alive": await speaker.mediaplayer_alive(),
+                        "memory_free": await speaker.memory_free(),
+                        "mic": await speaker.get_mic(),
+                    }
+
+                try:
+                    probe = await asyncio.wait_for(_collect_probe(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    probe = {"error": "timeout"}
+                except Exception as e:  # noqa: BLE001
+                    probe = {"error": type(e).__name__}
+
+        return web.json_response(
+            build_health_payload(
+                speaker_ready=get_speaker() is not None,
+                audio=audio,
+                playback=playback,
+                inject=self._inject_health(),
+                probe=probe,
+            )
+        )
 
     async def handle_tts_doubao(self, request: web.Request) -> web.Response:
         """

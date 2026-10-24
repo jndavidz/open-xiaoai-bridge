@@ -154,6 +154,19 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 - `audio_input.watchdog_seconds`：连续无帧秒数，默认 **1.0**。client 的录音读循环 500ms 无数据即退出，
   阈值必须显著小于 3s；恢复动作是先停后启，失败按指数退避。
 - 真机 A/B 与回滚判据见 `ws: .scratch/lx06-voice-hub-baseline/acceptance-checklist.md` §4/§5。
+
+### PC 语音注入（可选，默认关闭）
+
+- **默认关闭**：`inject.enabled=false` 且 `INJECT_ENABLE` 留空 ⇒ 不监听 `:9093`，
+  `POST /api/inject`、`/api/inject/stream`、`/api/inject/relay`、`/api/inject/text`
+  返回 503 + `code=inject_disabled`；主对话路径完全不受影响。
+- **开启**：`INJECT_ENABLE=1` 或 `config.py` 的 `inject.enabled=true`（需重启）。
+  开窗 = 闸门 + 中继 + 唤醒，三者同开同关；唤醒失败会整窗回滚。
+- **hook/消费端**：`ws: scripts/pc-inject/README.md`；原理见
+  `ws: docs/plan/firmware-asr-injection-feasibility.md` §6/§7。
+- **回滚**：关闭开关并重启容器；卸载 hook 后确认原生唤醒与 bridge 均恢复。
+- **播放事件面**：`event_plane.source` 默认 `context`，`shadow_sources=["client"]`
+  做影子比对；native 源默认关闭（运行时镜像无 openssh-client，`native_cmd` 留空）。
   容器内验证 `_gate_kws` 落点齐全（`_run_steps` / `api/play/{text,url,file}`）、`/api/audio_input` 恢复接口正常。
   旧镜像自动保留可回滚；旧 config.py 备份为 `config.py.bak-20260924104901`。
 - 短词（4 字以下）易误触发，优先用「下一首歌曲」而非「下一首」

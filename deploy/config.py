@@ -323,6 +323,12 @@ APP_CONFIG = {
         # 录音看门狗：连续无帧秒数（client 500ms 无数据即退出读循环）
         "watchdog_seconds": 1.0,
     },
+    "inject": {
+        # PC 语音注入模块总开关（默认关闭）：关闭时不监听 :9093，注入端点 503；
+        # 开启时窗口 = 闸门 + 中继 + 唤醒，三者同开同关。
+        # 环境变量 INJECT_ENABLE 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
+        "enabled": False,
+    },
     "event_plane": {
         # 播放完成事件主源：context（轮询 player_get_context，默认）/
         # client（playing 事件）/ native（设备原生 play_status_broadcast_event）
