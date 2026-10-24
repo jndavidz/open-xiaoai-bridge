@@ -184,6 +184,8 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 - `BRIDGE_API_TOKEN` 业务 API token（与 `ADMIN_TOKEN` 分离）：配置后 `/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/tts/doubao` 必须带 `Authorization: Bearer <BRIDGE_API_TOKEN>`；**未配置时这些写类端点返回 503（失败关闭）**，`/api/health`、`/api/status` 等只读端点仍可用
   - **升级顺序**：① 先生成 token 并给所有调用方（HA `nuc_tts`/rest_command、企业微信服务、脚本）加上 `Authorization: Bearer` 头；② 再写入容器 `.env` 并 `docker compose up -d` 生效（设置即强制）
   - 注意：企业微信/HA 调用方若仍按无鉴权调用，会在切换后收到 401（缺头）/403（错 token）
+  - ⚠️ **HA 正在升级/改配置时不要先设置 token**：先等 HA 侧调用方改完并验证，再设置
+    `BRIDGE_API_TOKEN`；否则 HA 的播报/恢复端点会 401/503，且升级窗口内难以区分是 HA 还是 token 问题
 - `ADMIN_TOKEN` 必须强随机（`openssl rand -hex 16`）；面板可改上游 API 配置，泄露等同泄露 API Key
 - 4399/9092 仅在局域网（host 网络 + 群晖防火墙），勿做公网端口映射；外网访问走 WireGuard
 - HA Token 只进 `.env`，任何文件不得硬编码
