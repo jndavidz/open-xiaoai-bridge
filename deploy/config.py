@@ -72,12 +72,14 @@ async def _run_steps(speaker, steps):
 
     incident-kws-self-trigger-loop.md §5 建议 1：每逢 `str` 播报都开/关 KWS 播放闸门，
     防止播报文案命中自身词表形成自触发回环（本次事故的直接根因）。
+    ticket 10：软件闸门之外再叠一层固件级闭麦（`speaker.mic_gate`），两层互不替代。
     """
     for step in steps:
         if isinstance(step, str):
             token = _gate_kws("run_steps TTS", max_seconds=60)
             try:
-                await speaker.play(text=step)
+                async with speaker.mic_gate("run_steps TTS", max_seconds=60):
+                    await speaker.play(text=step)
             finally:
                 _ungate_kws(token)
         elif isinstance(step, tuple) and step[0] == "ha":

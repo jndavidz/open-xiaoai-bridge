@@ -380,6 +380,18 @@ class APIServer:
         n = len((text or "").strip())
         return max(8.0, min(120.0, n / 4.5 + 6.0))
 
+    @staticmethod
+    def _mic_gate_seconds(timeout_ms, extra: float = 5.0) -> float:
+        """固件闭麦闸门的持有上限：以调用方 timeout 为界，留 margin，并钳位。
+
+        ticket 10：超上限只是「告警 + 强制恢复快照」的兜底，不是播放时限。
+        """
+        try:
+            seconds = float(timeout_ms) / 1000.0
+        except (TypeError, ValueError):
+            seconds = 600.0
+        return max(30.0, min(seconds + extra, 900.0))
+
     def _gate_kws(self, kws, reason: str, max_seconds: float = 60.0):
         """开 KWS 播放闸门（失败不阻断播报）。"""
         if not kws:
@@ -519,24 +531,39 @@ class APIServer:
             if blocking:
                 token = self._gate_kws(kws, "api/play/text blocking")
                 try:
-                    result = await speaker.play(text=text, blocking=True, timeout=timeout)
+                    # ticket 10：软件闸门之外再叠固件级闭麦（播报前闭、播完恢复快照）。
+                    async with speaker.mic_gate(
+                        "api/play/text blocking",
+                        max_seconds=self._mic_gate_seconds(timeout),
+                    ):
+                        result = await speaker.play(
+                            text=text, blocking=True, timeout=timeout
+                        )
                 finally:
                     self._ungate_kws(kws, token)
                 return web.json_response({"success": result})
             else:
                 # 非阻塞：无法预知播放何时结束，用兜底时分自动恢复。
+                estimate = self._estimate_gate_seconds(text)
                 token = self._gate_kws(
                     kws, "api/play/text background",
-                    max_seconds=self._estimate_gate_seconds(text),
+                    max_seconds=estimate,
                 )
 
                 async def _play_and_ungate():
                     try:
-                        await speaker.play(text=text, blocking=False, timeout=timeout)
+                        # 固件闸门要覆盖到估算时长结束（非阻塞播放在设备内部异步进行）。
+                        async with speaker.mic_gate(
+                            "api/play/text background",
+                            max_seconds=estimate + 5.0,
+                        ):
+                            await speaker.play(
+                                text=text, blocking=False, timeout=timeout
+                            )
+                            # 非阻塞播放在音箱内部异步进行，这里给一个保守的释放延时；
+                            # 真正的兜底由闸门 timer 保证（调用方异常也不会永久失效）。
+                            await asyncio.sleep(estimate)
                     finally:
-                        # 非阻塞播放在音箱内部异步进行，这里给一个保守的释放延时；
-                        # 真正的兜底由闸门 timer 保证（调用方异常也不会永久失效）。
-                        await asyncio.sleep(self._estimate_gate_seconds(text))
                         self._ungate_kws(kws, token)
 
                 asyncio.create_task(_play_and_ungate())
@@ -597,7 +624,14 @@ class APIServer:
             if blocking:
                 token = self._gate_kws(kws, "api/play/url blocking")
                 try:
-                    result = await speaker.play(url=url, blocking=True, timeout=timeout)
+                    # ticket 10：固件级闭麦与软件闸门叠加，播完恢复进入前快照。
+                    async with speaker.mic_gate(
+                        "api/play/url blocking",
+                        max_seconds=self._mic_gate_seconds(timeout),
+                    ):
+                        result = await speaker.play(
+                            url=url, blocking=True, timeout=timeout
+                        )
                 finally:
                     self._ungate_kws(kws, token)
                 return web.json_response({"success": result})
@@ -606,9 +640,15 @@ class APIServer:
 
                 async def _play_url_and_ungate():
                     try:
-                        await speaker.play(url=url, blocking=False, timeout=timeout)
+                        # 固件闸门要覆盖到估算时长结束（非阻塞播放在设备内部异步进行）。
+                        async with speaker.mic_gate(
+                            "api/play/url background", max_seconds=125.0
+                        ):
+                            await speaker.play(
+                                url=url, blocking=False, timeout=timeout
+                            )
+                            await asyncio.sleep(120.0)
                     finally:
-                        await asyncio.sleep(120.0)
                         self._ungate_kws(kws, token)
 
                 asyncio.create_task(_play_url_and_ungate())
@@ -695,11 +735,15 @@ class APIServer:
                 kws_local = get_kws()
                 token = self._gate_kws(kws_local, "api/play/file", max_seconds=300.0)
                 try:
-                    success = await speaker.play_server_file(
-                        temp_path,
-                        blocking=True,
-                        sample_rate=sample_rate,
-                    )
+                    # ticket 10：再叠固件级闭麦；play_server_file 阻塞到播完。
+                    async with speaker.mic_gate(
+                        "api/play/file", max_seconds=305.0
+                    ):
+                        success = await speaker.play_server_file(
+                            temp_path,
+                            blocking=True,
+                            sample_rate=sample_rate,
+                        )
                     if success:
                         logger.info(f"[APIServer] Finished playing: {filename}")
                     else:

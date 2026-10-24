@@ -1,5 +1,6 @@
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from typing import Literal
 
 import open_xiaoai_server
@@ -9,7 +10,7 @@ from core.device import (
     CommandResult,
     get_device as get_capabilities,
 )
-from core.ref import get_xiaoai, set_speaker
+from core.ref import get_kws, get_xiaoai, set_speaker
 from core.utils.logger import logger
 
 __all__ = ["CommandResult", "SpeakerManager"]
@@ -31,6 +32,19 @@ _PLAYBACK_MAX_BUDGET_MS = 120_000
 
 # 合成超时：真机实测 < 1s/段，留足余量但不占用播放预算。
 _TTS_SYNTHESIS_TIMEOUT_MS = 6_000
+
+# 麦克风闸门默认持有的上限（超过即告警并强制恢复快照）。
+_MIC_GATE_MAX_SECONDS = 300.0
+
+
+class _MicGateHold:
+    """一次 `mic_gate` 的持有状态（watchdog 与退出路径共享）。"""
+
+    __slots__ = ("restored", "timed_out")
+
+    def __init__(self) -> None:
+        self.restored = False
+        self.timed_out = False
 
 
 def estimate_playback_budget_ms(text: str, timeout_ms: float | None) -> float:
@@ -338,6 +352,175 @@ class SpeakerManager:
         """
         res = await self.device.mic_set(muted=not on)
         return bool(res.ok)
+
+    # ------------------------------------------------------------------
+    # 麦克风闸门：播报期间固件级闭麦 + 退出时恢复进入前快照
+    #
+    # 设备真值（pnshelper-event-space.md §3.1）：`event:7` 创建 /tmp/mipns/mute
+    # ⇒ 固件不再唤醒（与 bridge 自己的 ALSA 采集/KWS 并存）；固件无自愈，
+    # 所以闸门必须 try/finally + 上限看门狗，绝不能无条件开麦
+    #（否则会把用户「停止聆听」的设备级静音打开）。
+    # 与 KWS 播放闸门（gate_on/gate_off，bridge 不喂帧）叠加，互不替代。
+    # ------------------------------------------------------------------
+
+    async def _read_mic_state(self) -> str | None:
+        """读麦态快照：`"on"` / `"off"`；读取失败返回 `None`。
+
+        与 `get_mic()` 走同一条 `mic_get` 通道，但把「读不到」与「off」区分开，
+        供闸门的 fallback 判定使用（`get_mic()` 的对外语义保持不变）。
+        """
+        try:
+            res = await self.device.mic_get()
+        except Exception as e:  # noqa: BLE001 - 读不到只能降级
+            logger.warning(f"[Speaker] mic snapshot read failed: {e}")
+            return None
+        if res.exception is not None or res.request is None:
+            logger.warning(
+                f"[Speaker] mic snapshot unreadable: {res.error or res.exception}"
+            )
+            return None
+        out = (res.stdout or "").strip()
+        if "on" in out:
+            return "on"
+        if "off" in out:
+            return "off"
+        logger.warning(f"[Speaker] mic snapshot unexpected output: {out!r}")
+        return None
+
+    @staticmethod
+    def _kws_listen_disabled() -> bool:
+        """KWS 是否处于「停止聆听」（T7.6 持久开关）。KWS 未加载 ⇒ False。"""
+        try:
+            kws = get_kws()
+        except Exception:  # noqa: BLE001 - 引用表异常不应影响播报
+            return False
+        if kws is None:
+            return False
+        try:
+            checker = getattr(kws, "is_listening_disabled", None)
+            if callable(checker):
+                return bool(checker())
+        except Exception:  # noqa: BLE001 - KWS 未 start() 时属性可能不存在
+            return False
+        return bool(getattr(kws, "listen_disabled", False))
+
+    async def _restore_mic_state(self, snapshot: str | None, reason: str) -> bool:
+        """恢复进入闸门前的麦态快照（on→on、off→off）。
+
+        快照读不到时按 KWS「停止聆听」推断：未停止聆听 ⇒ 恢复开麦，否则保持 off。
+        绝不做无条件开麦。
+        """
+        if snapshot == "on":
+            target_on = True
+        elif snapshot == "off":
+            target_on = False
+        else:
+            target_on = not self._kws_listen_disabled()
+            logger.warning(
+                f"[Speaker] mic gate has no snapshot (reason={reason!r}), "
+                f"fallback by kws_listen_disabled -> {'on' if target_on else 'off'}"
+            )
+        try:
+            ok = await self.set_mic(on=target_on)
+        except Exception as e:  # noqa: BLE001 - finally 里不得抛
+            logger.warning(f"[Speaker] mic gate restore failed (reason={reason!r}): {e}")
+            return False
+        target = "on" if target_on else "off"
+        if not ok:
+            logger.warning(
+                f"[Speaker] mic gate restore not confirmed "
+                f"(reason={reason!r}, target={target}, snapshot={snapshot})"
+            )
+        return bool(ok)
+
+    async def _mic_gate_watchdog(
+        self,
+        hold: _MicGateHold,
+        snapshot: str | None,
+        reason: str,
+        max_seconds: float,
+    ) -> None:
+        """持有超上限：告警并强制恢复快照（固件无自愈，防永久失聪）。"""
+        await asyncio.sleep(max_seconds)
+        hold.timed_out = True
+        logger.warning(
+            f"[Speaker] mic gate held over {max_seconds:g}s "
+            f"(reason={reason!r}) — forcing mic restore, caller may have leaked the gate"
+        )
+        hold.restored = await self._restore_mic_state(snapshot, reason)
+
+    @asynccontextmanager
+    async def mic_gate(
+        self,
+        reason: str = "playback",
+        max_seconds: float = _MIC_GATE_MAX_SECONDS,
+    ):
+        """播报期间设备级闭麦，退出时恢复进入前快照。
+
+        - 进入：读麦态快照 → `set_mic(False)`（设备级闭麦）；
+          回读失败只告警，不阻断播报。
+        - 退出（finally）：恢复快照（on→on、off→off），**绝不无条件开麦**；
+          快照读不到时按 KWS `listen_disabled` 推断。
+        - 持有超过 `max_seconds`：告警并强制恢复快照。
+        """
+        snapshot = await self._read_mic_state()
+        if snapshot is None:
+            logger.warning(
+                f"[Speaker] mic gate opened without snapshot (reason={reason!r})"
+            )
+
+        muted = False
+        try:
+            muted = await self.set_mic(on=False)
+        except Exception as e:  # noqa: BLE001 - 闭麦失败不阻断播报
+            logger.warning(f"[Speaker] mic gate mute failed (reason={reason!r}): {e}")
+        if not muted:
+            logger.warning(
+                f"[Speaker] mic gate mute not confirmed (reason={reason!r}, "
+                f"snapshot={snapshot})"
+            )
+
+        hold = _MicGateHold()
+        watchdog = asyncio.create_task(
+            self._mic_gate_watchdog(hold, snapshot, reason, max_seconds)
+        )
+        try:
+            yield
+        finally:
+            if not hold.restored:
+                hold.restored = await self._restore_mic_state(snapshot, reason)
+            watchdog.cancel()
+            try:
+                await watchdog
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # noqa: BLE001 - 看门狗异常不影响退出
+                logger.warning(f"[Speaker] mic gate watchdog failed: {e}")
+
+    async def reconcile_mic_state(self) -> bool:
+        """启动期麦态自愈：清掉 bridge 崩溃遗留的设备级闭麦。
+
+        固件无自愈，崩溃可能把 `/tmp/mipns/mute` 留在设备上（设备彻底听不见）。
+        仅当麦为 off 且 KWS 未处于「停止聆听」时恢复开麦；
+        用户显式停止聆听时保持 off。返回是否执行了恢复。
+        """
+        try:
+            state = await self._read_mic_state()
+        except Exception as e:  # noqa: BLE001 - 自愈不得阻断启动
+            logger.warning(f"[Speaker] mic reconcile read failed: {e}")
+            return False
+        if state != "off":
+            return False
+        if self._kws_listen_disabled():
+            logger.info(
+                "[Speaker] mic is off but KWS listening is disabled, keep muted"
+            )
+            return False
+        ok = await self._restore_mic_state("on", "startup reconcile")
+        logger.warning(
+            f"[Speaker] stale device mic mute detected (bridge crash?), restore on: ok={ok}"
+        )
+        return ok
 
     async def set_volume(self, level: int) -> bool:
         """设置音量（百分比 0-100），回读一致才算成功。"""
