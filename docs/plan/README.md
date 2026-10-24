@@ -77,6 +77,7 @@
 | **B-10** | **时钟死锁干净解**（`ping/time`） | ⭐ 每次断电复发的断网隐患 | 低 | **需授权**（发起云端请求 + 改内存时钟） | ⬜ 待授权 |
 
 > 本轮 baseline 的 ticket 01–10 与逐项落点见 `ws: .scratch/lx06-voice-hub-baseline/`；本表状态与其同步。
+> 2026-10-24 已部署到 NAS：镜像 `open-xiaoai-bridge:04b0709e51`；回滚 tag `open-xiaoai-bridge:rollback-20261024`。
 
 **已降级为台账（不再列为待办）**：
 
