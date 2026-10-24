@@ -16,13 +16,16 @@ from core.device import get_playback_events
 from core.ref import get_speaker, get_xiaoai, get_kws
 from core.wakeup_session import EventManager
 from core.services.admin_api import AdminAPI
-from core.services.auth import authorize, configured_token
+from core.services.auth import authorize, classify_route, configured_tokens
 from core.services.caller import resolve_caller_tag, trust_proxy_enabled
 from core.services.health import build_health_payload
 from core.services.inject_control import (
     INJECT_DISABLED_CODE,
     INJECT_DISABLED_ERROR,
+    InjectDataAuth,
     open_injection_window,
+    peer_allowed,
+    resolve_inject_data_auth,
     resolve_inject_enabled,
 )
 from core.services.tts.doubao import DoubaoTTS
@@ -75,7 +78,13 @@ class InjectRelay:
         self.chunks: asyncio.Queue = asyncio.Queue(maxsize=256)
         self.active: bool = False
         self.downstream_writer: asyncio.StreamWriter | None = None
+        # 数据面鉴权（ticket 12）：start() 时判定；None = 尚未判定/未启动
+        self.data_auth: InjectDataAuth | None = None
         self._downstream_task: asyncio.Task | None = None
+        # 存活的连接处理器（client_connected 任务）。py3.12 的 Server.wait_closed()
+        # 会等全部 handler 退出，而 handler 会一直挂在 chunks.get() 上
+        # ⇒ stop() 必须显式取消它们，否则永不返回。
+        self._conn_tasks: set[asyncio.Task] = set()
         self.text_queues: list[asyncio.Queue] = []   # 文本回传订阅者（WS，多客户端广播）
         self._text_log: list[tuple[int, str]] = []   # 有界文本日志 [(seq, text)]，不随窗口清
         self._seq: int = 0                            # 文本序号，单调递增，永不复位
@@ -166,10 +175,40 @@ class InjectRelay:
             logger.info(f"[InjectRelay] 上行结束 up={self.stats['up_bytes']} dropped={dropped}")
 
     async def downstream_server(self, host: str, port: int) -> None:
-        """hook 下行 TCP 服务端（:9093）：单客户端，连接后持续推送缓冲中的 PCM。"""
+        """hook 下行 TCP 服务端（:9093）：单客户端，鉴权通过后持续推送缓冲中的 PCM。
+
+        连接处理（ticket 12，先认证后推流）：CIDR 判定通过**才**接管
+        `downstream_writer`——被拒连接不写入、不推送、直接断开；
+        已有认证连接被新连接顶替时告警（正常只有一台设备，替换=可疑）。
+        """
         async def client_connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            conn_task = asyncio.current_task()
+            if conn_task is not None:
+                self._conn_tasks.add(conn_task)
             peer = writer.get_extra_info("peername")
-            logger.info(f"[InjectRelay] 下游 hook 已连接: {peer}")
+            peer_ip = str(peer[0]) if isinstance(peer, tuple) and peer else str(peer or "")
+            auth = self.data_auth
+            if auth is not None and auth.mode == "cidr" and not peer_allowed(
+                peer_ip, auth.networks
+            ):
+                logger.warning(
+                    f"[InjectRelay] 下游连接拒绝 auth=reject(reason=cidr) peer={peer_ip}"
+                )
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                if conn_task is not None:
+                    self._conn_tasks.discard(conn_task)
+                return
+            replaced = self.downstream_writer is not None
+            if replaced:
+                logger.warning(
+                    f"[InjectRelay] 下游连接替换 auth=ok replaced=true peer={peer_ip}"
+                    "（正常仅一台设备，替换需排查同段冒充）"
+                )
+            else:
+                logger.info(f"[InjectRelay] 下游连接 auth=ok peer={peer_ip}")
             self.downstream_writer = writer
             try:
                 while True:
@@ -184,11 +223,15 @@ class InjectRelay:
             except (ConnectionResetError, BrokenPipeError):
                 pass
             finally:
-                self.downstream_writer = None
+                # 只在自己仍是接管者时清空：被替换后旧处理器退出不得误清新连接
+                if self.downstream_writer is writer:
+                    self.downstream_writer = None
                 try:
                     writer.close()
                 except Exception:
                     pass
+                if conn_task is not None:
+                    self._conn_tasks.discard(conn_task)
                 logger.info("[InjectRelay] 下游连接结束")
 
         server = await asyncio.start_server(client_connected, host, port)
@@ -201,12 +244,35 @@ class InjectRelay:
             # ticket 07：模块关闭时不监听 :9093，不占用端口（hook 连不上即自然退避）
             logger.info("[InjectRelay] 注入模块未启用，跳过下游 TCP 服务启动")
             return
+        # ticket 12：启用 ≠ 可以裸奔。无 CIDR、无（未来实现的）共享密钥、
+        # 又未显式 INJECT_ALLOW_ANON=1 时拒绝监听，控制面端点不受影响。
+        self.data_auth = resolve_inject_data_auth()
+        if self.data_auth.mode == "refused":
+            logger.error(
+                f"[InjectRelay] 拒绝启动 :{port} 数据面（inject data plane: "
+                f"auth=refused）：{self.data_auth.reason}"
+            )
+            return
+        allow = ""
+        if self.data_auth.mode == "cidr":
+            allow = " allow=" + ",".join(str(n) for n in self.data_auth.networks)
+        logger.info(f"inject data plane: auth={self.data_auth.mode}{allow}")
         self._downstream_task = asyncio.create_task(self.downstream_server(host, port))
 
     async def stop(self) -> None:
         self.close_session("relay stop")
+        # 先取消连接处理器再取消 server 任务：wait_closed 要等 handler 全部退出
+        for task in list(self._conn_tasks):
+            task.cancel()
         if self._downstream_task:
             self._downstream_task.cancel()
+        pending = [
+            t for t in ([self._downstream_task] if self._downstream_task else [])
+            + list(self._conn_tasks)
+            if t is not None and not t.done()
+        ]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # ---- 文本回传（bridge → PC，WS 广播）----
 
@@ -407,17 +473,28 @@ class APIServer:
             return await handler(request)
         if path == "/api/admin" or path.startswith("/api/admin/"):
             return await handler(request)
+        # 每个请求重新读 env（与单一 token 时代口径一致：零成本、无缓存失效问题）
         decision = authorize(
             path,
             request.method,
             authorization=request.headers.get("Authorization"),
-            expected_token=configured_token(),
+            tokens=configured_tokens(),
         )
         if decision.allowed:
+            # 审计（ticket 12）：写类放行记 label（token 决定，不可伪造）+ peer。
+            # 只读端点不记（高频轮询会刷屏）；health/read 本就免鉴权。
+            if classify_route(path, request.method) == "write":
+                logger.info(
+                    f"[APIServer] 放行 {request.method} {path} "
+                    f"label={decision.label} caller={self._caller_tag(request)}"
+                )
             return await handler(request)
-        logger.warning(
+        # 配置非法是服务端自身的错误（非客户端问题）：ERROR 级别促使尽快修复
+        log = logger.error if decision.code == "auth_config_invalid" else logger.warning
+        log(
             f"[APIServer] 拒绝 {request.method} {path} "
-            f"caller={self._caller_tag(request)} code={decision.code}"
+            f"caller={self._caller_tag(request)} code={decision.code} "
+            f"label={decision.label or 'none'}"
         )
         return web.json_response(
             {"success": False, "error": decision.error, "code": decision.code},
@@ -516,10 +593,21 @@ class APIServer:
         self.site = web.TCPSite(self.runner, self.host, self.port)
         await self.site.start()
         logger.info(f"[APIServer] HTTP server started at http://{self.host}:{self.port}")
+        # ticket 12：启动时声明业务 token 模式（labels 非敏感，供运维核对；
+        # 配置非法在此 ERROR 一次——运行期每个请求的 503 会再记）
+        tokens = configured_tokens()
+        if tokens.errors:
+            logger.error("[APIServer] 业务 token 配置非法：" + "; ".join(tokens.errors))
+        elif tokens.entries:
+            logger.info(f"[APIServer] 业务 token labels={','.join(tokens.labels)}")
         if self.inject_enabled:
             # 注入流式中继：下游 TCP（hook 拉流）端口 = HTTP 端口 + 1
             await self.inject_relay.start(self.host, self.port + 1)
-            logger.info(f"[APIServer] inject 模块已启用（中继 :{self.port + 1}）")
+            auth_mode = (
+                self.inject_relay.data_auth.mode
+                if self.inject_relay.data_auth is not None else "unknown"
+            )
+            logger.info(f"[APIServer] inject 模块已启用（中继 :{self.port + 1} auth={auth_mode}）")
         else:
             # ticket 07：关闭时不监听 :9093；端点统一 503 code=inject_disabled
             # （GET /api/inject 与 /api/health 仍报告 enabled=false，供运维观测）
@@ -1084,6 +1172,11 @@ class APIServer:
             "remaining": round(EventManager.injection_gate_remaining(), 1),
             "relay": {
                 "active": self.inject_relay.active,
+                # 数据面鉴权模式（ticket 12）：cidr/anon/refused；unknown=尚未 start
+                "auth": (
+                    self.inject_relay.data_auth.mode
+                    if self.inject_relay.data_auth is not None else "unknown"
+                ),
                 "stats": dict(self.inject_relay.stats),
             },
         }
@@ -1204,6 +1297,10 @@ class APIServer:
             "remaining": EventManager.injection_gate_remaining(),
             "relay": {
                 "active": self.inject_relay.active,
+                "auth": (
+                    self.inject_relay.data_auth.mode
+                    if self.inject_relay.data_auth is not None else "unknown"
+                ),
                 "stats": dict(self.inject_relay.stats),
             },
         })
@@ -1254,7 +1351,7 @@ class APIServer:
                 "/api/health/probe",
                 "GET",
                 authorization=request.headers.get("Authorization"),
-                expected_token=configured_token(),
+                tokens=configured_tokens(),
             )
             if not decision.allowed:
                 return web.json_response(

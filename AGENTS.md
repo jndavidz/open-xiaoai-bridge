@@ -455,13 +455,17 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 | `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |
 
-> 🔐 **业务鉴权（ticket 06，`core/services/auth.py` 纯函数 + `APIServer.api_auth_middleware`）**：
-> 写类端点（上表除 `status`/`health`/`doubao_voices` 外的 POST，含 `/api/inject*`）在配置
-> `BRIDGE_API_TOKEN` 时要求 `Authorization: Bearer <token>`（缺失 401 / 不匹配 403）；
-> **未配置时写类端点 503 失败关闭**，`/api/health`、`/api/status`、`GET /api/inject`、
-> `/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取。`ADMIN_TOKEN`（面板）与业务
-> token 分离、互不回退。新增端点默认按写类处理（失败关闭），放行只读端点须显式加入
-> `auth.READ_ROUTES`。日志只记调用方与错误码，不打印 token。
+> 🔐 **业务鉴权（ticket 06 + 票 12 多 token，`core/services/auth.py` 纯函数 + `APIServer.api_auth_middleware`）**：
+> 写类端点（上表除 `status`/`health`/`doubao_voices` 外的 POST，含 `/api/inject*`）要求
+> `Authorization: Bearer <token>`（缺失 401 / 不匹配 403）。token 来源两级：
+> `BRIDGE_API_TOKENS=label:token,...`（具名集合，命中 label 写进审计日志，可定点吊销）；
+> `BRIDGE_API_TOKEN` 保留为单一 `legacy` 标签（迁移并存窗口，收口即删）。
+> **未配置时写类端点 503 失败关闭**；**配置非法（格式错/label 重复/值重复）时整份 503
+> `auth_config_invalid`**（半残配置不允许静默半放行）。`/api/health`、`/api/status`、
+> `GET /api/inject`、`/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取。
+> `ADMIN_TOKEN`（面板）与业务 token 分离、互不回退。新增端点默认按写类处理（失败关闭），
+> 放行只读端点须显式加入 `auth.READ_ROUTES`。日志只记 label/调用方与错误码，不打印 token
+> （写类放行一行 INFO `label= caller=`，拒绝一行 WARNING `code= label=none`）。
 
 > 🧾 **审计调用方（ticket 09，`core/services/caller.py`）**：日志里的 `caller=` 默认取
 > **TCP peer**（`request.remote`）。生产无反向代理，`X-Forwarded-For` / `X-Real-IP`
@@ -553,6 +557,10 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   不启动 native 源；运行时镜像无 ssh，勿加依赖）。适配器支持热重载。
 - `inject.enabled`（默认 false）或环境变量 `INJECT_ENABLE`：关闭时不监听 `:9093`，
   注入端点 503；开启时窗口 = 闸门 + 中继 + 唤醒，三者同开同关。
+  ⚠️ **开启 ≠ 可裸奔（票 12）**：未配 `INJECT_ALLOW_CIDR` 且未显式 `INJECT_ALLOW_ANON=1`
+  ⇒ **拒绝监听 :9093**（`inject data plane: auth=refused`，共享密钥首包待 hook 改动）。
+  CIDR 命中才接管推流（先认证后推流），拒绝/替换均有 WARNING；当前模式看
+  `GET /api/inject` 或 `/api/health` 的 `relay.auth`（cidr/anon/refused）。
 
 ### Rust 原生扩展 (native/)
 

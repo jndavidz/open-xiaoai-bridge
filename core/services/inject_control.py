@@ -18,6 +18,20 @@ HTTP 适配（路由、鉴权、json_response）留在 `core/services/api_server
   - `/api/health` 仍可用，并报告 `inject.enabled=false`。
 - 开启时行为与既有实现一致。
 
+## 数据面（:9093）鉴权语义（ticket 12 / notes/10 §3）
+
+合法客户端是音箱 hook（TCP 客户端拉流），bridge 只写不读 ⇒ 攻击面是
+「窃听 PCM（= PC 麦克风语音）」与「挤掉合法 hook」。鉴权模式判定：
+
+- `INJECT_ALLOW_CIDR`（逗号分隔 CIDR，建议设备 /32）：mode=`cidr`，
+  连接按源 IP 过滤，**先判定后接管**（不匹配的连接拿不到任何 PCM）；
+- 未配 CIDR 但显式 `INJECT_ALLOW_ANON=1`：mode=`anon`（裸奔，仅限临时排障）；
+- 其余（含 `INJECT_ENABLE=1` 但什么都没配）：mode=`refused`——
+  **拒绝监听**（共享密钥首包鉴权需 hook C 改动，未实施前不允许无鉴权裸跑）；
+  CIDR 配了但解析非法同样 `refused`（fail closed，不悄悄降级成 anon）。
+  共享密钥首包（`INJECT_AUTH_KEY`）留待 hook 改动落地后以 mode=`key` 接入。
+启动日志固定一行 `inject data plane: auth=<mode>`，让「当前到底有没有鉴权」不靠猜。
+
 ## 开窗原子性
 
 开窗 = 闸门 + 数据面中继 + 引擎唤醒三者同开同关。顺序固定为
@@ -27,12 +41,16 @@ HTTP 适配（路由、鉴权、json_response）留在 `core/services/api_server
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 # 环境变量覆盖名（与配置键 `inject.enabled` 并存）
 ENV_INJECT_ENABLE = "INJECT_ENABLE"
+# 数据面鉴权（ticket 12）：设备 IP 白名单 / 显式裸奔许可
+ENV_INJECT_ALLOW_CIDR = "INJECT_ALLOW_CIDR"
+ENV_INJECT_ALLOW_ANON = "INJECT_ALLOW_ANON"
 
 # 关闭语义的固定错误码/文案（端点与测试共用，避免各处自造字符串）
 INJECT_DISABLED_CODE = "inject_disabled"
@@ -89,6 +107,78 @@ def resolve_inject_enabled(config=None, env: Mapping[str, str] | None = None) ->
     if override is not None:
         return override
     return _config_enabled(config)
+
+
+@dataclass(frozen=True)
+class InjectDataAuth:
+    """:9093 数据面的鉴权模式判定结果（`resolve_inject_data_auth` 的产物）。
+
+    mode 取值：`cidr`（按 networks 过滤源 IP）/ `anon`（显式裸奔）/
+    `refused`（拒绝监听）。`reason` 仅在 refused 时有人读原因（不含敏感值）。
+    """
+
+    mode: str
+    networks: tuple = ()
+    reason: str = ""
+
+
+def parse_inject_cidrs(raw: str):
+    """解析逗号分隔 CIDR 列表 → (networks, errors)。
+
+    `strict=False`：`10.10.10.20/24` 这类带主机位的输入按掩码归零接受
+    （只会收窄到所写前缀，不会放大）；语法非法才进 errors。
+    """
+    networks = []
+    errors: list[str] = []
+    for index, part in enumerate(str(raw or "").split(","), start=1):
+        value = part.strip()
+        if not value:
+            errors.append(f"条目 {index} 为空")
+            continue
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            errors.append(f"条目 {index}（{value}）不是合法 CIDR")
+    return tuple(networks), tuple(errors)
+
+
+def peer_allowed(peer_ip: str | None, networks) -> bool:
+    """源 IP 是否命中任一允许网段；无网段/非法 IP 一律 False（fail closed）。
+
+    IPv4-mapped IPv6（`::ffff:10.x.x.x`）归一化成 IPv4 再比对。
+    """
+    if not peer_ip or not networks:
+        return False
+    try:
+        ip = ipaddress.ip_address(str(peer_ip).strip())
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return any(ip in net for net in networks)
+
+
+def resolve_inject_data_auth(env: Mapping[str, str] | None = None) -> InjectDataAuth:
+    """判定 :9093 数据面鉴权模式（唯一判定点，见模块文档「数据面鉴权语义」）。"""
+    environ = os.environ if env is None else env
+    raw_cidr = str(environ.get(ENV_INJECT_ALLOW_CIDR, "") or "").strip()
+    if raw_cidr:
+        networks, errors = parse_inject_cidrs(raw_cidr)
+        if errors:
+            return InjectDataAuth(
+                mode="refused",
+                reason=f"INJECT_ALLOW_CIDR 非法（{'; '.join(errors)}），fail closed",
+            )
+        return InjectDataAuth(mode="cidr", networks=networks)
+    if _flag(environ.get(ENV_INJECT_ALLOW_ANON)) is True:
+        return InjectDataAuth(mode="anon")
+    return InjectDataAuth(
+        mode="refused",
+        reason=(
+            "未配置 INJECT_ALLOW_CIDR（共享密钥首包鉴权未实施），"
+            "也未显式 INJECT_ALLOW_ANON=1：拒绝无鉴权监听"
+        ),
+    )
 
 
 @dataclass(frozen=True)
