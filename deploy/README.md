@@ -169,6 +169,16 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   做影子比对；native 源默认关闭（运行时镜像无 openssh-client，`native_cmd` 留空）。
   容器内验证 `_gate_kws` 落点齐全（`_run_steps` / `api/play/{text,url,file}`）、`/api/audio_input` 恢复接口正常。
   旧镜像自动保留可回滚；旧 config.py 备份为 `config.py.bak-20260924104901`。
+
+### 延迟埋点 TurnTrace（可选，默认关闭）
+
+- **默认关闭**：`turn_trace.enabled=false` 且 `TURN_TRACE_ENABLED` 留空 ⇒ 零日志、零行为变化。
+- **开启**：`TURN_TRACE_ENABLED=1` 或 `config.py` 的 `turn_trace.enabled=true`（config 热重载即可生效）。
+  每轮对话只输出**一条** `[TurnTrace]` INFO 数值行：ASR final→LLM、LLM 耗时、TTS 合成、
+  play_url→起播、播放时长、文案/回复字符数、`tool_rounds` 与 timeout/fallback 标志。
+- **不含原话**：只记长度与耗时，不记 ASR 原文/回复文本；逐轮可据此算 P50/P95。
+  缺失段记为 `-1.0`，未收尾的轮记为 `incomplete=1`。
+
 - 短词（4 字以下）易误触发，优先用「下一首歌曲」而非「下一首」
 - ⚠️ **播报文案不得含词表词**（否则形成自触发回环，见 `bridge/AGENTS.md` 「TTS 文案安全约束」
   及工作区 `docs/plan/incident-kws-self-trigger-loop.md`）

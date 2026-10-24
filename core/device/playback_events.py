@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from core.utils.logger import logger
+from core.utils import turn_trace
 
 __all__ = [
     "DEFAULT_EVENT_PLANE",
@@ -715,6 +716,17 @@ class PlaybackEventAdapter:
                 }
             if incomplete:
                 self._shadow_incomplete_count += incomplete
+
+        # TurnTrace（ticket 11）：把本轮播放 started/finished 落进当前轮的绝对时间线
+        # （仅收尾已进入 TTS 合成的轮；外部播报不会误收尾 LLM 轮）。
+        turn_trace.note_playback(
+            finished=finished,
+            started=started,
+            reason=reason,
+            wait_started_at=session.started_at,
+            started_at_ms=primary.started_at_ms,
+            finished_at_ms=primary.finished_at_ms,
+        )
 
         logger.debug(
             "[PlaybackEvents] wait " + json.dumps(record, ensure_ascii=False)

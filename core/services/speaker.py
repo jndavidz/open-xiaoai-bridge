@@ -13,6 +13,7 @@ from core.device import (
 )
 from core.ref import get_kws, get_xiaoai, set_speaker
 from core.utils.logger import logger
+from core.utils import turn_trace
 
 __all__ = ["CommandResult", "SpeakerManager"]
 
@@ -141,10 +142,16 @@ class SpeakerManager:
         """
         content = text or "你好"
 
+        # TurnTrace（ticket 11）：只记合成耗时与文案长度（字符数），不记文案。
+        turn_trace.note_tts_chars(len(content))
+        turn_trace.mark_tts_start()
         synth = await self.device.tts_synthesize(
             content, timeout_ms=_TTS_SYNTHESIS_TIMEOUT_MS
         )
+        turn_trace.mark_tts_end()
         path = str((synth.readback or {}).get("path") or "")
+        synth_ok = bool(synth.ok and path)
+        turn_trace.note_tts_result(ok=synth_ok, fallback=not synth_ok)
         if not synth.ok or not path:
             logger.warning(
                 f"[Speaker] TTS synthesis failed ({synth.error or 'no_path'}), "
@@ -153,6 +160,7 @@ class SpeakerManager:
             return await self._play_text_via_script(content, timeout_ms)
 
         play = await self.device.play_url(f"file://{path}")
+        turn_trace.note_play_url(bool(play.ok))
         if not play.ok:
             logger.warning(
                 f"[Speaker] player_play_url rejected file://{path}: {play.error}"

@@ -248,6 +248,13 @@ APP_CONFIG = {
         # 且 client 的 run_shell 不能流式输出，本项不引入任何 Docker 依赖。
         "native_cmd": "",
     },
+    "turn_trace": {
+        # 每轮对话延迟埋点（ticket 11）。默认关闭：关闭时零日志、零行为变化。
+        # 开启后每轮只输出一条 [TurnTrace] INFO 数值行（各段 ms / 文案长度 /
+        # timeout 与 fallback 标志），绝不输出原话文本。
+        # 环境变量 TURN_TRACE_ENABLED 可覆盖本值（1/true/yes/on 开，0/false/no/off 关）。
+        "enabled": False,
+    },
     "asr": {
         # 支持 "sense_voice"（默认）、"paraformer"、"fire_red_asr" 或 "doubao"
         "model": "sense_voice",
