@@ -646,6 +646,13 @@ class XiaoAI:
         open_xiaoai_server.register_fn("on_input_data", cls.on_input_data)
         open_xiaoai_server.register_fn("on_event", cls.__on_event)
         cls.__init_background_event_loop()
+        # 启动期麦态自愈（ticket 10）：固件无自愈，bridge 崩溃可能把
+        # /tmp/mipns/mute 留在设备上（表现为「彻底听不见」）。仅在 KWS 未处于
+        # 「停止聆听」时恢复开麦；用户显式停止聆听时保持 off。
+        try:
+            await cls.speaker.reconcile_mic_state()
+        except Exception as e:  # noqa: BLE001 - 自愈失败不得阻断启动
+            logger.warning(f"[XiaoAI] mic state reconcile failed: {e}")
         # 看门狗挂在专用 async_loop 上；start_server 之后的代码可能永不返回
         cls._watchdog_task = asyncio.run_coroutine_threadsafe(
             cls._recording_watchdog_loop(),
