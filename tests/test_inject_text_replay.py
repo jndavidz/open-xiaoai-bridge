@@ -21,6 +21,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# 直接 `python3 tests/xxx.py` 时 sys.path[0] 是 tests/，api_server 新增的
+# `core.services.inject_control` 导入需要仓库根在 sys.path（与 -m unittest 一致）。
+sys.path.insert(0, str(ROOT))
 
 
 def _load_api_server_module():

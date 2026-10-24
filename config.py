@@ -222,6 +222,14 @@ APP_CONFIG = {
         # （client 录音读循环 500ms 无数据即退出，阈值须显著小于 3s）
         "watchdog_seconds": 1.0,
     },
+    "inject": {
+        # PC 语音注入模块总开关（ticket 07）。默认关闭：
+        #   - 关闭时不启动数据面中继 :9093，控制/数据面端点返回 503（code=inject_disabled），
+        #     主对话路径完全不受影响；GET /api/inject 与 /api/health 仍报告 enabled=false；
+        #   - 开启时行为与既有注入实现一致（窗口 = 闸门 + 中继 + 唤醒，三者同开同关）。
+        # 环境变量 INJECT_ENABLE 可覆盖本值（1/true/yes/on 开，0/false/no/off 关）。
+        "enabled": False,
+    },
     "asr": {
         # 支持 "sense_voice"（默认）、"paraformer"、"fire_red_asr" 或 "doubao"
         "model": "sense_voice",

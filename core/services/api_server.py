@@ -16,6 +16,12 @@ from core.ref import get_speaker, get_xiaoai, get_kws
 from core.wakeup_session import EventManager
 from core.services.admin_api import AdminAPI
 from core.services.auth import authorize, configured_token
+from core.services.inject_control import (
+    INJECT_DISABLED_CODE,
+    INJECT_DISABLED_ERROR,
+    open_injection_window,
+    resolve_inject_enabled,
+)
 from core.services.tts.doubao import DoubaoTTS
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
@@ -59,7 +65,10 @@ class InjectRelay:
     # 文本回放缓冲上限（条）。一条 ASR 文本通常 ≤ 数百字节，200 条 ≈ 数十 KB。
     MAX_TEXT_LOG = 200
 
-    def __init__(self):
+    def __init__(self, enabled: bool = True):
+        # 模块总开关（ticket 07）：关闭时本对象仍存在（便于健康接口报告
+        # enabled=false），但**不启动下游 :9093**，所有数据面端点 fail closed。
+        self.enabled: bool = bool(enabled)
         self.chunks: asyncio.Queue = asyncio.Queue(maxsize=256)
         self.active: bool = False
         self.downstream_writer: asyncio.StreamWriter | None = None
@@ -68,6 +77,25 @@ class InjectRelay:
         self._text_log: list[tuple[int, str]] = []   # 有界文本日志 [(seq, text)]，不随窗口清
         self._seq: int = 0                            # 文本序号，单调递增，永不复位
         self.stats = {"up_bytes": 0, "down_bytes": 0, "sessions": 0, "texts": 0}
+
+    @staticmethod
+    def _disabled_response() -> web.Response:
+        """统一「注入模块已关闭」响应（503 + code=inject_disabled）。
+
+        关闭语义（与 core/services/inject_control.py 的模块文档一致）：
+          - 控制面/数据面端点一律 503，不用 404/200 混淆「模块没开」与「路径不存在」；
+          - 唯一例外是 `GET /api/inject` 只读探针（200 + enabled=false），
+            由 APIServer.handle_inject_status 处理，便于区分「模块关闭」与「窗口未开」。
+        """
+        return web.json_response(
+            {
+                "success": False,
+                "enabled": False,
+                "code": INJECT_DISABLED_CODE,
+                "error": INJECT_DISABLED_ERROR,
+            },
+            status=503,
+        )
 
     def open_session(self) -> None:
         """开窗：允许上行数据入队。
@@ -100,7 +128,10 @@ class InjectRelay:
         """POST /api/inject/stream —— PC 上行 PCM（chunked body）。
 
         窗口未开时直接 409 拒绝（客户端应先 POST /api/inject 开窗）。
+        模块关闭时 503（fail closed，不分配缓冲、不推进任何统计）。
         """
+        if not self.enabled:
+            return self._disabled_response()
         if not self.active:
             return web.json_response(
                 {"success": False, "error": "injection window not open"},
@@ -161,6 +192,10 @@ class InjectRelay:
             await server.serve_forever()
 
     async def start(self, host: str, port: int) -> None:
+        if not self.enabled:
+            # ticket 07：模块关闭时不监听 :9093，不占用端口（hook 连不上即自然退避）
+            logger.info("[InjectRelay] 注入模块未启用，跳过下游 TCP 服务启动")
+            return
         self._downstream_task = asyncio.create_task(self.downstream_server(host, port))
 
     async def stop(self) -> None:
@@ -219,7 +254,10 @@ class InjectRelay:
         """GET /api/inject/text?since=N (WebSocket) —— PC 订阅识别文本。
 
         `since` 语义与回放/实时顺序保证见 `_serve_text_subscription`。
+        模块关闭时在 WS 握手前返回 503（不升级连接、不回放任何文本）。
         """
+        if not self.enabled:
+            return self._disabled_response()
         ws = web.WebSocketResponse(heartbeat=15)
         await ws.prepare(request)
         since = self.parse_since(request.query.get("since"))
@@ -298,8 +336,12 @@ class InjectRelay:
                 )
 
     async def handle_health(self, request: web.Request) -> web.Response:
+        """GET /api/inject/relay —— 中继观测（模块关闭时 503，不泄露任何缓冲内容）。"""
+        if not self.enabled:
+            return self._disabled_response()
         return web.json_response({
             "success": True,
+            "enabled": True,
             "active": self.active,
             "stats": self.stats,
             "queue": self.chunks.qsize(),
@@ -322,7 +364,10 @@ class APIServer:
         )
         self.runner = None
         self.site = None
-        self.inject_relay = InjectRelay()   # 注入流式中继（数据面）
+        # 注入模块总开关（ticket 07）：默认关闭；env INJECT_ENABLE 可覆盖 config。
+        # 关闭时中继不监听 :9093，控制/数据面端点 fail closed（见 inject_control 文档）。
+        self.inject_enabled = resolve_inject_enabled(self.config)
+        self.inject_relay = InjectRelay(enabled=self.inject_enabled)   # 注入流式中继（数据面）
         global _relay_singleton
         _relay_singleton = self.inject_relay
         self._setup_routes()
@@ -442,9 +487,17 @@ class APIServer:
         self.site = web.TCPSite(self.runner, self.host, self.port)
         await self.site.start()
         logger.info(f"[APIServer] HTTP server started at http://{self.host}:{self.port}")
-        # 注入流式中继：下游 TCP（hook 拉流）端口 = HTTP 端口 + 1
-        relay_port = self.port + 1
-        await self.inject_relay.start(self.host, relay_port)
+        if self.inject_enabled:
+            # 注入流式中继：下游 TCP（hook 拉流）端口 = HTTP 端口 + 1
+            await self.inject_relay.start(self.host, self.port + 1)
+            logger.info(f"[APIServer] inject 模块已启用（中继 :{self.port + 1}）")
+        else:
+            # ticket 07：关闭时不监听 :9093；端点统一 503 code=inject_disabled
+            # （GET /api/inject 与 /api/health 仍报告 enabled=false，供运维观测）
+            logger.info(
+                "[APIServer] inject 模块未启用（inject.enabled=false）："
+                "不启动中继端口，注入控制/数据面端点返回 503"
+            )
 
     async def stop(self):
         """Stop the HTTP server"""
@@ -886,59 +939,119 @@ class APIServer:
                 status=500,
             )
 
+    @staticmethod
+    def _parse_inject_duration(raw) -> float | None:
+        """解析开窗时长：None/非法 → 默认 TTL；合法值夹在 [1, INJECTION_GATE_TTL]。"""
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return min(max(value, 1.0), EventManager.INJECTION_GATE_TTL)
+
+    def _inject_health(self) -> dict:
+        """健康接口的 inject 段（不泄露凭证/识别文本）。"""
+        if not self.inject_enabled:
+            return {
+                "enabled": False,
+                "gate": "closed",
+                "remaining": 0.0,
+                "relay": {"active": False},
+            }
+        gate_open = EventManager.injection_gate_active()
+        return {
+            "enabled": True,
+            "gate": "open" if gate_open else "closed",
+            "remaining": round(EventManager.injection_gate_remaining(), 1),
+            "relay": {
+                "active": self.inject_relay.active,
+                "stats": dict(self.inject_relay.stats),
+            },
+        }
+
     async def handle_inject(self, request: web.Request) -> web.Response:
         """
         POST /api/inject
         PC 侧 ASR 注入窗口控制（firmware-asr-injection-feasibility.md §3.4/§3.5）。
 
-        开窗 = 开注入闸门（机制 A）+ P2 静默唤醒引擎（pnshelper event_notify）。
-        唤醒后引擎 enable asr=1，云端 ASR 才会出流；闸门保证识别结果不会
-        被当成用户指令交给 Agent/对话后端。
+        开窗 = 开注入闸门（机制 A）+ 开数据面中继 + P2 静默唤醒引擎
+        （pnshelper event_notify）。唤醒后引擎 enable asr=1，云端 ASR 才会出流；
+        闸门保证识别结果不会被当成用户指令交给 Agent/对话后端。
+
+        **原子性（ticket 07）**：顺序固定为「开闸门 → 开中继 → 唤醒引擎」，
+        任一步失败（含 wake_up 返 False/异常）都整窗回滚（关闸门 + 关中继）
+        并返回 503，不留下半开状态。
+
+        模块关闭（inject.enabled=false）时本端点 503 + code=inject_disabled。
 
         请求体：
             {"on": true,  "duration": 30}   # 开窗（duration 可选，默认/上限见 TTL）
-            {"on": false}                    # 关窗（PC finally 必须调用）
+            {"on": false}                    # 关窗（PC finally 必须调用；幂等）
 
         Response:
-            {"success": true, "gate": "open"/"closed", "remaining": <秒>}
+            {"success": true, "enabled": true, "gate": "open"/"closed", "remaining": <秒>}
         """
+        if not self.inject_enabled:
+            logger.info(
+                f"[APIServer] /api/inject 拒绝 caller={self._caller_tag(request)}："
+                "inject 模块未启用"
+            )
+            return InjectRelay._disabled_response()
+
         try:
             data = await request.json() if request.can_read_body else {}
             caller = self._caller_tag(request)
 
             if data.get("on"):
-                duration = data.get("duration")
-                if duration is not None:
-                    try:
-                        duration = min(max(float(duration), 1.0), EventManager.INJECTION_GATE_TTL)
-                    except (TypeError, ValueError):
-                        duration = None
-                ttl = EventManager.open_injection_gate(duration)
-                self.inject_relay.open_session()   # 数据面：允许上游推流
-
-                # P2 唤醒路径：复用 xiaoai_asr 模式的静默唤醒，使引擎进入 ASR 出流态。
-                speaker = get_speaker()
-                woken = None
-                if speaker:
-                    try:
-                        woken = await speaker.wake_up(awake=True, silent=True)
-                    except Exception as e:
-                        logger.warning(f"[APIServer] inject wake_up failed: {e}")
+                duration = self._parse_inject_duration(data.get("duration"))
+                result = await open_injection_window(
+                    EventManager,
+                    self.inject_relay,
+                    get_speaker(),
+                    duration,
+                )
+                if not result.ok:
+                    logger.warning(
+                        f"[APIServer] /api/inject 开窗失败并已回滚 caller={caller} "
+                        f"code={result.code} error={result.error}"
+                    )
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "enabled": True,
+                            "gate": "closed",
+                            "remaining": 0,
+                            "code": result.code,
+                            "error": result.error,
+                            "rolled_back": result.rolled_back,
+                        },
+                        status=503,
+                    )
 
                 logger.info(
-                    f"[APIServer] /api/inject 开窗 caller={caller} ttl={ttl:.0f}s wake_up={woken}"
+                    f"[APIServer] /api/inject 开窗 caller={caller} "
+                    f"ttl={(result.ttl or 0):.0f}s wake_up={result.wakeup}"
                 )
                 return web.json_response({
                     "success": True,
+                    "enabled": True,
                     "gate": "open",
-                    "remaining": EventManager.injection_gate_remaining(),
-                    "wakeup": woken,
+                    "remaining": result.remaining,
+                    "ttl": result.ttl,
+                    "wakeup": result.wakeup,
                 })
 
+            # 关窗幂等：未开窗时重复调用同样返回 closed，不报错。
             EventManager.close_injection_gate()
             self.inject_relay.close_session("api close")   # 数据面：断下游 + 丢上行
             logger.info(f"[APIServer] /api/inject 关窗 caller={caller}")
-            return web.json_response({"success": True, "gate": "closed", "remaining": 0})
+            return web.json_response({
+                "success": True,
+                "enabled": True,
+                "gate": "closed",
+                "remaining": 0,
+            })
 
         except Exception as e:
             logger.error(f"[APIServer] Error in inject: {e}")
@@ -951,23 +1064,41 @@ class APIServer:
         """
         GET /api/inject
         注入闸门状态观测（机制 A 的可观测性要求）。
+
+        这是**只读探针**，在模块关闭时仍返回 200 + `enabled=false`（唯一的
+        关闭态例外）：让运维能区分「模块没开」与「窗口没开」，与 /api/health
+        的 inject.enabled 同义；其余注入端点关闭时一律 503。
         """
+        if not self.inject_enabled:
+            return web.json_response({
+                "success": True,
+                "enabled": False,
+                "gate": "closed",
+                "remaining": 0,
+                "relay": {"active": False},
+            })
         return web.json_response({
             "success": True,
+            "enabled": True,
             "gate": "open" if EventManager.injection_gate_active() else "closed",
             "remaining": EventManager.injection_gate_remaining(),
+            "relay": {
+                "active": self.inject_relay.active,
+                "stats": dict(self.inject_relay.stats),
+            },
         })
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """
         GET /api/health
-        Health check endpoint
+        Health check endpoint（保留只读、可无鉴权；不暴露凭证/完整文本）
         """
         return web.json_response({
             "success": True,
             "data": {
                 "status": "healthy",
-                "speaker_ready": get_speaker() is not None
+                "speaker_ready": get_speaker() is not None,
+                "inject": self._inject_health(),
             }
         })
 
