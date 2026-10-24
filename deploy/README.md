@@ -101,7 +101,7 @@ reboot
 6. 音箱喊 **「你好老师」** → 进入辅导人设（四年级导师，苏格拉底式引导、不直接报答案）；喊「你好贾维斯」切回后确认人格无串台
 7. 音箱先喊 **「你好贾维斯」** 进对话（听到"我在"），再说 **「现在上海天气怎么样」** → 回答来自 weather 工具而非纯生成；bridge 日志见 `tool round: ['weather_get']` 回环。**注意：连说"贾维斯，…"无效**（唤醒词是完整「你好贾维斯」，KWS 词表无单独「贾维斯」）
 8. HA 侧建一个临时脚本调 `POST http://10.10.10.2:9092/api/play/text`（body `{"text":"来自HA的播报"}`）→ 音箱说话
-9. 音箱喊 **「停止聆听」** → 麦克风静音 + KWS 停止分析 + TTS「已停止聆听」（隐私开关，语音通道自关）；`curl -X POST http://10.10.10.2:9092/api/audio_input`（免 token、无需 body，为唯一恢复路径）→ mic 恢复 on + KWS 恢复分析，返回 `{"success":true,"mic":"on","listening":true}`
+9. 音箱喊 **「停止聆听」** → 麦克风静音 + KWS 停止分析 + TTS「已停止聆听」（隐私开关，语音通道自关）；`curl -X POST -H "Authorization: Bearer $BRIDGE_API_TOKEN" http://10.10.10.2:9092/api/audio_input`（唯一恢复路径；配置了 `BRIDGE_API_TOKEN` 时必须带 Bearer，否则 401/503）→ mic 恢复 on + KWS 恢复分析，返回 `{"success":true,"mic":"on","listening":true}`
 
 ## 5.5 后台面板（:9092/admin）
 
@@ -144,6 +144,16 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   config 热重载只刷 `vad.threshold`/`min_silence`）；词表改动同理（`keywords.txt` 启动时编译）
   ✅ **已上线 2026-09-24**：新 config.py 同步至 NAS + 新镜像（含播放闸门/命中留证/caller 审计）推送 +
   `docker compose up -d --force-recreate`；启动日志确认 `KWS: [score:3.0, threshold:0.35], VAD:[threshold:0.4]`；
+
+### 音频输入（六麦 / 看门狗）
+
+- `audio_input.channels`：采集声道数，默认 **6**（LX06 六麦）；bridge 自动同步到 native 的
+  `AUDIO_INPUT_CHANNELS`，**改 1 即回退单声道**，client 不需重编。
+- `audio_input.channel_strategy`：`strongest`（滑窗最强麦 + 迟滞，默认）/ `average`（等权平均）/
+  `fixed`（固定 `audio_input.fixed_channel`）。
+- `audio_input.watchdog_seconds`：连续无帧秒数，默认 **1.0**。client 的录音读循环 500ms 无数据即退出，
+  阈值必须显著小于 3s；恢复动作是先停后启，失败按指数退避。
+- 真机 A/B 与回滚判据见 `ws: .scratch/lx06-voice-hub-baseline/acceptance-checklist.md` §4/§5。
   容器内验证 `_gate_kws` 落点齐全（`_run_steps` / `api/play/{text,url,file}`）、`/api/audio_input` 恢复接口正常。
   旧镜像自动保留可回滚；旧 config.py 备份为 `config.py.bak-20260924104901`。
 - 短词（4 字以下）易误触发，优先用「下一首歌曲」而非「下一首」
