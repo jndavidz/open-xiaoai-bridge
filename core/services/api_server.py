@@ -858,7 +858,7 @@ class APIServer:
             # 导致宿主机仍静音、KWS 收不到语音、恢复后④⑤ 无响应。
             # 显式删掉该宿主侧标志，与「停止聆听」时对称地真正恢复采集。
             try:
-                await speaker.run_shell("rm -f /tmp/mipns/mute")
+                await speaker.clear_mic_mute_flag()
             except Exception as e:
                 logger.warning(f"[APIServer] rm /tmp/mipns/mute on audio_input failed: {e}")
 

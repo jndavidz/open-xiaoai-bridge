@@ -42,8 +42,8 @@ class WakeupSessionManager:
     async def _stop_device_playback(self):
         """Stop all audio playback on the device and restart recording.
 
-        - killall tts_play.sh miplayer: stop blocking TTS (tts_play.sh + child miplayer)
-        - mphelper pause: stop non-blocking TTS (mibrain text_to_speech via mediaplayer)
+        - 停阻塞 TTS（原厂脚本及其子播放器）
+        - 暂停非阻塞 TTS（mibrain 经媒体播放器发声）
         - stop_playing: kill aplay (our PCM channel)
         - start_playing / start_recording: restart audio streams
         """

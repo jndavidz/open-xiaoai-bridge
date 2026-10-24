@@ -4,29 +4,31 @@ from typing import Literal
 
 import open_xiaoai_server
 
+from core.device import CommandResult, get_device as get_capabilities
 from core.ref import get_xiaoai, set_speaker
-from core.utils.base import json_decode, json_encode
 from core.utils.logger import logger
 
-
-class CommandResult:
-    def __init__(self, stdout: str, stderr: str, exit_code: int):
-        self.stdout = stdout
-        self.stderr = stderr
-        self.exit_code = exit_code
+__all__ = ["CommandResult", "SpeakerManager"]
 
 
 class SpeakerManager:
+    """音箱硬件控制外观。
+
+    所有设备命令都经 `core.device` 能力层发出（ticket 02）；
+    本类只保留对外方法签名与既有行为，判据缺陷留给 ticket 03。
+    """
+
     status: Literal["playing", "paused", "idle"] = "idle"
 
     def __init__(self):
+        self.device = get_capabilities()
         set_speaker(self)
 
     async def get_playing(self, sync=False):
         """获取播放状态"""
         if sync:
             # 同步远端最新状态
-            res = await self.run_shell("mphelper mute_stat")
+            res = await self.device.playback_status()
             if "1" in res.stdout:
                 self.status = "playing"
             elif "2" in res.stdout:
@@ -35,8 +37,10 @@ class SpeakerManager:
 
     async def set_playing(self, playing=True):
         """播放/暂停"""
-        command = "mphelper play" if playing else "mphelper pause"
-        res = await self.run_shell(command)
+        if playing:
+            res = await self.device.playback_resume()
+        else:
+            res = await self.device.pause()
         return '"code": 0' in res.stdout
 
     async def play(
@@ -69,23 +73,18 @@ class SpeakerManager:
             return get_xiaoai().on_output_data(buffer)
 
         if blocking:
-            command = (
-                f"miplayer -f '{url}'"
-                if url
-                else f"/usr/sbin/tts_play.sh '{text.replace("'", "'\\''") or '你好'}'"
-            )
-            res = await self.run_shell(command, timeout=timeout)
-            return res.exit_code == 0
+            if url:
+                res = await self.device.play_url_blocking(url, timeout_ms=timeout)
+            else:
+                res = await self.device.play_text_blocking(text, timeout_ms=timeout)
+            # 历史判据（阻塞 TTS 脚本成功时 rc 也可能是 1）：ticket 03 修。
+            return res.request.exit_code == 0
 
         if url:
-            data = json_encode({"url": url, "type": 1})
-            command = f"ubus call mediaplayer player_play_url '{data}'"
+            res = await self.device.play_url(url, timeout_ms=timeout)
         else:
-            data = json_encode({"text": text or "你好", "save": 0})
-            command = f"ubus call mibrain text_to_speech '{data}'"
-
-        res = await self.run_shell(command, timeout=timeout)
-        return '"code": 0' in res.stdout if res else False
+            res = await self.device.tts_speak(text, timeout_ms=timeout)
+        return '"code": 0' in res.request.stdout
 
     async def play_server_file(
         self,
@@ -120,10 +119,12 @@ class SpeakerManager:
         aplay 不立即重启，由 Rust 侧 ensure_player_ready() 在首次
         发送音频数据时按需启动，避免空 buffer 导致 underrun。
         """
-        await self.run_shell(
-            "killall tts_play.sh miplayer 2>/dev/null; mphelper pause"
-        )
+        await self.device.stop_audio()
         await open_xiaoai_server.stop_playing()
+
+    async def stop_local_playback(self) -> None:
+        """只停设备侧阻塞/非阻塞播报进程（不含 PCM 通道）。"""
+        await self.device.stop_audio()
 
     async def wake_up(self, awake=True, silent=True):
         """
@@ -133,19 +134,10 @@ class SpeakerManager:
             awake: 是否唤醒
             silent: 是否静默唤醒
         """
-
         if awake:
-            if silent:
-                command = 'ubus call pnshelper event_notify \'{"src":1,"event":0}\''
-            else:
-                command = 'ubus call pnshelper event_notify \'{"src":0,"event":0}\''
+            res = await self.device.wake(silent=silent)
         else:
-            command = """
-                ubus call pnshelper event_notify '{"src":3, "event":7}'
-                sleep 0.1
-                ubus call pnshelper event_notify '{"src":3, "event":8}'
-            """
-        res = await self.run_shell(command)
+            res = await self.device.sleep()
         return '"code": 0' in res.stdout
 
     async def ask_xiaoai(self, text: str, silent=False):
@@ -156,13 +148,7 @@ class SpeakerManager:
             text: 文字指令
             silent: 是否静默执行
         """
-
-        data = {"nlp": 1, "nlp_text": text}
-        if not silent:
-            data["tts"] = 1
-
-        command = f"ubus call mibrain ai_service '{json_encode(data)}'"
-        res = await self.run_shell(command)
+        res = await self.device.ask_xiaoai(text, silent=silent)
         return '"code": 0' in res.stdout
 
     async def abort_xiaoai(self):
@@ -171,24 +157,22 @@ class SpeakerManager:
 
         注意：重启需要大约 1-2s 的时间，在此期间无法使用小爱音箱自带的 TTS 服务
         """
-        # Stop current audio playback first, then restart xiaoai voice service
-        res = await self.run_shell("/etc/init.d/mico_aivs_lab restart >/dev/null 2>&1")
-        return res.exit_code == 0
+        res = await self.device.restart_xiaoai_service()
+        return res.request is not None and res.request.exit_code == 0
 
     async def get_boot(self):
         """获取启动分区"""
-        res = await self.run_shell("echo $(fw_env -g boot_part)")
+        res = await self.device.boot_partition_get()
         return res.stdout.strip()
 
     async def set_boot(self, boot_part: Literal["boot0", "boot1"]):
         """设置启动分区"""
-        command = f"fw_env -s boot_part {boot_part} >/dev/null 2>&1 && echo $(fw_env -g boot_part)"
-        res = await self.run_shell(command)
+        res = await self.device.boot_partition_set(boot_part)
         return boot_part in res.stdout
 
     async def get_device(self):
         """获取设备型号、序列号信息"""
-        res = await self.run_shell("echo $(micocfg_model) $(micocfg_sn)")
+        res = await self.device.device_info()
         info = res.stdout.strip().split(" ")
         return {
             "model": info[0] if len(info) > 0 else "unknown",
@@ -197,24 +181,20 @@ class SpeakerManager:
 
     async def get_mic(self):
         """获取麦克风状态"""
-        res = await self.run_shell("[ ! -f /tmp/mipns/mute ] && echo on || echo off")
-        status = "off"
-        if "on" in res.stdout:
-            status = "on"
-        return status
+        res = await self.device.mic_get()
+        return "on" if "on" in res.stdout else "off"
 
     async def set_mic(self, on=True):
         """打开/关闭麦克风"""
-        if on:
-            command = (
-                'ubus -t1 -S call pnshelper event_notify \'{"src":3, "event":7}\' 2>&1'
-            )
-        else:
-            command = (
-                'ubus -t1 -S call pnshelper event_notify \'{"src":3, "event":8}\' 2>&1'
-            )
-        res = await self.run_shell(command)
+        # 历史语义（见 AGENTS.md「set_mic 语义反转」，ticket 03 修）：
+        # bridge 的 on=True 实际发出 event:7（设备侧闭麦），on=False 发 event:8。
+        # 能力层按设备真值命名（muted=True ⇒ event:7），此处保持原映射与返回值。
+        res = await self.device.mic_set(muted=bool(on))
         return '"code":0' in res.stdout
+
+    async def clear_mic_mute_flag(self):
+        """清掉设备侧 /tmp/mipns/mute 标志（停止聆听的恢复兜底）。"""
+        return await self.device.mic_clear_mute_flag()
 
     async def run_shell(self, script: str, timeout=10000):
         """
@@ -224,15 +204,5 @@ class SpeakerManager:
             script: 脚本内容
             timeout: 超时时间（毫秒）
         """
-        res = "unknown"
-        try:
-            res = await get_xiaoai().run_shell(script, timeout=timeout)
-            data = json_decode(res)
-            if data:
-                return CommandResult(
-                    data.get("stdout", ""),
-                    data.get("stderr", ""),
-                    data.get("exit_code", 0),
-                )
-        except Exception:
-            return CommandResult("error", res, -1)
+        res = await self.device.shell(script, timeout_ms=timeout)
+        return res.request
