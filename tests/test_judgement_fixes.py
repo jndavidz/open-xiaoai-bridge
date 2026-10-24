@@ -165,6 +165,20 @@ class BlockingSpeechTest(_Base):
         payload = json.loads('{"text": "' + inner + '", "save": 1}')
         self.assertEqual(payload["text"], text)
 
+    def test_fallback_parse_failure_is_explicit_failure(self) -> None:
+        self.device.on("text_to_speech", '{"code":1}')
+        self.device.on(
+            "tts_play.sh",
+            "",
+            stderr="Failed to parse message data",
+            exit_code=255,
+        )
+        self.device.on("player_get_context", _context(0).stdout)
+
+        ok = _run(self.speaker.play(text="你好", blocking=True, timeout=200))
+
+        self.assertFalse(ok)
+
     def test_play_command_failure_is_explicit_failure(self) -> None:
         self.device.on("text_to_speech", _synth().stdout)
         self.device.on("[ -f", "yes")

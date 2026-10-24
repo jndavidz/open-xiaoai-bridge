@@ -162,7 +162,16 @@ class SpeakerManager:
                 f"[Speaker] device script fallback failed: {res.error or res.exception}"
             )
             return False
-        # 该脚本成功也返 1 ⇒ 不看 rc，改为等播放上下文回到空闲。
+        # 该脚本成功也返 1 ⇒ 不能用 rc==0 判成功；但 rc 既不是 0/1、
+        # 或出现已知 JSON 解析错误时，是明确的失败，不能按成功算。
+        if res.request.exit_code not in (0, 1) or "Failed to parse" in (
+            res.stderr or ""
+        ):
+            logger.warning(
+                f"[Speaker] device script fallback rejected "
+                f"(rc={res.request.exit_code}, stderr={res.stderr.strip()!r})"
+            )
+            return False
         return await self._wait_playback_done(text, timeout_ms)
 
     async def _wait_playback_done(self, text, timeout_ms) -> bool:
