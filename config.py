@@ -208,8 +208,8 @@ APP_CONFIG = {
     "audio_input": {
         # Input gain multiplier before VAD/KWS/ASR. Use 1.0 to disable.
         "gain": 1.0,
-        # 设备侧采集声道数（LX06 六麦 = 6）。必须与 native 的 AUDIO_INPUT_CHANNELS 一致；
-        # 改成 1 即一键回退单声道（client 无需重编）。
+        # 设备侧采集声道数（LX06 六麦 = 6）。bridge 会自动同步到 native 的
+        # AUDIO_INPUT_CHANNELS；改成 1 即一键回退单声道（client 无需重编）。
         "channels": 6,
         # 降声道策略：
         #   strongest = 滑动窗口内最强单麦 + 迟滞（默认）

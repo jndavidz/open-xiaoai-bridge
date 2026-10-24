@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 import time
 
@@ -126,6 +127,9 @@ class XiaoAI:
         cls._channel_strategy = strategy
         cls._fixed_channel = fixed_channel
         cls._recording_watchdog.configure(watchdog_seconds)
+        # native 的 start_recording / 连接测试在每次调用时读取该环境变量；
+        # 以 bridge 配置为唯一事实源，避免「Python 按 6ch 下混、native 仍抓 1ch」。
+        os.environ["AUDIO_INPUT_CHANNELS"] = str(channels)
 
         if changed or cls._downmixer is None:
             cls._downmixer = (
