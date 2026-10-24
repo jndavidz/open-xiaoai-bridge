@@ -189,7 +189,12 @@ def parse_native_play_status(line: str) -> int | None:
         return None
     payload = data.get("play_status_broadcast_event")
     if not isinstance(payload, dict):
-        return None
+        # 兼容 `ubus monitor` / 转发层常见的两种形态：
+        #   {"method":"play_status_broadcast_event","data":{"status":1}}
+        #   {"data":{"status":0}}
+        payload = data.get("data")
+    if not isinstance(payload, dict):
+        payload = data
     status = payload.get("status")
     if isinstance(status, bool) or not isinstance(status, int):
         return None

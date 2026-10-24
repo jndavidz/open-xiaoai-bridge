@@ -245,6 +245,14 @@ class NativeLineParseTest(unittest.TestCase):
             parse_native_play_status('{"play_status_broadcast_event":{"status":0}}'),
             0,
         )
+        # 兼容转发层/监控层的 data 包装形态。
+        self.assertEqual(
+            parse_native_play_status(
+                '{"method":"play_status_broadcast_event","data":{"status":1}}'
+            ),
+            1,
+        )
+        self.assertEqual(parse_native_play_status('{"data":{"status":0}}'), 0)
 
     def test_noise_lines_are_ignored(self) -> None:
         for line in (

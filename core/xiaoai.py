@@ -81,6 +81,7 @@ class XiaoAI:
         cls._input_gain = max(1.0, min(gain, 8.0))
         cls._input_gain_enabled = cls._input_gain > 1.0
         cls._apply_audio_input_config()
+        cls._apply_event_plane_config()
         wakeup_keywords = cls.config_manager.get_app_config("wakeup.keywords", [])
         cls._external_wakeup_keywords = {
             cls._normalize_text(keyword)
@@ -143,6 +144,23 @@ class XiaoAI:
             )
             cls._current_channel = (
                 cls._downmixer.current_channel if cls._downmixer else None
+            )
+
+    @classmethod
+    def _apply_event_plane_config(cls):
+        """把 `event_plane` 配置同步到播放事件适配器（支持热重载）。"""
+
+        try:
+            from core.device import get_playback_events
+            from core.device.playback_events import EventPlaneConfig
+
+            section = cls.config_manager.get_app_config("event_plane", {})
+            cfg = EventPlaneConfig.from_mapping(section)
+            get_playback_events().configure(**cfg.as_dict())
+        except Exception as exc:  # noqa: BLE001 - 配置不可读时保持现有适配器配置
+            logger.debug(
+                f"[XiaoAI] event_plane config apply failed: "
+                f"{type(exc).__name__}: {exc}"
             )
 
     @staticmethod
