@@ -13,9 +13,42 @@ use pyo3::Python;
 use serde_json::json;
 use std::env;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{accept_async, accept_hdr_async};
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::handshake::server::ErrorResponse;
 
 pub struct AppServer;
+
+/// 401 握手拒绝（不携带 token / 不泄露期望值）。
+fn unauthorized(body: &str) -> ErrorResponse {
+    tokio_tungstenite::tungstenite::http::Response::builder()
+        .status(401)
+        .body(Some(body.to_string()))
+        .unwrap()
+}
+
+/// 解析 `Authorization: Bearer <token>`；不合规返回 None（与 Python 侧同语义）。
+fn bearer_token(header: &str) -> Option<&str> {
+    let mut parts = header.split_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    if parts.next().is_some() || !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    Some(token)
+}
+
+/// 常时字符串比较：避免逐字节提前返回泄露 token 前缀。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 /// Check if audio input is enabled via environment variable.
 /// Supports: "true"/"false", "1"/"0", "yes"/"no", etc.
@@ -58,35 +91,46 @@ async fn test() -> Result<(), AppError> {
 }
 
 impl AppServer {
+    /// 期望的 client token（去空白）。未配置 → 空串。
+    fn expected_token() -> String {
+        env::var("OPEN_XIAOAI_TOKEN")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// 完成 WebSocket 握手。**失败关闭**：`OPEN_XIAOAI_TOKEN` 未配置时
+    /// 一律 401 拒绝（不再退回无鉴权连接），配置正确 token 的 client 可连。
     pub async fn connect(stream: TcpStream) -> Result<WsStream, AppError> {
-        let expected_token = std::env::var("OPEN_XIAOAI_TOKEN").unwrap_or_default();
-        if !expected_token.is_empty() {
-            use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-            let ws_stream = accept_hdr_async(stream, move |req: &Request, response: Response| {
-                let auth = req
-                    .headers()
-                    .get("Authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-                if auth != format!("Bearer {}", expected_token) {
-                    let error: ErrorResponse = tokio_tungstenite::tungstenite::http::Response::builder()
-                        .status(401)
-                        .body(Some("Unauthorized".to_string()))
-                        .unwrap();
-                    return Err(error);
-                }
-                Ok(response)
-            })
-            .await?;
-            Ok(WsStream::Server(ws_stream))
-        } else {
-            let ws_stream = accept_async(stream).await?;
-            Ok(WsStream::Server(ws_stream))
-        }
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        let expected_token = AppServer::expected_token();
+        let ws_stream = accept_hdr_async(stream, move |req: &Request, response: Response| {
+            if expected_token.is_empty() {
+                // 未配置：拒绝且提示如何配置（不含任何 token 值）
+                return Err(unauthorized("Unauthorized: OPEN_XIAOAI_TOKEN not configured"));
+            }
+            let auth = req
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let provided = bearer_token(auth).unwrap_or("");
+            if !constant_time_eq(provided, &expected_token) {
+                return Err(unauthorized("Unauthorized"));
+            }
+            Ok(response)
+        })
+        .await?;
+        Ok(WsStream::Server(ws_stream))
     }
 
     pub async fn run() {
         let addr = "0.0.0.0:4399";
+        if AppServer::expected_token().is_empty() {
+            crate::pylog!(
+                "[AppServer] ⚠️ OPEN_XIAOAI_TOKEN 未配置：所有连接将被拒绝（fail closed）"
+            );
+        }
         let listener = TcpListener::bind(&addr)
             .await
             .expect(format!("[AppServer] ❌ 绑定地址失败: {}", &addr).as_str());
@@ -103,7 +147,10 @@ impl AppServer {
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("401") || msg.contains("Unauthorized") {
-                    crate::pylog!("[AppServer] ❌ 鉴权失败: {}", addr);
+                    crate::pylog!(
+                        "[AppServer] ❌ 鉴权失败（需带 Authorization: Bearer <OPEN_XIAOAI_TOKEN>）: {}",
+                        addr
+                    );
                 } else {
                     crate::pylog!("[AppServer] ❌ 连接异常: {} ({})", addr, msg);
                 }

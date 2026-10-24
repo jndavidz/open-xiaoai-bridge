@@ -12,6 +12,8 @@ services:
       - OPENAI_ENABLE=1           # 仅启用 OpenAI 兼容后端（DeepSeek 等任意兼容服务，面板内可自由更换）
       # 后台面板（http://<nas>:9092/admin）访问令牌，必填；写操作与配置修改全靠它鉴权
       - ADMIN_TOKEN=${ADMIN_TOKEN}
+      # 业务 API 鉴权（必填）：写类端点要求 Authorization: Bearer；留空则写类端点 503 失败关闭
+      - BRIDGE_API_TOKEN=${BRIDGE_API_TOKEN}
       # 面板「外部服务」探测列表（JSON 数组，可选）；纯状态监控，与对话后端无关，留空不展示
       - MONITOR_SERVICES=${MONITOR_SERVICES}
       - RUNTIME_OVERRIDES_PATH=/app/data/runtime-overrides.json

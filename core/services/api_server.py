@@ -15,6 +15,7 @@ from aiohttp import web
 from core.ref import get_speaker, get_xiaoai, get_kws
 from core.wakeup_session import EventManager
 from core.services.admin_api import AdminAPI
+from core.services.auth import authorize, configured_token
 from core.services.tts.doubao import DoubaoTTS
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
@@ -312,9 +313,13 @@ class APIServer:
         self.host = host
         self.port = port
         self.config = ConfigManager.instance()
-        # Admin 面板鉴权中间件（只拦 /api/admin/*，业务 API 不受影响）
+        # Admin 面板鉴权中间件（只拦 /api/admin/*）
         self.admin_api = AdminAPI()
-        self.app = web.Application(middlewares=[self.admin_api.auth_middleware])
+        # 业务 API 鉴权中间件（ticket 06）：与 ADMIN_TOKEN 分离，用 BRIDGE_API_TOKEN。
+        # 顺序：业务鉴权在最外层（/api/admin/* 由它直接放行给 Admin 中间件）。
+        self.app = web.Application(
+            middlewares=[self.api_auth_middleware, self.admin_api.auth_middleware]
+        )
         self.runner = None
         self.site = None
         self.inject_relay = InjectRelay()   # 注入流式中继（数据面）
@@ -322,6 +327,41 @@ class APIServer:
         _relay_singleton = self.inject_relay
         self._setup_routes()
         self.admin_api.register(self.app)
+
+    @web.middleware
+    async def api_auth_middleware(self, request: web.Request, handler):
+        """业务 API 鉴权：写类端点要求 `Authorization: Bearer <BRIDGE_API_TOKEN>`。
+
+        判定逻辑全在 `core/services/auth.authorize`（纯函数，可单测）：
+          - health/read（/api/health、/api/status 等）免鉴权
+          - 写类端点：token 缺失/格式错 401、不匹配 403
+          - 服务端未配置 BRIDGE_API_TOKEN → 写类端点 503（失败关闭）+ 配置提示
+          - 管理面板（/api/admin/*、/admin）不在此判定，由 AdminAPI 的
+            ADMIN_TOKEN 中间件负责（两套 token 分离）
+        日志只记调用方与错误码，不打印 token 明文。
+        """
+        path = request.path
+        if not path.startswith("/api/"):
+            return await handler(request)
+        if path == "/api/admin" or path.startswith("/api/admin/"):
+            return await handler(request)
+        decision = authorize(
+            path,
+            request.method,
+            authorization=request.headers.get("Authorization"),
+            expected_token=configured_token(),
+        )
+        if decision.allowed:
+            return await handler(request)
+        logger.warning(
+            f"[APIServer] 拒绝 {request.method} {path} "
+            f"caller={self._caller_tag(request)} code={decision.code}"
+        )
+        return web.json_response(
+            {"success": False, "error": decision.error, "code": decision.code},
+            status=decision.status,
+            headers=decision.header_dict(),
+        )
 
     def _estimate_gate_seconds(self, text: str) -> float:
         """估算一段文本的 TTS 时长作为闸门兜底时限（中文约 4.5 字/秒，下限 8s）。

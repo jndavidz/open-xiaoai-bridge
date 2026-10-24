@@ -36,6 +36,7 @@ def _load_api_server_module():
         "core.ref",
         "core.wakeup_session",
         "core.services.admin_api",
+        "core.services.auth",
         "core.services.tts.doubao",
         "core.utils.config",
         "core.utils.logger",
@@ -89,6 +90,15 @@ def _load_api_server_module():
             pass
 
     admin.AdminAPI = _AdminAPI
+
+    # auth（业务 API 鉴权）：本测试不验证鉴权，桩掉即可
+    auth_mod = sys.modules["core.services.auth"]
+
+    class _Allow:
+        allowed = True
+
+    auth_mod.authorize = lambda *a, **k: _Allow()
+    auth_mod.configured_token = lambda *a, **k: ""
 
     # tts.doubao
     sys.modules["core.services.tts.doubao"].DoubaoTTS = type("DoubaoTTS", (), {})

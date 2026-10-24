@@ -20,7 +20,7 @@ client-rust 是刷机后跑在音箱（LX06 等，OpenWrt + busybox，ARMv7）�
 
 - **通道**：明文 WebSocket `ws://<音箱可达地址>:4399`，服务端由 bridge 的 `native/src/server.rs` 提供。
 - **消息协议**：`AppMessage` 四消息枚举（`Request` / `Response` / `Event` / `Stream`，定义在 `packages/client-rust/src/services/connect/data.rs`）——文本帧承载 JSON，二进制帧承载 `Stream`（音频裸字节，PCM 16k）。
-- **握手**：coderzc fork 起支持 `Authorization: Bearer <token>` 头（环境变量 `OPEN_XIAOAI_TOKEN`），bridge 侧 `server.rs` 校验，失败回 401。
+- **握手**：coderzc fork 起支持 `Authorization: Bearer <token>` 头（环境变量 `OPEN_XIAOAI_TOKEN`），bridge 侧 `server.rs` 校验，失败回 401。**bridge 侧该变量未配置时拒绝所有连接（fail closed，ticket 06）**，`token.txt` 与 bridge 环境变量必须同值。
 - **能力面**：RPC 含 `start_recording` / `stop_recording` / `run_shell` 等——client 默认提供任意脚本执行能力，**鉴权不配则等于裸奔**，只可连可信 Server。
 
 ## 3. 版本谱系
@@ -30,7 +30,7 @@ client-rust 是刷机后跑在音箱（LX06 等，OpenWrt + busybox，ARMv7）�
 | | idootop/open-xiaoai 原版 | coderzc/open-xiaoai fork | 本工作区部署 |
 |---|---|---|---|
 | 状态 | **已归档**（README 顶部 WARNING） | 随 bridge 持续维护 | LX06 上跑 coderzc fork 的**预编译** client |
-| 鉴权 | 无（明文裸协议） | `OPEN_XIAOAI_TOKEN` Bearer（**可选**，空 = 退回明文） | 已配 `token.txt`（token 鉴权） |
+| 鉴权 | 无（明文裸协议） | `OPEN_XIAOAI_TOKEN` Bearer（fork 侧可选，空 = 不加头；**bridge 侧已 fail closed**，空则拒连） | 已配 `token.txt`（token 鉴权） |
 | 预编译下载源 | `gitee.com/idootop/artifacts/...` | `gitee.com/coderzc/open-xiaoai/releases/...` | 同 coderzc |
 | 核心机制 | AppMessage / FileMonitor / SpeakerManager | **与原版逐字节一致** | 同 coderzc |
 

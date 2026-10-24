@@ -454,6 +454,14 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 | `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |
 
+> 🔐 **业务鉴权（ticket 06，`core/services/auth.py` 纯函数 + `APIServer.api_auth_middleware`）**：
+> 写类端点（上表除 `status`/`health`/`doubao_voices` 外的 POST，含 `/api/inject*`）在配置
+> `BRIDGE_API_TOKEN` 时要求 `Authorization: Bearer <token>`（缺失 401 / 不匹配 403）；
+> **未配置时写类端点 503 失败关闭**，`/api/health`、`/api/status`、`GET /api/inject`、
+> `/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取。`ADMIN_TOKEN`（面板）与业务
+> token 分离、互不回退。新增端点默认按写类处理（失败关闭），放行只读端点须显式加入
+> `auth.READ_ROUTES`。日志只记调用方与错误码，不打印 token。
+
 > 🔒 **架构级依据（2026-10-19 逆向互证）**：此路径的「唯一性」不只是"静音后喊不了"（功能推理），
 > 而是**设备架构决定的** —— 两条独立证据：
 > 1. **语音总线层**：LX06 的 protobuf（`libaivs-message-util.so`）**根本没有 `MIC_ON`/`MIC_OFF` 消息**
