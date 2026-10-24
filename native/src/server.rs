@@ -73,7 +73,7 @@ async fn test() -> Result<(), AppError> {
                 "start_recording",
                 Some(json!(AudioConfig {
                     pcm: "noop".into(),
-                    channels: 1,
+                    channels: crate::input_channels(),
                     bits_per_sample: 16,
                     sample_rate: 16000,
                     period_size: 1440 / 4,

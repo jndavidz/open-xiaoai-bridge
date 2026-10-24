@@ -29,6 +29,17 @@ fn playback_config() -> AudioConfig {
     }
 }
 
+/// Recording capture channel count.
+/// Reads `AUDIO_INPUT_CHANNELS` (default 6 = LX06 six-mic array).
+/// Playback config (24kHz/1ch) is intentionally NOT affected.
+pub fn input_channels() -> u16 {
+    std::env::var("AUDIO_INPUT_CHANNELS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|channels| *channels >= 1)
+        .unwrap_or(6)
+}
+
 /// Ensure the remote aplay is freshly started. Skips the RPC if already ready.
 pub async fn ensure_player_ready() {
     if PLAYER_READY.swap(true, Ordering::SeqCst) {
@@ -119,7 +130,7 @@ fn start_recording(py: Python) -> PyResult<Bound<PyAny>> {
                 "start_recording",
                 Some(json!(AudioConfig {
                     pcm: "noop".into(),
-                    channels: 1,
+                    channels: input_channels(),
                     bits_per_sample: 16,
                     sample_rate: 16000,
                     period_size: 1440 / 4,

@@ -6,7 +6,14 @@ import numpy as np
 import open_xiaoai_server
 
 from core.ref import get_speaker, set_xiaoai
+from core.services.audio.channels import ChannelDownmixer, normalize_strategy
 from core.services.audio.stream import GlobalStream
+from core.services.audio.watchdog import (
+    STATE_IDLE,
+    STATE_RECOVER,
+    STATE_WARNING,
+    RecordingWatchdog,
+)
 from core.services.speaker import SpeakerManager
 from core.wakeup_session import EventManager
 from core.xiaoai_conversation import XiaoAIConversationController
@@ -37,6 +44,28 @@ class XiaoAI:
     _MAX_SUPPRESSED_DIALOGS = 100
     _SUPPRESS_RETRY_INTERVAL = 0.35
 
+    # ---- 多声道采集 + 录音看门狗（ticket 04）----
+    # client 录音读循环 500ms 无数据即退出且不通知服务端，故 1s 无帧判死。
+    _WATCHDOG_INTERVAL = 0.5
+    _RECOVER_BASE_BACKOFF = 1.0
+    _RECOVER_MAX_BACKOFF = 30.0
+    _audio_channels = 6
+    _channel_strategy = "strongest"
+    _fixed_channel = 0
+    _downmixer: ChannelDownmixer | None = None
+    _last_input_frame_time = 0.0
+    _input_frame_count = 0
+    _current_channel = None
+    _recording_expected = False
+    _recording_stop_requested = False
+    _recording_watchdog = RecordingWatchdog()
+    _watchdog_task = None
+    _watchdog_warned = False
+    _recovering = False
+    _recover_failures = 0
+    _next_recover_at = 0.0
+    _last_recover_error = None
+
     @classmethod
     def refresh_runtime_config(cls, *_args):
         """从配置中心同步运行时参数。"""
@@ -50,12 +79,67 @@ class XiaoAI:
             gain = 1.0
         cls._input_gain = max(1.0, min(gain, 8.0))
         cls._input_gain_enabled = cls._input_gain > 1.0
+        cls._apply_audio_input_config()
         wakeup_keywords = cls.config_manager.get_app_config("wakeup.keywords", [])
         cls._external_wakeup_keywords = {
             cls._normalize_text(keyword)
             for keyword in wakeup_keywords
             if isinstance(keyword, str) and cls._normalize_text(keyword)
         }
+
+    @classmethod
+    def _apply_audio_input_config(cls):
+        """同步六麦采集配置（声道数 / 降声道策略 / 看门狗阈值）。"""
+        try:
+            channels = int(cls.config_manager.get_app_config("audio_input.channels", 6))
+        except (TypeError, ValueError):
+            channels = 6
+        channels = max(1, min(channels, 8))
+
+        strategy = normalize_strategy(
+            cls.config_manager.get_app_config(
+                "audio_input.channel_strategy", "strongest"
+            )
+        )
+        try:
+            fixed_channel = int(
+                cls.config_manager.get_app_config("audio_input.fixed_channel", 0)
+            )
+        except (TypeError, ValueError):
+            fixed_channel = 0
+        fixed_channel = max(0, min(fixed_channel, channels - 1))
+
+        try:
+            watchdog_seconds = float(
+                cls.config_manager.get_app_config("audio_input.watchdog_seconds", 1.0)
+            )
+        except (TypeError, ValueError):
+            watchdog_seconds = 1.0
+        watchdog_seconds = max(0.2, min(watchdog_seconds, 10.0))
+
+        changed = (
+            channels != cls._audio_channels
+            or strategy != cls._channel_strategy
+            or fixed_channel != cls._fixed_channel
+        )
+        cls._audio_channels = channels
+        cls._channel_strategy = strategy
+        cls._fixed_channel = fixed_channel
+        cls._recording_watchdog.configure(watchdog_seconds)
+
+        if changed or cls._downmixer is None:
+            cls._downmixer = (
+                None
+                if channels == 1
+                else ChannelDownmixer(
+                    channels=channels,
+                    strategy=strategy,
+                    fixed_channel=fixed_channel,
+                )
+            )
+            cls._current_channel = (
+                cls._downmixer.current_channel if cls._downmixer else None
+            )
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -131,11 +215,181 @@ class XiaoAI:
 
     @classmethod
     def on_input_data(cls, data: bytes):
-        audio_array = np.frombuffer(data, dtype=np.int16)
-        if cls._input_gain_enabled and audio_array.size > 0:
+        if not data:
+            return
+
+        # 只要字节在流动就刷新看门狗基线（残留未满一帧也算录音通道活着）。
+        cls._last_input_frame_time = time.monotonic()
+        # 连接建立时 native 的 test() 会自行 start_recording（不经 Python）；
+        # 首帧到达即视为「录音应持续」，否则看门狗永远不接管这条初始通道。
+        # 显式 stop（TTS 防回声/注入窗口）之后的在途帧不得重新武装：
+        # 若在此误置 True，TTS 播放超过 1s 就会触发恢复把录音打开（回声）。
+        if not cls._recording_expected and not cls._recording_stop_requested:
+            cls._recording_expected = True
+
+        downmixer = cls._downmixer
+        if downmixer is not None:
+            pcm = downmixer.feed(data)
+            cls._current_channel = downmixer.current_channel
+            if not pcm:
+                # 跨帧残留未凑满一个声道帧，等待下一次回调
+                return
+        else:
+            # 单声道回退：保持旧行为（仅丢弃尾部半个样本，避免 frombuffer 抛错）
+            pcm = data if len(data) % 2 == 0 else data[:-1]
+
+        audio_array = np.frombuffer(pcm, dtype=np.int16)
+        if audio_array.size == 0:
+            return
+        if cls._input_gain_enabled:
             boosted = audio_array.astype(np.float32) * cls._input_gain
             audio_array = np.clip(boosted, -32768, 32767).astype(np.int16)
+        cls._input_frame_count += 1
         GlobalStream.input(audio_array.tobytes())
+
+    # ---- 录音通道：native 调用的唯一包装（看门狗 expected 标志由这里维护）----
+
+    @classmethod
+    async def start_recording(cls) -> bool:
+        """恢复设备端录音；返回是否成功（异常不外抛，交给看门狗重试）。"""
+        cls._recording_expected = True
+        cls._recording_stop_requested = False
+        cls._last_input_frame_time = time.monotonic()
+        cls._recording_watchdog.mark_started()
+        cls._watchdog_warned = False
+        try:
+            await open_xiaoai_server.start_recording()
+            return True
+        except Exception as exc:
+            cls._last_recover_error = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                f"[XiaoAI] start_recording 失败: {cls._last_recover_error}"
+            )
+            return False
+
+    @classmethod
+    async def stop_recording(cls) -> bool:
+        """停止设备端录音（预期停止：TTS 防回声 / 注入窗口），看门狗不再告警。"""
+        cls._recording_expected = False
+        cls._recording_stop_requested = True
+        cls._watchdog_warned = False
+        cls._recording_watchdog.evaluate(None, time.monotonic(), False)
+        try:
+            await open_xiaoai_server.stop_recording()
+            return True
+        except Exception as exc:
+            cls._last_recover_error = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                f"[XiaoAI] stop_recording 失败: {cls._last_recover_error}"
+            )
+            return False
+
+    @classmethod
+    async def _recording_watchdog_loop(cls):
+        """后台巡检：录音通道无帧 → 先停后启（带退避）。"""
+        logger.info(
+            "[XiaoAI] 录音看门狗已启动"
+            f"（{cls._recording_watchdog.timeout_seconds:.1f}s 无帧判定）"
+            f" channels={cls._audio_channels}"
+            f" strategy={cls._channel_strategy}"
+            f" fixed_channel={cls._fixed_channel}"
+        )
+        while True:
+            await asyncio.sleep(cls._WATCHDOG_INTERVAL)
+            try:
+                await cls._check_recording_health(time.monotonic())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    f"[XiaoAI] 录音看门狗检查异常: {type(exc).__name__}: {exc}"
+                )
+
+    @classmethod
+    async def _check_recording_health(cls, now: float):
+        state = cls._recording_watchdog.evaluate(
+            cls._last_input_frame_time or None,
+            now,
+            cls._recording_expected,
+        )
+        if state == STATE_IDLE:
+            cls._watchdog_warned = False
+            return
+        if state == STATE_WARNING:
+            if not cls._watchdog_warned:
+                cls._watchdog_warned = True
+                age = now - cls._last_input_frame_time
+                logger.warning(
+                    f"[XiaoAI] 录音通道 {age:.2f}s 无音频帧"
+                    f"（阈值 {cls._recording_watchdog.timeout_seconds:.1f}s）"
+                )
+            return
+        if state == STATE_RECOVER:
+            if cls._recovering or now < cls._next_recover_at:
+                return
+            await cls._recover_recording(now)
+
+    @classmethod
+    async def _recover_recording(cls, now: float):
+        """先停后启；失败按指数退避重试，全部走结构化日志。"""
+        cls._recovering = True
+        age = now - cls._last_input_frame_time if cls._last_input_frame_time else None
+        age_text = f"{age:.2f}s" if age is not None else "unknown"
+        logger.warning(
+            "[XiaoAI] 录音恢复开始: "
+            f"reason=no_frames age={age_text} attempt={cls._recover_failures + 1} "
+            f"channels={cls._audio_channels} strategy={cls._channel_strategy}"
+        )
+        try:
+            stopped = await cls.stop_recording()
+            started = await cls.start_recording()
+            if not (stopped and started):
+                raise RuntimeError(cls._last_recover_error or "recording restart failed")
+        except Exception as exc:
+            cls._recover_failures += 1
+            cls._last_recover_error = f"{type(exc).__name__}: {exc}"
+            backoff = min(
+                cls._RECOVER_BASE_BACKOFF * (2 ** (cls._recover_failures - 1)),
+                cls._RECOVER_MAX_BACKOFF,
+            )
+            cls._next_recover_at = time.monotonic() + backoff
+            logger.error(
+                "[XiaoAI] 录音恢复失败: "
+                f"attempt={cls._recover_failures} error={cls._last_recover_error} "
+                f"retry_in={backoff:.1f}s"
+            )
+        else:
+            cls._recover_failures = 0
+            cls._last_recover_error = None
+            cls._next_recover_at = 0.0
+            cls._last_input_frame_time = time.monotonic()
+            cls._watchdog_warned = False
+            count = cls._recording_watchdog.notify_recovered()
+            logger.info(
+                "[XiaoAI] 录音恢复完成: "
+                f"recover_count={count} channels={cls._audio_channels} "
+                f"strategy={cls._channel_strategy}"
+            )
+        finally:
+            cls._recovering = False
+
+    @classmethod
+    def audio_health(cls) -> dict:
+        """录音面健康快照（供 /api/health、管理面板与排障使用）。"""
+        now = time.monotonic()
+        last = cls._last_input_frame_time
+        return {
+            "recording_expected": bool(cls._recording_expected),
+            "last_frame_age": round(max(0.0, now - last), 3) if last else None,
+            "frame_count": cls._input_frame_count,
+            "channels": cls._audio_channels,
+            "channel_strategy": cls._channel_strategy,
+            "fixed_channel": cls._fixed_channel,
+            "current_channel": cls._current_channel,
+            "watchdog_state": cls._recording_watchdog.state,
+            "recover_count": cls._recording_watchdog.recover_count,
+            "last_recover_error": cls._last_recover_error,
+        }
 
     @classmethod
     def on_output_data(cls, data: bytes):
@@ -363,6 +617,11 @@ class XiaoAI:
         open_xiaoai_server.register_fn("on_input_data", cls.on_input_data)
         open_xiaoai_server.register_fn("on_event", cls.__on_event)
         cls.__init_background_event_loop()
+        # 看门狗挂在专用 async_loop 上；start_server 之后的代码可能永不返回
+        cls._watchdog_task = asyncio.run_coroutine_threadsafe(
+            cls._recording_watchdog_loop(),
+            cls.async_loop,
+        )
         logger.info("[XiaoAI] 启动小爱音箱服务...")
         print(ASCII_BANNER)
         await open_xiaoai_server.start_server()

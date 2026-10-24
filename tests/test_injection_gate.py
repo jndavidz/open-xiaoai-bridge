@@ -110,6 +110,7 @@ class InjectionMarkerTest(unittest.TestCase):
         stub_names = [
             "core.ref", "core.wakeup_session", "core.xiaoai_conversation",
             "core.services.speaker", "core.services.audio.stream",
+            "core.services.audio.channels", "core.services.audio.watchdog",
             "core.services.protocols.protocol", "core.services.protocols.typing",
             "core.utils.logger", "core.utils.config", "open_xiaoai_server",
         ]
@@ -136,6 +137,20 @@ class InjectionMarkerTest(unittest.TestCase):
         gs = types.ModuleType("core.services.audio.stream")
         gs.GlobalStream = type("GlobalStream", (), {})
         sys.modules["core.services.audio.stream"] = gs
+        channels = types.ModuleType("core.services.audio.channels")
+        channels.ChannelDownmixer = object
+        channels.normalize_strategy = lambda value, default="strongest": default
+        sys.modules["core.services.audio.channels"] = channels
+        watchdog = types.ModuleType("core.services.audio.watchdog")
+        watchdog.RecordingWatchdog = type(
+            "RecordingWatchdog",
+            (),
+            {"configure": lambda self, *_a: None, "mark_started": lambda self: None},
+        )
+        watchdog.STATE_IDLE = "idle"
+        watchdog.STATE_WARNING = "warning"
+        watchdog.STATE_RECOVER = "recover"
+        sys.modules["core.services.audio.watchdog"] = watchdog
         sm = types.ModuleType("core.services.speaker")
         sm.SpeakerManager = type("SpeakerManager", (), {})
         sys.modules["core.services.speaker"] = sm
