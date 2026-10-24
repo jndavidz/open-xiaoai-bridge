@@ -79,6 +79,8 @@
 
 > 本轮 baseline 的 ticket 01–10 与逐项落点见 `ws: .scratch/lx06-voice-hub-baseline/`；本表状态与其同步。
 > 2026-10-24 已部署到 NAS：镜像 `open-xiaoai-bridge:04b0709e51`；回滚 tag `open-xiaoai-bridge:rollback-20261024`。
+> 后续验证/优化（ASR A/B、注入 E2E、native 事件源、架构 preflight）见
+> `ws: .scratch/lx06-voice-hub-followups/`；B 列表只保留 bridge 施工。
 
 **已降级为台账（不再列为待办）**：
 
