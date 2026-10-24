@@ -39,6 +39,7 @@ class XiaoAI:
     _input_gain_enabled = False
     _input_gain = 1.0
     _async_loop_ready = threading.Event()
+    _mic_reconciled = False
     _external_wakeup_keywords: set[str] = set()
     _suppressed_dialog_ids: set[str] = set()
     _suppressed_dialog_last_attempt: dict[str, float] = {}
@@ -145,6 +146,15 @@ class XiaoAI:
             cls._current_channel = (
                 cls._downmixer.current_channel if cls._downmixer else None
             )
+
+    @classmethod
+    async def _reconcile_mic_once(cls):
+        """首个事件到达后执行一次麦态自愈（ticket 10）。"""
+
+        try:
+            await cls.speaker.reconcile_mic_state()
+        except Exception as e:  # noqa: BLE001 - 自愈失败不得影响事件处理
+            logger.warning(f"[XiaoAI] mic state reconcile failed: {e}")
 
     @classmethod
     def _apply_event_plane_config(cls):
@@ -443,6 +453,12 @@ class XiaoAI:
         # 记录所有事件用于调试监听退出
         logger.debug(f"[XiaoAI] 📡 收到事件: {event_type} | 数据: {event_data}")
 
+        # ticket 10：首个事件到达时做一次麦态自愈。此时 4399 已连接、RPC 可用；
+        # 放在 init_xiaoai 会在 start_server 之前空跑（设备尚未连接）。
+        if not cls._mic_reconciled:
+            cls._mic_reconciled = True
+            asyncio.create_task(cls._reconcile_mic_once())
+
         if event_type == "instruction":
             if not isinstance(event_data, dict):
                 logger.debug(
@@ -646,13 +662,6 @@ class XiaoAI:
         open_xiaoai_server.register_fn("on_input_data", cls.on_input_data)
         open_xiaoai_server.register_fn("on_event", cls.__on_event)
         cls.__init_background_event_loop()
-        # 启动期麦态自愈（ticket 10）：固件无自愈，bridge 崩溃可能把
-        # /tmp/mipns/mute 留在设备上（表现为「彻底听不见」）。仅在 KWS 未处于
-        # 「停止聆听」时恢复开麦；用户显式停止聆听时保持 off。
-        try:
-            await cls.speaker.reconcile_mic_state()
-        except Exception as e:  # noqa: BLE001 - 自愈失败不得阻断启动
-            logger.warning(f"[XiaoAI] mic state reconcile failed: {e}")
         # 看门狗挂在专用 async_loop 上；start_server 之后的代码可能永不返回
         cls._watchdog_task = asyncio.run_coroutine_threadsafe(
             cls._recording_watchdog_loop(),
