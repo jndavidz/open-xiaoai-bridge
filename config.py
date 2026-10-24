@@ -230,6 +230,24 @@ APP_CONFIG = {
         # 环境变量 INJECT_ENABLE 可覆盖本值（1/true/yes/on 开，0/false/no/off 关）。
         "enabled": False,
     },
+    "event_plane": {
+        # 播放完成事件主源（blocking 播报的解锁判据）：
+        #   context = 轮询 player_get_context.info.status（ticket 03 现状，默认）
+        #   client  = client 的 playing 事件（playing→开始，idle→结束，paused 不算结束）
+        #   native  = 设备原生 play_status_broadcast_event（status 1/0）
+        "source": "context",
+        # 影子源：与主源并行采集，只记录开始/结束时间线与差异，不改变等待结果。
+        # 先比对、确认一致后再把 source 切到新源（迁移可二分）。
+        "shadow_sources": ["client"],
+        # context 主源轮询间隔（ms）
+        "poll_interval_ms": 200,
+        # 从未观察到 playing 时，看到空闲后等待多久判「短音频已播完」（ms）
+        "start_grace_ms": 1000,
+        # native 源的外部拉流命令（例如未来容器内可用的 ssh ... ubus listen）。
+        # 留空 = 不启动 native 源（默认）：运行时镜像没有 openssh-client，
+        # 且 client 的 run_shell 不能流式输出，本项不引入任何 Docker 依赖。
+        "native_cmd": "",
+    },
     "asr": {
         # 支持 "sense_voice"（默认）、"paraformer"、"fire_red_asr" 或 "doubao"
         "model": "sense_voice",

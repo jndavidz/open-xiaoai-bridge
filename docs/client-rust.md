@@ -70,7 +70,10 @@ client-rust 是刷机后跑在音箱（LX06 等，OpenWrt + busybox，ARMv7）�
 | 鉴权可选、默认明文 | token.txt 缺失即退回无鉴权 + run_shell 裸协议 | 部署时必配 token.txt；网段隔离（勿与访客 WiFi/IoT 同段） |
 | **无独立版本号** | 排障时无法从二进制确认构建版本 | 只能靠下载源/部署记录区分；重装即换 coderzc 最新 release |
 | 4399 连接是单一长连接 | client 掉线期间所有事件/音频中断，仅靠重连恢复 | 排障第一步先确认设备 4399 ESTABLISHED（判据见 AGENTS.md「kws.log 是死通道」节） |
-| `run_shell` 只透传设备脚本退出码，而设备脚本自身退出码不可信 | `/api/play/text`（blocking）声音已出却恒返回 `{"success": false}`——`speaker.py` 以 `exit_code == 0` 判定，而 `/usr/sbin/tts_play.sh` 末行 `[ x"$player_stat" == x"1" ] && mphelper play` 在空闲时 `player_stat=0` ⇒ rc=1 | 2026-10-21 真机 `time /usr/sbin/tts_play.sh` 实测 rc=1/≈1s 与 bridge 1.69s 对齐；判成功改看非阻塞路径与 `playing` 事件，勿信 blocking 返回值 |
+| `run_shell` 只透传设备脚本退出码，而设备脚本自身退出码不可信 | `/api/play/text`（blocking）声音已出却恒返回 `{"success": false}`——`speaker.py` 以 `exit_code == 0` 判定，而 `/usr/sbin/tts_play.sh` 末行 `[ x"$player_stat" == x"1" ] && mphelper play` 在空闲时 `player_stat=0` ⇒ rc=1 | 2026-10-21 真机 `time /usr/sbin/tts_play.sh` 实测 rc=1/≈1s 与 bridge 1.69s 对齐；bridge ticket 03 已改为「合成落盘 + `file://` + 回读」，该脚本仅兜底 |
+| 录音读循环 **500ms 无数据即退出**并自行 `stop_recording`，**不通知服务端** | 录音静默死亡后唤醒词永久失效，且服务端没有任何事件可依赖 | bridge ticket 04 的看门狗：1s 无帧执行先停后启 + 指数退避；`XiaoAI.audio_health()` 观测 |
+| `playing` 事件来自 **10ms `/bin/sh` 轮询** `mphelper mute_stat`，不是设备原生事件 | 设备端进程创建频繁；事件精度受轮询与调度影响 | ticket 05 事件适配器以 context 轮询/客户端事件影子比对；原生 `play_status_broadcast_event` 需额外部署通道 |
+| RPC **先发送、后登记 pending** | 极快的响应可能落在登记之前被丢弃，表现为一次 10s 超时（默认 `call_remote` 超时） | 排障时先看是否「响应已到但 pending 未登记」；修复语义为「先登记后发送」 |
 
 ## 6. 2026-10-21 事故与恢复实录：client 文件整体丢失
 

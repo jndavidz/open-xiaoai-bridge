@@ -20,6 +20,14 @@ from core.device.client import (
     reset_device,
     set_device,
 )
+from core.device.playback_events import (
+    EventPlaneConfig,
+    PlaybackEventAdapter,
+    get_playback_events,
+    parse_native_play_status,
+    reset_playback_events,
+    set_playback_events,
+)
 from core.device.registry import (
     CAPABILITIES,
     FORBIDDEN_METHODS,
@@ -46,8 +54,10 @@ __all__ = [
     "CommandResult",
     "DeviceCapabilities",
     "DeviceCapabilityError",
+    "EventPlaneConfig",
     "ForbiddenCapabilityError",
     "ParamSpec",
+    "PlaybackEventAdapter",
     "ShellTransport",
     "SuccessCriterion",
     "TTS_TEMP_PREFIX",
@@ -56,7 +66,11 @@ __all__ = [
     "capability_table",
     "ensure_script_allowed",
     "get_device",
+    "get_playback_events",
+    "parse_native_play_status",
     "reset_device",
+    "reset_playback_events",
     "resolve_capability",
     "set_device",
+    "set_playback_events",
 ]

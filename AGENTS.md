@@ -22,6 +22,7 @@ open-xiaoai-bridge/
 │   ├── openclaw_conversation.py   # OpenClaw 连续对话循环（VAD → ASR → Agent → TTS）
 │   ├── wakeup_session.py          # 小智唤醒会话状态机
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
+│   ├── device/                    # 类型化设备能力层（registry/client/results/transport，ticket 02）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + hass/weather/music 只读工具（阶段 1.5）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
@@ -33,6 +34,8 @@ open-xiaoai-bridge/
 │   │   ├── audio/
 │   │   │   ├── stream.py          # GlobalStream 全局音频流（多路输入广播）
 │   │   │   ├── codec.py           # 音频编解码
+│   │   │   ├── channels.py        # 六麦帧对齐/选麦/下混（纯 stdlib，ticket 04）
+│   │   │   ├── watchdog.py        # 录音通道无帧看门狗状态机（ticket 04）
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
 │   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
@@ -211,21 +214,12 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 - `ask_xiaoai(text, silent)` → 让小爱执行指令
 - `run_shell(command, timeout)` → RPC shell
 
-> 🔴 **`set_mic(on=...)` 的语义与设备行为相反（2026-10-19 真机实证，未修）**
->
-> | bridge 调用 | ubus | 设备实际行为 |
-> |---|---|---|
-> | `set_mic(on=True)`「开麦」 | `pnshelper event_notify {src:3,event:7}` | **创建 `/tmp/mipns/mute` ⇒ 静音** |
-> | `set_mic(on=False)`「关麦」 | `pnshelper event_notify {src:3,event:8}` | **删除 `/tmp/mipns/mute` ⇒ 解除静音** |
->
-> 设备侧依据：`pns_ubus_helper:sub_11ED8()` —— `a1!=0` → `creat("/tmp/mipns/mute",0600)`；`a1==0` → `unlink()`。
-> **该文件的存在性 = 唤醒静音开关。**
->
-> 影响：`get_mic()` 读同一文件且**逻辑正确**，与 `set_mic` **互相矛盾**；
-> `T7.6`「停止聆听」用 `set_mic(False)` + `kws.disable_listening()`，
-> ⇒ 表面功能正常（KWS 停了），但**设备级静音从未生效**。
-> **动手前先确认 T7.6 的真实期望**（只要 KWS 停？还是要设备级静音？）。
-> 施工落点见 [`docs/plan/README.md`](docs/plan/README.md) **B-02**；取证见 [`../docs/plan/lx06-set-mic-semantics-reversed.md`](../docs/plan/lx06-set-mic-semantics-reversed.md)
+> ✅ **`set_mic(on=...)` 语义已修正（ticket 03，2026-10-24）**：
+> `on=True` 发 `pnshelper event_notify {src:3,event:8}` 开麦；`on=False` 发 `event:7` 闭麦。
+> `event:8` 在麦已开时返回 `code:-1` 属幂等语义，成败以 `get_mic()` 回读为准。
+> 设备行为依据：`/tmp/mipns/mute` 存在即静音；`event:7` 创建、`event:8` 删除。
+> 设备事实见 `ws: docs/devices/lx06/pnshelper-event-space.md` §3.1/§3.5；
+> 播报期固件闭麦闸门见 [`docs/plan/README.md`](docs/plan/README.md) **B-02**。
 **边界约束**:
 - `stop_device_audio()` 只负责"停播放"，不负责恢复录音；`start_recording()` 属于会话层恢复逻辑，应由 `WakeupSessionManager` / `OpenClawConversationController` 等上层按场景决定
 
@@ -529,6 +523,8 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | GlobalStream | `audio/stream.py` | 多路输入广播（模拟 PyAudio API） |
 | VAD | `audio/vad/silero.py` | Silero ONNX 语音活动检测 |
 | KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒（信心度 2.0，阈值 0.2）；`kws/__init__` 含 `listen_disabled` 持久开关 + **播放闸门**（`gate_on`/`gate_off`） |
+| 多声道入口 | `audio/channels.py` | 6ch 帧对齐 + 最强麦（滑窗+迟滞）/等权平均/固定声道降为 1ch；纯 stdlib |
+| 录音看门狗 | `audio/watchdog.py` + `core/xiaoai.py` | 1s 无帧判死 → 先停后启 + 指数退避；`audio_health()` 暴露帧龄/策略/恢复计数 |
 | ASR | `audio/asr/sherpa.py` | Sherpa SenseVoice 离线语音识别（懒加载，INT8 量化） |
 | TTS | `tts/openai.py`, `tts/mlx_audio.py`, `tts/doubao.py` | OpenAI-compatible TTS、MLX-Audio 与豆包 TTS（一次性/本地音频播放） |
 
@@ -650,6 +646,11 @@ python3 tests/test_admin_panel.py
 
 ### tts_play.sh 工作流程
 
+> **默认阻塞播报已不走此脚本**（ticket 03）：优先 `text_to_speech {save:1,play:0}` 落盘 →
+> `player_play_url file://<path>` → 回读 `player_get_context.info.status` 到空闲 →
+> `rm -f /tmp/tts/<path>` 清理。`tts_play.sh` 仅在合成失败时兜底；
+> 两条路径都**不得用脚本退出码判成败**（成功时 rc 也可能是 1）。
+
 `/usr/sbin/tts_play.sh` 是设备上的阻塞 TTS 脚本，内部流程：
 1. `mphelper pause` — 暂停当前播放
 2. `ubus call mibrain text_to_speech '{"text":"...","save":1}'` — 生成音频文件到 `/tmp/tts/`
@@ -665,10 +666,14 @@ python3 tests/test_admin_panel.py
 
 | 操作 | 命令 | 说明 |
 |------|------|------|
-| 停止录音 | `open_xiaoai_server.stop_recording()` | 杀掉设备端 `arecord` 进程，麦克风静音 |
-| 恢复录音 | `open_xiaoai_server.start_recording()` | 重启 `arecord`，音频数据恢复流入 `GlobalStream` |
+| 停止录音 | `XiaoAI.stop_recording()`（包装 native） | 杀掉设备端 `arecord`；同时标记看门狗 expected=false |
+| 恢复录音 | `XiaoAI.start_recording()`（包装 native） | 重启 `arecord`；标记 expected=true，音频恢复流入 `GlobalStream` |
 
-**注意**：OpenClaw 对话中 TTS 播放时会 `stop_recording` 防止回声。如果在此期间触发中断（"小爱同学"），必须在中断处理中调用 `start_recording` 恢复录音，否则 KWS 将因无音频数据而永久失效。
+**注意**：会话层通过 `XiaoAI` 包装调用，不要直接调 `open_xiaoai_server`，否则看门狗的 expected 标志不会更新。
+client 的录音读循环 **500ms 无数据即退出且不通知服务端**；`core/xiaoai.py` 看门狗 1s 无帧执行
+「先停后启」，失败按指数退避重试，状态见 `XiaoAI.audio_health()`。
+
+OpenClaw 对话中 TTS 播放时会 `stop_recording` 防止回声。如果在此期间触发中断（"小爱同学"），必须在中断处理中调用 `start_recording` 恢复录音，否则 KWS 将因无音频数据而永久失效。
 
 ### on_interrupt 中断处理要点
 
