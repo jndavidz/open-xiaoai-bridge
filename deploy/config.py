@@ -323,6 +323,17 @@ APP_CONFIG = {
         # 录音看门狗：连续无帧秒数（client 500ms 无数据即退出读循环）
         "watchdog_seconds": 1.0,
     },
+    "event_plane": {
+        # 播放完成事件主源：context（轮询 player_get_context，默认）/
+        # client（playing 事件）/ native（设备原生 play_status_broadcast_event）
+        "source": "context",
+        # 影子源：并行采集、只记录时间线与差异，不改变阻塞播报行为
+        "shadow_sources": ["client"],
+        "poll_interval_ms": 200,
+        "start_grace_ms": 1000,
+        # native 拉流命令；留空 = 不启动（运行时镜像无 openssh-client，勿加依赖）
+        "native_cmd": "",
+    },
     "asr": {
         # input_mode=xiaoai_asr 时不加载本地 ASR 大模型（N3060 跑不动）
         "model": "sense_voice",

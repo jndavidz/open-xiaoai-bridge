@@ -9,22 +9,17 @@ from core.device import (
     TTS_TEMP_PREFIX,
     CommandResult,
     get_device as get_capabilities,
+    get_playback_events,
 )
 from core.ref import get_kws, get_xiaoai, set_speaker
 from core.utils.logger import logger
 
 __all__ = ["CommandResult", "SpeakerManager"]
 
-# ---- 阻塞播报的判据与轮询参数 ----
+# ---- 阻塞播报的判据参数 ----
 
-# `player_get_context.info.status`：1 = 播放中；0/2 = 链路空闲（0 空闲、2 暂停）。
-_PLAYBACK_PLAYING_STATUS = 1
-_PLAYBACK_IDLE_STATUSES = (0, 2)
-
-# 轮询间隔与「等播放真正开始」的宽限：短音频可能整段落在第一个轮询间隔内，
-# 宽限期内始终只看到空闲就按「已播完」处理（事件驱动留给 ticket 05）。
-_PLAYBACK_POLL_INTERVAL_MS = 200
-_PLAYBACK_START_GRACE_MS = 1000
+# 轮询间隔与「等播放真正开始」的宽限改由 `event_plane` 配置拥有
+# （默认 200ms / 1000ms），见 core/device/playback_events.py。
 
 # 超时上限按文本估算（中文约 4.5 字/秒 + 6s 余量），与 api_server 的闸门估算同口径。
 _PLAYBACK_MIN_BUDGET_MS = 8_000
@@ -189,51 +184,30 @@ class SpeakerManager:
         return await self._wait_playback_done(text, timeout_ms)
 
     async def _wait_playback_done(self, text, timeout_ms) -> bool:
-        """轮询播放上下文，直到空闲（0/2）或超时；读不到状态判失败。"""
+        """等待播放完成（事件适配器，ticket 05），保留超时兜底。
 
-        loop = asyncio.get_running_loop()
-        started_at = loop.time()
+        语义与 ticket 03 一致：
+          - 观察到 playing 后转空闲 ⇒ 已播完；
+          - 从未观察到 playing 但已空闲 ⇒ 1s 宽限后按「短音频已播完」处理；
+          - 只观察到 playing、没有结束 ⇒ 超时兜底，仍算完成（不是失败）；
+          - 整个等待期间读不到状态 ⇒ 判失败，不能确认完成。
+        """
+
         budget_ms = estimate_playback_budget_ms(text, timeout_ms)
-        grace_ms = min(budget_ms, _PLAYBACK_START_GRACE_MS)
-        deadline = started_at + budget_ms / 1000.0
-        started = False
-        readback_ok = False
-
-        while True:
-            ctx = await self.device.player_context()
-            status = (ctx.readback or {}).get("status") if ctx.readback else None
-            if ctx.ok and isinstance(status, int) and not isinstance(status, bool):
-                readback_ok = True
-                if status == _PLAYBACK_PLAYING_STATUS:
-                    started = True
-                elif status in _PLAYBACK_IDLE_STATUSES:
-                    if started:
-                        return True
-                    # 宽限期内始终空闲：短音频已播完（或根本没开始，设备侧无法区分）。
-                    if (loop.time() - started_at) * 1000 >= grace_ms:
-                        logger.debug(
-                            f"[Speaker] playback already idle (status={status}), "
-                            f"grace={grace_ms:.0f}ms"
-                        )
-                        return True
-
-            now = loop.time()
-            if now >= deadline:
-                if not readback_ok:
-                    logger.warning(
-                        "[Speaker] playback status readback failed, cannot confirm "
-                        f"completion (budget={budget_ms:.0f}ms)"
-                    )
-                    return False
-                logger.warning(
-                    f"[Speaker] playback completion not observed, timeout fallback "
-                    f"(budget={budget_ms:.0f}ms, started={started})"
-                )
-                return True
-
-            await asyncio.sleep(
-                min(_PLAYBACK_POLL_INTERVAL_MS / 1000.0, max(deadline - now, 0.01))
+        finished, started, reason = await get_playback_events().wait_for_finish(
+            budget_ms
+        )
+        if not finished:
+            logger.warning(
+                "[Speaker] playback status readback failed, cannot confirm "
+                f"completion (budget={budget_ms:.0f}ms, reason={reason})"
             )
+        elif reason == "timeout":
+            logger.warning(
+                f"[Speaker] playback completion not observed, timeout fallback "
+                f"(budget={budget_ms:.0f}ms, started={started})"
+            )
+        return finished
 
     async def _cleanup_tts_file(self, path: str) -> None:
         """删除合成临时文件；前缀不是 /tmp/tts/ 时只告警、绝不删除。"""
