@@ -853,10 +853,11 @@ class APIServer:
             except Exception as e:
                 logger.warning(f"[APIServer] set_mic(True) on audio_input failed: {e}")
 
-            # T7.6 修复：set_mic(True) 的 ubus event:7 不会清除设备端静音标志
-            # (/tmp/mipns/mute，由 set_mic(False) 的 ubus event:8 在宿主侧创建)，
-            # 导致宿主机仍静音、KWS 收不到语音、恢复后④⑤ 无响应。
-            # 显式删掉该宿主侧标志，与「停止聆听」时对称地真正恢复采集。
+            # T7.6 修复：设备端静音标志 /tmp/mipns/mute 由 event:7（闭麦）创建、
+            # 由 event:8（开麦）删除；上面 set_mic(True) 发出的正是 event:8。
+            # 这里再显式 rm 一次是兜底：历史版本 set_mic 语义曾反向（on=True 发
+            # event:7），若设备上残留旧标志，宿主会一直静音、KWS 收不到语音、
+            # 恢复后④⑤ 无响应。与「停止聆听」时对称，确保真正恢复采集。
             try:
                 await speaker.clear_mic_mute_flag()
             except Exception as e:

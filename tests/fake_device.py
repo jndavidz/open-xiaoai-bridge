@@ -44,8 +44,17 @@ class CommandResult:
 @dataclass
 class _Rule:
     matcher: Callable[[str], bool]
-    result: CommandResult
+    result: CommandResult | None = None
     timeout: bool = False
+    sequence: list[CommandResult] | None = None
+
+    def next_result(self) -> CommandResult:
+        if self.sequence is None:
+            assert self.result is not None
+            return self.result
+        if len(self.sequence) > 1:
+            return self.sequence.pop(0)
+        return self.sequence[0]
 
 
 @dataclass
@@ -114,6 +123,22 @@ class FakeDevice:
     ) -> "FakeDevice":
         return self.on(contains, json.dumps(payload, ensure_ascii=False), exit_code=exit_code)
 
+    def on_sequence(
+        self, contains: str, results: Iterable[CommandResult]
+    ) -> "FakeDevice":
+        """Register a scripted response sequence (last item repeats).
+
+        Useful for polling loops: e.g. player_get_context returning
+        playing then idle. Sequences take part in the same
+        last-registered-wins ordering as single rules.
+        """
+        items = list(results)
+        if not items:
+            raise ValueError("on_sequence requires at least one result")
+        rule = _Rule(lambda script: contains in script, sequence=items)
+        self._rules.append(rule)
+        return self
+
     def set_default(self, stdout: str = "", stderr: str = "", exit_code: int = 0) -> None:
         self._default = CommandResult(stdout, stderr, exit_code)
 
@@ -134,7 +159,7 @@ class FakeDevice:
             if rule.matcher(script):
                 if rule.timeout:
                     raise asyncio.TimeoutError("fake device timeout")
-                return rule.result.as_json()
+                return rule.next_result().as_json()
         return self._default.as_json()
 
     async def emit_event(self, event: str, data=None) -> None:
