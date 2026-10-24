@@ -114,7 +114,7 @@ reboot
   - 「测试连接」先预检新 地址+Key（GET /models，兜底 chat ping），再保存
   - 「保存并生效」写入运行时覆盖层 `./data/runtime-overrides.json` 并热生效——下一次对话即用新配置，**无需重启容器**
   - 覆盖值优先级高于 config.py/.env；字段旁有「已覆盖」标记，「清除」回落底层值
-- **安全**：所有 `/api/admin/*` 需 Bearer token；未配置 `ADMIN_TOKEN` 时接口整体拒绝；密钥读取只回掩码
+- **安全**：所有 `/api/admin/*` 需 Bearer token；未配置 `ADMIN_TOKEN` 时接口整体拒绝；密钥读取只回掩码。**不接受 `?token=`**（查询串会进浏览器历史/access log），面板走 localStorage + `Authorization` 头
 - 升级镜像时注意：`upgrade-image.sh` 重启容器不影响 `data/`（覆盖层持久化在宿主卷）
 
 ## 6. HA 侧 script 实体（免唤醒表引用）
@@ -187,6 +187,9 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   - ⚠️ **HA 正在升级/改配置时不要先设置 token**：先等 HA 侧调用方改完并验证，再设置
     `BRIDGE_API_TOKEN`；否则 HA 的播报/恢复端点会 401/503，且升级窗口内难以区分是 HA 还是 token 问题
 - `ADMIN_TOKEN` 必须强随机（`openssl rand -hex 16`）；面板可改上游 API 配置，泄露等同泄露 API Key
+- **审计调用方**：日志里的 `caller=` 默认是 TCP peer 地址；`X-Forwarded-For` / `X-Real-IP`
+  **默认不信任**（当前部署无反向代理，该头可由任意客户端伪造）。将来在 bridge 前面加反代时，
+  才设 `TRUST_PROXY=1` 让审计记录 XFF 里的原始客户端
 - 4399/9092 仅在局域网（host 网络 + 群晖防火墙），勿做公网端口映射；外网访问走 WireGuard
 - HA Token 只进 `.env`，任何文件不得硬编码
 

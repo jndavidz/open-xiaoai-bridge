@@ -161,6 +161,17 @@ async def test_http():
             assert r.status == 401
             ok("错误 token -> 401")
 
+            # ticket 09：不再接受 ?token= 传参（查询串会进浏览器历史/access log）
+            r = await s.get(f"{base}/api/admin/overview?token=test-token-123")
+            assert r.status == 401, r.status
+            ok("query token -> 401（只认 Authorization: Bearer）")
+
+            r = await s.get(
+                f"{base}/api/admin/logs?token=test-token-123&after=-1"
+            )
+            assert r.status == 401, r.status
+            ok("query token 在其它 /api/admin/* 上一律 401")
+
             r = await s.get(f"{base}/api/admin/overview", headers=H)
             assert r.status == 200
             data = (await r.json())["data"]

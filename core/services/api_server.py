@@ -17,6 +17,7 @@ from core.ref import get_speaker, get_xiaoai, get_kws
 from core.wakeup_session import EventManager
 from core.services.admin_api import AdminAPI
 from core.services.auth import authorize, configured_token
+from core.services.caller import resolve_caller_tag, trust_proxy_enabled
 from core.services.health import build_health_payload
 from core.services.inject_control import (
     INJECT_DISABLED_CODE,
@@ -540,16 +541,24 @@ class APIServer:
     def _caller_tag(self, request: web.Request) -> str:
         """返回调用方标识（用于审计“是谁让音箱说话”）。incident §5 建议 7。
 
-        优先取反向代理链头（X-Forwarded-For / X-Real-IP），否则 peer 地址。
+        **默认只认 TCP peer**（`request.remote`）——生产是 host 网络直连、无反向代理，
+        `X-Forwarded-For` / `X-Real-IP` 可被任意客户端伪造，默认信任等于审计失效。
+        仅在显式 `TRUST_PROXY=1`（部署在受控反代之后）时才读代理链头。
+        判定逻辑见 `core/services/caller.py`（纯函数，可单测）。
+
+        `request.remote` 缺失时回退 transport peer（兼容测试替身/非标准请求对象）。
         """
-        for h in ("X-Forwarded-For", "X-Real-IP"):
-            v = request.headers.get(h)
-            if v:
-                return v.split(",")[0].strip()
-        peer = request.transport.get_extra_info("peername") if request.transport else None
-        if peer:
-            return f"{peer[0]}:{peer[1]}" if len(peer) >= 2 else str(peer)
-        return "unknown"
+        remote = getattr(request, "remote", None)
+        if not remote:
+            transport = getattr(request, "transport", None)
+            peer = transport.get_extra_info("peername") if transport else None
+            if peer:
+                remote = peer[0] if isinstance(peer, tuple) and peer else str(peer)
+        return resolve_caller_tag(
+            remote,
+            getattr(request, "headers", None),
+            trust_proxy=trust_proxy_enabled(),
+        )
 
     @staticmethod
     def _redact_text(text: str, limit: int = 40) -> str:

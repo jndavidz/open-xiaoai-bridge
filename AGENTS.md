@@ -463,6 +463,11 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 > token 分离、互不回退。新增端点默认按写类处理（失败关闭），放行只读端点须显式加入
 > `auth.READ_ROUTES`。日志只记调用方与错误码，不打印 token。
 
+> 🧾 **审计调用方（ticket 09，`core/services/caller.py`）**：日志里的 `caller=` 默认取
+> **TCP peer**（`request.remote`）。生产无反向代理，`X-Forwarded-For` / `X-Real-IP`
+> 可被任意客户端伪造 ⇒ **只有显式 `TRUST_PROXY=1`** 时才读（取 XFF 最左一跳）。
+> 部署到受控反代之后再开这个变量，否则审计等于没有。
+
 > 🔒 **架构级依据（2026-10-19 逆向互证）**：此路径的「唯一性」不只是"静音后喊不了"（功能推理），
 > 而是**设备架构决定的** —— 两条独立证据：
 > 1. **语音总线层**：LX06 的 protobuf（`libaivs-message-util.so`）**根本没有 `MIC_ON`/`MIC_OFF` 消息**
@@ -489,6 +494,8 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 
 **安全与边界约束**:
 - 所有 `/api/admin/*` 要求 `Authorization: Bearer <ADMIN_TOKEN>`；未配置该环境变量时一律 503 拒绝
+- **不接受 `?token=`**（ticket 09）：查询串会进浏览器历史/反代 access log/Referer；
+  面板前端走 localStorage + Authorization 头，其它客户端同样只走请求头
 - 配置写入走白名单 schema（`CONFIG_SCHEMA`）+ **运行时覆盖层**，绝不文本改写 config.py 源文件
 - 分层语义：面板覆盖值（`data/runtime-overrides.json`，原子落盘）> config.py/env 底层值；覆盖项值为 null 表示清除回落
 - 密钥字段读取只回掩码（尾 4 位），明文不出服务端
