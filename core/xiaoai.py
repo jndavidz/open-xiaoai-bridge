@@ -121,9 +121,7 @@ class XiaoAI:
 
         cls._suppressed_dialog_last_attempt[dialog_id] = now
         try:
-            await cls.speaker.run_shell(
-                "killall tts_play.sh miplayer 2>/dev/null; mphelper pause"
-            )
+            await cls.speaker.stop_local_playback()
             if is_new_dialog:
                 await cls.speaker.wake_up(awake=False)
         except Exception as exc:
