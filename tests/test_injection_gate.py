@@ -13,6 +13,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# 直接 `python3 tests/xxx.py` 时 sys.path[0] 是 tests/，xiaoai.py 的
+# `core.utils.base` 等真实导入需要仓库根在 sys.path（与 -m unittest 一致）。
+sys.path.insert(0, str(ROOT))
 
 
 class InjectionGateTest(unittest.TestCase):
