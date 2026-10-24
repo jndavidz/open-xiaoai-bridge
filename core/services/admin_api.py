@@ -10,7 +10,9 @@
     - POST /api/admin/logs/level     运行时调整日志级别
 
 安全：
-    - 所有 /api/admin/* 要求 Bearer/查询参数携带 ADMIN_TOKEN（hmac 常时比较）
+    - 所有 /api/admin/* 要求 `Authorization: Bearer <ADMIN_TOKEN>`（hmac 常时比较）
+    - **不接受 `?token=<ADMIN_TOKEN>`**（ticket 09）：查询串会进入浏览器历史、
+      反代 access log、Referer，是凭证泄露面；前端面板走 localStorage + 请求头。
     - ADMIN_TOKEN 未配置时一律 503 拒绝，避免局域网裸奔
     - 配置写入走白名单 schema + 运行时覆盖层，绝不触碰 config.py 源文件
 """
@@ -292,10 +294,16 @@ class AdminAPI:
 
     @staticmethod
     def _provided_token(request: web.Request) -> str:
+        """只从 `Authorization: Bearer` 头取令牌。
+
+        不接受 `?token=`（ticket 09）：查询串会落进浏览器历史、反代/网关的
+        access log 与 `Referer`，等于把管理令牌写进多处日志。
+        面板前端用 localStorage + Authorization 头，不依赖查询参数。
+        """
         header = request.headers.get("Authorization", "")
         if header.lower().startswith("bearer "):
             return header[7:].strip()
-        return request.query.get("token", "").strip()
+        return ""
 
     def _authorized(self, request: web.Request) -> bool:
         expected = self._expected_token()

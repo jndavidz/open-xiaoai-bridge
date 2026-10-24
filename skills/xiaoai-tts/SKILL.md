@@ -13,7 +13,14 @@ description: Control Xiaoai speaker via OpenXiaoAI Voice API for high-quality TT
 
 ```bash
 OPENXIAOAI_BASE_URL="http://192.168.x.x:9092"  # OpenXiaoAI 服务地址
+BRIDGE_API_TOKEN="<bridge 业务 token>"          # 写类接口鉴权（play/wakeup/interrupt/tts）
 ```
+
+- 服务端配置了 `BRIDGE_API_TOKEN` 后，所有写类接口要求
+  `Authorization: Bearer <token>`；**未配置该环境变量时脚本直接报错**（不发请求），
+  提示补 `BRIDGE_API_TOKEN`。
+- `health` / `status` / `voices` 是只读接口，不强制 token；配了也会带上。
+- 不要把 token 写进命令行或文档，只用环境变量。
 
 ## 使用方法
 

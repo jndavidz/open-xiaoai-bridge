@@ -9,7 +9,7 @@ import argparse
 import urllib.request
 import urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from api_client import get_api_config
+from api_client import get_api_config, auth_headers, require_token
 
 
 def play_file(file_path, blocking=False):
@@ -45,6 +45,8 @@ def play_file(file_path, blocking=False):
     headers = {
         "Content-Type": f"multipart/form-data; boundary=----{boundary}"
     }
+    # 写类端点：必须带 Bearer（token 未配置时在此抛出明确错误，不发请求）
+    headers.update(auth_headers(require_token()))
     
     req = urllib.request.Request(full_url, data=body, headers=headers, method="POST")
     
