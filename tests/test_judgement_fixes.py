@@ -28,7 +28,7 @@ from fake_device import CommandResult, FakeDevice, FakeXiaoAI, load_speaker_modu
 speaker_module = load_speaker_module()
 
 from core import ref  # noqa: E402
-from core.device import registry  # noqa: E402
+from core.device import playback_events, registry  # noqa: E402
 
 TTS_PATH = "/tmp/tts/tts_deadbeef_1700000000_123456.mp3"
 
@@ -87,15 +87,17 @@ class _Base(unittest.TestCase):
         ref.set_xiaoai(FakeXiaoAI(self.device))
         self.speaker = speaker_module.SpeakerManager()
 
-        # 轮询/宽限压到毫秒级，避免测试真的等 1s 宽限。
-        self._saved_poll = speaker_module._PLAYBACK_POLL_INTERVAL_MS
-        self._saved_grace = speaker_module._PLAYBACK_START_GRACE_MS
-        speaker_module._PLAYBACK_POLL_INTERVAL_MS = 2
-        speaker_module._PLAYBACK_START_GRACE_MS = 10
+        # ticket 05：轮询间隔与宽限改由播放事件适配器配置拥有；
+        # 压到毫秒级，避免测试真的等 1s 宽限。
+        playback_events.reset_playback_events()
+        self.adapter = playback_events.get_playback_events()
+        self._saved_event_plane = self.adapter.configure(
+            poll_interval_ms=2, start_grace_ms=10
+        )
 
     def tearDown(self) -> None:
-        speaker_module._PLAYBACK_POLL_INTERVAL_MS = self._saved_poll
-        speaker_module._PLAYBACK_START_GRACE_MS = self._saved_grace
+        self.adapter.config = self._saved_event_plane
+        playback_events.reset_playback_events()
 
 
 class BlockingSpeechTest(_Base):
