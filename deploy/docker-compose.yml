@@ -14,8 +14,13 @@ services:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       # 业务 API 鉴权（必填）：写类端点要求 Authorization: Bearer；留空则写类端点 503 失败关闭
       - BRIDGE_API_TOKEN=${BRIDGE_API_TOKEN}
+      # 具名 token 集合（票 12，可选）：label:token 逗号分隔；与上面并存时旧值 = label legacy
+      - BRIDGE_API_TOKENS=${BRIDGE_API_TOKENS:-}
       # PC 语音注入（可选）：留空=关闭；1/true/yes/on=开启（监听 :9093）
       - INJECT_ENABLE=${INJECT_ENABLE:-}
+      # 9093 数据面鉴权（票 12）：启用注入后未配 CIDR 且未显式 INJECT_ALLOW_ANON=1 ⇒ 拒绝监听 9093
+      - INJECT_ALLOW_CIDR=${INJECT_ALLOW_CIDR:-}
+      - INJECT_ALLOW_ANON=${INJECT_ALLOW_ANON:-}
       # 每轮延迟埋点（可选）：留空=关闭；1/true/yes/on=开启（每轮一条 [TurnTrace] 数值行）
       - TURN_TRACE_ENABLED=${TURN_TRACE_ENABLED:-}
       # 面板「外部服务」探测列表（JSON 数组，可选）；纯状态监控，与对话后端无关，留空不展示

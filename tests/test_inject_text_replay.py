@@ -101,7 +101,14 @@ def _load_api_server_module():
         allowed = True
 
     auth_mod.authorize = lambda *a, **k: _Allow()
-    auth_mod.configured_token = lambda *a, **k: ""
+    auth_mod.classify_route = lambda *a, **k: "read"
+
+    class _Tokens:
+        errors = ()
+        entries = ()
+        labels = ()
+
+    auth_mod.configured_tokens = lambda *a, **k: _Tokens()
 
     # tts.doubao
     sys.modules["core.services.tts.doubao"].DoubaoTTS = type("DoubaoTTS", (), {})
