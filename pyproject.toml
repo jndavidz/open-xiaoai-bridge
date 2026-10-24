@@ -7,7 +7,6 @@ dependencies = [
     "aiohttp>=3.9.0",
     "asyncio>=3.4.3",
     "cryptography>=46.0.5",
-    "maturin>=1.8.3",
     "numpy>=2.2.3",
     "onnxruntime==1.23.2",
     "pyaudio>=0.2.14",
@@ -22,7 +21,9 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+# maturin 只作为构建后端（隔离构建环境安装，不进运行时 venv）；
+# 版本由 uv 按 build-system.requires 解析——钉住上界防止未来 2.0 行为漂移
+requires = ["maturin>=1.8.3,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]

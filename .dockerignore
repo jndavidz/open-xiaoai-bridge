@@ -11,8 +11,8 @@ __pycache__
 .mypy_cache
 
 # Rust
+# Cargo.lock 必须进构建上下文（ticket 14）：锁住 git 依赖 commit 与全部 crates 版本
 target
-Cargo.lock
 
 # IDE
 .idea

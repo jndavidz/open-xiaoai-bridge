@@ -5,8 +5,8 @@ __pycache__
 *.egg-info
 
 # Rust
+# Cargo.lock 必须入库（ticket 14）：锁 git 依赖 commit 与 crates 版本，构建可复现的前提
 target
-Cargo.lock
 
 # IDE
 .idea/

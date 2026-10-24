@@ -4,6 +4,9 @@
 > 配套：`docker-compose.yml`、`config.py`（生产版）、`.env`（不入库）、`models/`。
 > 构建有两条等价路径：**A. WSL 桌面机构建→推镜像（推荐，快）** / **B. NAS 本地编译（备选）**。
 > 任一路径选好后，**部署与验收（§2/§3）完全相同**；两者铁律一致：改 `core/` 或增删唤醒词必须重建镜像。
+>
+> ✅ **可复现构建（ticket 14，2026-10-24）**：见 §1.5。清缓存干净构建实测 **7m49s**（此前 cargo 层 9.5min 超时已消除：
+> Rust 改由 maturin 后端单次编译 + BuildKit cache mount），两次构建 RootFS 层 diffID 逐层一致。
 
 ## 0. 为什么必须本地构建（不是拉上游镜像）
 
@@ -65,8 +68,29 @@ DOCKER_CONFIG=/tmp/docker-config \
 > 构建由显式 `docker build -t open-xiaoai-bridge:home` 完成（路径 A 在 WSL、路径 B 在 NAS），不走 compose build。**群晖部署统一用 `:home` 这个 tag**（A/B 两路径产物同名）。
 
 - 构建上下文 `.dockerignore` 已排除 `.git`/`.venv`/`target`/`deploy`/`models`，上下文干净。
+  ⚠️ **`Cargo.lock` 已不再被排除（ticket 14）**：它随 `native/` 进构建上下文，锁住 git 依赖 commit
+  与全部 crates 版本——升级依赖时手工 `uv lock`（Python 侧）/容器内 `cargo upgrade`（Rust 侧）后提交。
 - 镜像内 `keywords.txt` 由 `Dockerfile` CMD 在**容器启动时**经 `keywords.py` 编译，
   来源是 bind-mount 进来的 `config.py` 的 `wakeup.keywords`（含「停止聆听」）。
+
+### 1.5 可复现构建口径（ticket 14，2026-10-24）
+
+| 项 | 做法 |
+|---|---|
+| 基础镜像 | `python:3.12-slim@sha256:a0f57064…`（manifest digest 钉死，两 stage 同）；升级=手工换 digest |
+| uv 工具镜像 | `ghcr.nju.edu.cn/astral-sh/uv:0.7@sha256:62924083…` |
+| 平台 | 两 stage 显式 `--platform=linux/amd64`（BuildKit 会 WARN 常量 platform，属预期） |
+| Rust | `rustup -y --default-toolchain 1.99.1 --profile minimal`（`RUST_TOOLCHAIN` env，升级手工改） |
+| Rust 依赖 | `native/Cargo.lock` 入库（210 项，git 依赖 `open-xiaoai` 钉 `14e1034b`） |
+| Python 依赖 | `uv.lock` + `uv sync --locked` |
+| 缓存 | BuildKit cache mount：`/root/.cargo/{registry,git}`、`/root/.cache/uv`、`/app/native/target`（不进层、跨构建复用） |
+| 扩展安装 | maturin **构建后端**经 `uv sync --locked --no-editable` 单次编译并装入 `.venv`；已废除 `uv run maturin build` + `uv remove maturin`（后者层内改写锁文件且重复编译——9.5min 超时的根因） |
+
+实测（WSL，2026-10-24）：全清缓存（`docker builder prune -af`）干净构建 **469s**；紧接第二次构建 2s（层全命中），
+两次 RootFS 层 diffID **逐层一致**；`import open_xiaoai_server` 验证通过。
+
+⚠️ **在宿主机跑 `uv lock` 必须带与镜像一致的源**，否则 lock 会被整体改写成另一 registry 的 URL：
+`UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple uv lock`（WSL 默认 uv.toml 是 aliyun，勿裸跑）。
 
 ## 2. 部署 / 重建容器
 
