@@ -16,7 +16,7 @@
 
 ```bash
 cd /mnt/d/_work/repos/open-xiaoai/bridge/deploy
-cp .env.example .env && vim .env      # 六项见 .env.example：必填 4（OPEN_XIAOAI_TOKEN / DEEPSEEK_API_KEY / HA_TOKEN / ADMIN_TOKEN）+ 可选 2（HA_BASE_URL / MONITOR_SERVICES）
+cp .env.example .env && vim .env      # 七项见 .env.example：必填 5（OPEN_XIAOAI_TOKEN / BRIDGE_API_TOKEN / DEEPSEEK_API_KEY / HA_TOKEN / ADMIN_TOKEN）+ 可选 2（HA_BASE_URL / MONITOR_SERVICES）
 # 下载模型包（VAD+KWS；xiaoai_asr 模式不需要 ASR 大模型，但包内含，体积可控）
 #   URL 见下方"模型包"节，解压到 ./models/
 ```
@@ -157,7 +157,10 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 
 ## 8. 安全
 
-- `.env` 不入库；`OPEN_XIAOAI_TOKEN` 已启用（client 连接需携带同值 Bearer）
+- `.env` 不入库；`OPEN_XIAOAI_TOKEN` 已启用（client 连接需携带同值 Bearer）；**未配置该变量时服务端拒绝所有 client 连接（fail closed）**
+- `BRIDGE_API_TOKEN` 业务 API token（与 `ADMIN_TOKEN` 分离）：配置后 `/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/tts/doubao` 必须带 `Authorization: Bearer <BRIDGE_API_TOKEN>`；**未配置时这些写类端点返回 503（失败关闭）**，`/api/health`、`/api/status` 等只读端点仍可用
+  - **升级顺序**：① 先生成 token 并给所有调用方（HA `nuc_tts`/rest_command、企业微信服务、脚本）加上 `Authorization: Bearer` 头；② 再写入容器 `.env` 并 `docker compose up -d` 生效（设置即强制）
+  - 注意：企业微信/HA 调用方若仍按无鉴权调用，会在切换后收到 401（缺头）/403（错 token）
 - `ADMIN_TOKEN` 必须强随机（`openssl rand -hex 16`）；面板可改上游 API 配置，泄露等同泄露 API Key
 - 4399/9092 仅在局域网（host 网络 + 群晖防火墙），勿做公网端口映射；外网访问走 WireGuard
 - HA Token 只进 `.env`，任何文件不得硬编码

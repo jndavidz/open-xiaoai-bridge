@@ -115,7 +115,9 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `AUDIO_INPUT_ENABLE` | 启用音频输入（关闭后小智/KWS/local\_asr不可用） | 启用            |
 | `API_SERVER_HOST`    | API 监听地址    | `127.0.0.1`   |
 | `API_SERVER_PORT`    | API 监听端口    | `9092`        |
-| `OPEN_XIAOAI_TOKEN`  | Client 鉴权 token，设置后仅持有相同 token 的 Client 才能连接 | 不鉴权 |
+| `OPEN_XIAOAI_TOKEN`  | Client 鉴权 token（必填），未配置时服务端拒绝所有 Client 连接（fail closed） | 必填 |
+| `BRIDGE_API_TOKEN`   | 业务 API token（写类端点必带 `Authorization: Bearer`）；未配置时写类端点 503、读类/健康检查仍可用 | 未配置（写类失败关闭） |
+| `ADMIN_TOKEN`        | 后台管理面板 token（与业务 token 分离） | 未配置（面板 API 全拒） |
 | `CONFIG_PATH`        | 自定义配置文件路径   | `./config.py` |
 | `LOGLEVEL`           | 日志级别        | `INFO`        |
 
@@ -317,6 +319,17 @@ curl POST /api/play/text → API Server → SpeakerManager → 小爱音箱
 | `GET`  | `/api/status`            | 获取播放状态       |
 | `GET`  | `/api/health`            | 健康检查         |
 
+### 🔐 鉴权
+
+业务 API 与后台面板使用**两套独立 token**：
+
+- 配置 `BRIDGE_API_TOKEN` 后，写类端点（`/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/tts/doubao`）必须带 `Authorization: Bearer <BRIDGE_API_TOKEN>`：缺失/格式错误返回 401，token 不匹配返回 403。
+- **未配置 `BRIDGE_API_TOKEN` 时写类端点失败关闭（503 + 配置提示）**；`/api/health`、`/api/status`、`GET /api/inject`、`/api/inject/relay`、`/api/tts/doubao_voices` 仍可无鉴权读取（不返回凭证）。
+- 管理面板继续只用 `ADMIN_TOKEN`，与 `BRIDGE_API_TOKEN` 互不回退。
+- 日志只记录调用方与错误码，不打印 token 明文。
+
+升级顺序：先给所有调用方（HA、企业微信、脚本）配好 `Authorization: Bearer`，再在服务端设置 `BRIDGE_API_TOKEN`（设置即强制）。
+
 ### 🖥️ 后台管理面板
 
 浏览器打开 **`http://<host>:9092/admin`**（需环境变量 `ADMIN_TOKEN`；所有 `/api/admin/*` 接口要求 Bearer 鉴权，未配置时一律拒绝）。三页功能：
@@ -335,6 +348,8 @@ curl -X PUT http://localhost:9092/api/admin/config \
 ### 💡 使用示例
 
 ```bash
+# 注意：设置了 BRIDGE_API_TOKEN 后，所有写类请求都要加 -H "Authorization: Bearer $BRIDGE_API_TOKEN"
+
 # 播放文字
 curl -X POST http://localhost:9092/api/play/text \
   -H "Content-Type: application/json" \
