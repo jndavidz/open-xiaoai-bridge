@@ -208,6 +208,19 @@ APP_CONFIG = {
     "audio_input": {
         # Input gain multiplier before VAD/KWS/ASR. Use 1.0 to disable.
         "gain": 1.0,
+        # 设备侧采集声道数（LX06 六麦 = 6）。必须与 native 的 AUDIO_INPUT_CHANNELS 一致；
+        # 改成 1 即一键回退单声道（client 无需重编）。
+        "channels": 6,
+        # 降声道策略：
+        #   strongest = 滑动窗口内最强单麦 + 迟滞（默认）
+        #   average   = 等权平均
+        #   fixed     = 固定单声道（见 fixed_channel）
+        "channel_strategy": "strongest",
+        # fixed 策略使用的声道号（0-5 有信号，6/7 恒零）
+        "fixed_channel": 0,
+        # 录音看门狗：连续无音频帧达到该秒数即「先停后启」
+        # （client 录音读循环 500ms 无数据即退出，阈值须显著小于 3s）
+        "watchdog_seconds": 1.0,
     },
     "asr": {
         # 支持 "sense_voice"（默认）、"paraformer"、"fire_red_asr" 或 "doubao"

@@ -50,13 +50,14 @@ class WakeupSessionManager:
         speaker = get_speaker()
         if speaker:
             await speaker.stop_device_audio()
-            import open_xiaoai_server
-            await open_xiaoai_server.start_recording()
+            from core.xiaoai import XiaoAI
+            await XiaoAI.start_recording()
             return
 
         import open_xiaoai_server
         await open_xiaoai_server.stop_playing()
-        await open_xiaoai_server.start_recording()
+        from core.xiaoai import XiaoAI
+        await XiaoAI.start_recording()
 
     def on_interrupt(self):
         logger.info("[Wakeup] XiaoAI wakeup — interrupting active sessions")

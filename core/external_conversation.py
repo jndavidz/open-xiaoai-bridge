@@ -527,7 +527,8 @@ class ExternalConversationController:
     async def _stop_recording(self):
         """Kill the remote arecord process so the mic doesn't pick up TTS."""
         try:
-            await open_xiaoai_server.stop_recording()
+            from core.xiaoai import XiaoAI
+            await XiaoAI.stop_recording()
             logger.debug("Recording stopped", module=self.LOG_MODULE)
         except Exception as exc:
             logger.debug(f"stop_recording error: {exc}", module=self.LOG_MODULE)
@@ -535,7 +536,8 @@ class ExternalConversationController:
     async def _start_recording(self):
         """Restart the remote arecord process to resume mic input."""
         try:
-            await open_xiaoai_server.start_recording()
+            from core.xiaoai import XiaoAI
+            await XiaoAI.start_recording()
             logger.debug("Recording started", module=self.LOG_MODULE)
         except Exception as exc:
             logger.debug(f"start_recording error: {exc}", module=self.LOG_MODULE)

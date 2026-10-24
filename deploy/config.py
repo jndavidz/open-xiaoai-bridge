@@ -313,6 +313,13 @@ APP_CONFIG = {
     "audio_input": {
         # 麦克风增益 1.0-8.0；LX06 收音偏弱再逐步上调，过高削波
         "gain": 1.0,
+        # 采集声道数（六麦=6）。须与 native 的 AUDIO_INPUT_CHANNELS 一致；1=回退单声道
+        "channels": 6,
+        # 降声道策略：strongest（最强麦+迟滞）/ average（等权平均）/ fixed（固定声道）
+        "channel_strategy": "strongest",
+        "fixed_channel": 0,
+        # 录音看门狗：连续无帧秒数（client 500ms 无数据即退出读循环）
+        "watchdog_seconds": 1.0,
     },
     "asr": {
         # input_mode=xiaoai_asr 时不加载本地 ASR 大模型（N3060 跑不动）
