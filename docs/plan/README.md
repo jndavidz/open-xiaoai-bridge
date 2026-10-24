@@ -44,6 +44,7 @@
 | `channels` 来源 | bridge 经 RPC 下发的 `AudioConfig`（client `.rodata 0xbcf1a` 只有 argv 骨架）⇒ **改 bridge 常量即可，client 不用重编** | 同上 §4.5；`plan/ROADMAP.md` §3.2 |
 | 闭麦入口 | `pnshelper event_notify {"src":3,"event":7}`（闭）/ `{"src":3,"event":8}`（开）：**立即生效、非阻塞** | `run/pnshelper-src-event-exact-enum.md` |
 | 闭麦与采集 | 关麦**不关 ALSA 采集**（8ch 仍可抓）⇒ 可与 bridge 自己的 KWS 并存 | `run/local-control-api.md` §3.3 |
+| 开麦与判据 | `event:8` 幂等、`ubus -S` 格式见事实层；`set_mic` 已按回读判定（ticket 03/10） | `ws: docs/devices/lx06/pnshelper-event-space.md` §3.5/§3.6 |
 | `alarm micmute` | ❌ **不是闸门**：是闹钟响铃静音流程（回调 `sleep(7)` → `pns mic_off` → 播放 → `pns mic_on`），`{h,m,s}` 是**到期时刻**、调用阻塞约 7 s | `run/local-tts-playback-api.md` §5.2；`run/plan/ROADMAP.md` §3.1 |
 | 播放完成事件 | `play_status_broadcast_event`：`status:1` 开始 / `status:0` 结束，**严格成对**（12/12）；**无 id** | `run/play-status-event-full-lifecycle.md` |
 | 事件发送者 | ❌ **不是** `mode_manager`（该名字不是 ubus 对象） | `run/device-local-http-and-event-source-correction.md` §2 |
@@ -253,6 +254,12 @@ PC 端按 `is_final` 区分「预览」与「提交」，且必须**覆盖**而�
 数据 → [`docs/devices/lx06/voice-input-latency-and-quota.md`](../../../docs/devices/lx06/voice-input-latency-and-quota.md)
 
 测试：`tests/test_inject_text_replay.py`（17 条，纯内存 asyncio，不出声不碰设备）。
+
+> **已修复（ticket 03/10，2026-10-24）**：`set_mic` 已改为按 `get_mic()` 回读判定；
+> `event:8` 幂等与 `ubus -S` 输出格式的权威事实见
+> `ws: docs/devices/lx06/pnshelper-event-space.md` §3.5/§3.6。
+> 播报固件闭麦与真机验收结果见
+> `ws: .scratch/lx06-voice-hub-baseline/issues/10-playback-mic-gate.md` 与 `09-device-acceptance.md`。
 
 **B-06 的判据设计**（音频静默检测，避免误报）：正常 30 ms 一帧；**无帧告警 3 s**（=100 帧空窗）；
 **连续静音告警 30 s**（用户不说话也有空帧）；收到 1 帧即恢复。恢复动作 = `stop_recording` → `start_recording`
