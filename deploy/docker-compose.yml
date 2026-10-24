@@ -16,6 +16,8 @@ services:
       - BRIDGE_API_TOKEN=${BRIDGE_API_TOKEN}
       # PC 语音注入（可选）：留空=关闭；1/true/yes/on=开启（监听 :9093）
       - INJECT_ENABLE=${INJECT_ENABLE:-}
+      # 每轮延迟埋点（可选）：留空=关闭；1/true/yes/on=开启（每轮一条 [TurnTrace] 数值行）
+      - TURN_TRACE_ENABLED=${TURN_TRACE_ENABLED:-}
       # 面板「外部服务」探测列表（JSON 数组，可选）；纯状态监控，与对话后端无关，留空不展示
       - MONITOR_SERVICES=${MONITOR_SERVICES}
       - RUNTIME_OVERRIDES_PATH=/app/data/runtime-overrides.json

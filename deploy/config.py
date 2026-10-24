@@ -340,6 +340,12 @@ APP_CONFIG = {
         # native 拉流命令；留空 = 不启动（运行时镜像无 openssh-client，勿加依赖）
         "native_cmd": "",
     },
+    "turn_trace": {
+        # 每轮延迟埋点（ticket 11）：默认关闭；开启后每轮一条 [TurnTrace] INFO
+        # 数值行（各段 ms / 长度 / 标志），不含原话文本。
+        # 环境变量 TURN_TRACE_ENABLED 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
+        "enabled": False,
+    },
     "asr": {
         # input_mode=xiaoai_asr 时不加载本地 ASR 大模型（N3060 跑不动）
         "model": "sense_voice",

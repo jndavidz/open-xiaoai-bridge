@@ -21,6 +21,7 @@ import aiohttp
 from core.utils.base import get_env
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
+from core.utils import turn_trace
 from core.tools.registry import get_all_tools, execute_tool
 
 
@@ -275,6 +276,9 @@ class OpenAIManager:
         cls._response_events[run_id] = loop.create_future()
         cls._response_texts[run_id] = ""
         cls._response_tts_speakers[run_id] = cls.get_tts_speaker_for_session_key()
+        # TurnTrace（ticket 11）：本地 ASR 链路没有 is_final 事件，在这里惰性建轮；
+        # 原生 ASR 链路此时已有当前轮，只补 LLM 起始时间。
+        turn_trace.mark_llm_start()
         logger.user_speech(text, module=f"OpenAI({cls._session_key})")
         asyncio.create_task(cls._run_chat_completion(run_id, text))
         return run_id
@@ -289,6 +293,7 @@ class OpenAIManager:
             await asyncio.wait_for(event, timeout=cls._timeout)
             return cls._response_texts.pop(run_id, "") or None
         except asyncio.TimeoutError:
+            turn_trace.note_llm_timeout()
             logger.warning(f"[OpenAI] Timeout waiting for response (runId: {run_id})")
             return None
         finally:
@@ -297,15 +302,25 @@ class OpenAIManager:
 
     @classmethod
     async def _run_chat_completion(cls, run_id: str, text: str):
+        # TurnTrace（ticket 11）：只统计轮数与耗时，不记录任何文本。
+        stats = {"tool_rounds": 0}
         try:
-            response_text = await cls._request_chat_completion(text)
+            response_text = await cls._request_chat_completion(text, stats=stats)
             if response_text:
                 cls._response_texts[run_id] = response_text
+                turn_trace.note_reply_chars(len(response_text))
                 logger.ai_response(response_text, module=f"OpenAI({cls._session_key})")
+            else:
+                turn_trace.note_llm_error()
         except Exception as exc:
             cls.last_error = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, asyncio.TimeoutError):
+                turn_trace.note_llm_timeout()
+            turn_trace.note_llm_error()
             logger.error(f"[OpenAI] Chat completion failed: {cls.last_error}")
         finally:
+            turn_trace.note_tool_rounds(stats["tool_rounds"])
+            turn_trace.mark_llm_end()
             waiter = cls._response_events.get(run_id)
             if waiter and not waiter.done():
                 waiter.get_loop().call_soon_threadsafe(waiter.set_result, None)
@@ -324,7 +339,9 @@ class OpenAIManager:
                 return body
 
     @classmethod
-    async def _request_chat_completion(cls, text: str) -> str | None:
+    async def _request_chat_completion(
+        cls, text: str, stats: dict[str, int] | None = None
+    ) -> str | None:
         session_key = cls._session_key
         history = cls._sessions.setdefault(session_key, [])
         messages = cls._build_messages(history, text)
@@ -391,6 +408,8 @@ class OpenAIManager:
                     logger.info(
                         f"[OpenAI] tool round: {[tc.get('function', {}).get('name') for tc in tool_calls]}"
                     )
+                    if stats is not None:
+                        stats["tool_rounds"] = int(stats.get("tool_rounds", 0)) + 1
                     continue  # 带着工具结果再请求一轮
                 logger.warning("[OpenAI] finish_reason=tool_calls but empty tool_calls, fall back to text")
 

@@ -58,6 +58,7 @@ def _load_send_sound() -> bytes | None:
 _NOTIFY_PCM = _load_notify_sound()
 _SEND_PCM = _load_send_sound()
 from core.utils.logger import logger
+from core.utils import turn_trace
 
 
 class ExternalConversationController:
@@ -234,6 +235,8 @@ class ExternalConversationController:
         for kw in self.exit_keywords:
             if kw in text:
                 logger.info(f"Exit keyword: {kw}", module=self.LOG_MODULE)
+                # TurnTrace（ticket 11）：退出轮没有 LLM/TTS，立即收尾为 incomplete。
+                turn_trace.abandon_turn()
                 return "exit"
 
         # 4. Send to backend and wait for response
@@ -279,6 +282,8 @@ class ExternalConversationController:
         for kw in self.exit_keywords:
             if kw in text:
                 logger.info(f"Exit keyword: {kw}", module=self.LOG_MODULE)
+                # TurnTrace（ticket 11）：退出轮没有 LLM/TTS，立即收尾为 incomplete。
+                turn_trace.abandon_turn()
                 return "exit"
 
         full_text = text
@@ -455,6 +460,8 @@ class ExternalConversationController:
 
         if normalized_text:
             logger.debug(f"XiaoAI native ASR recognized: {normalized_text}", module=self.LOG_MODULE)
+            # TurnTrace（ticket 11）：is_final 到达即本轮锚点，只记字符数、不记原文。
+            turn_trace.begin_turn("xiaoai_asr", asr_chars=len(normalized_text))
             self._resolve_xiaoai_asr_future(normalized_text)
             return True
 
