@@ -91,6 +91,11 @@ class InjectRelay:
         self._window_start_seq: int = 0               # 最近一次 open_session 时的 seq
         self.stats = {"up_bytes": 0, "down_bytes": 0, "sessions": 0, "texts": 0}
 
+    @property
+    def auth_mode(self) -> str:
+        """数据面鉴权模式（cidr/anon/refused）；未判定时 unknown（观测用）。"""
+        return self.data_auth.mode if self.data_auth is not None else "unknown"
+
     @staticmethod
     def _disabled_response() -> web.Response:
         """统一「注入模块已关闭」响应（503 + code=inject_disabled）。
@@ -208,7 +213,9 @@ class InjectRelay:
                     "（正常仅一台设备，替换需排查同段冒充）"
                 )
             else:
-                logger.info(f"[InjectRelay] 下游连接 auth=ok peer={peer_ip}")
+                logger.info(
+                    f"[InjectRelay] 下游连接 auth=ok replaced=false peer={peer_ip}"
+                )
             self.downstream_writer = writer
             try:
                 while True:
@@ -249,14 +256,14 @@ class InjectRelay:
         self.data_auth = resolve_inject_data_auth()
         if self.data_auth.mode == "refused":
             logger.error(
-                f"[InjectRelay] 拒绝启动 :{port} 数据面（inject data plane: "
-                f"auth=refused）：{self.data_auth.reason}"
+                f"[InjectRelay] 拒绝启动 :{port} 数据面"
+                f"（inject data plane: auth=refused）：{self.data_auth.reason}"
             )
             return
         allow = ""
         if self.data_auth.mode == "cidr":
             allow = " allow=" + ",".join(str(n) for n in self.data_auth.networks)
-        logger.info(f"inject data plane: auth={self.data_auth.mode}{allow}")
+        logger.info(f"[InjectRelay] inject data plane: auth={self.data_auth.mode}{allow}")
         self._downstream_task = asyncio.create_task(self.downstream_server(host, port))
 
     async def stop(self) -> None:
@@ -603,11 +610,10 @@ class APIServer:
         if self.inject_enabled:
             # 注入流式中继：下游 TCP（hook 拉流）端口 = HTTP 端口 + 1
             await self.inject_relay.start(self.host, self.port + 1)
-            auth_mode = (
-                self.inject_relay.data_auth.mode
-                if self.inject_relay.data_auth is not None else "unknown"
+            logger.info(
+                f"[APIServer] inject 模块已启用（中继 :{self.port + 1} "
+                f"auth={self.inject_relay.auth_mode}）"
             )
-            logger.info(f"[APIServer] inject 模块已启用（中继 :{self.port + 1} auth={auth_mode}）")
         else:
             # ticket 07：关闭时不监听 :9093；端点统一 503 code=inject_disabled
             # （GET /api/inject 与 /api/health 仍报告 enabled=false，供运维观测）
@@ -1173,10 +1179,7 @@ class APIServer:
             "relay": {
                 "active": self.inject_relay.active,
                 # 数据面鉴权模式（ticket 12）：cidr/anon/refused；unknown=尚未 start
-                "auth": (
-                    self.inject_relay.data_auth.mode
-                    if self.inject_relay.data_auth is not None else "unknown"
-                ),
+                "auth": self.inject_relay.auth_mode,
                 "stats": dict(self.inject_relay.stats),
             },
         }
@@ -1209,6 +1212,24 @@ class APIServer:
                 "inject 模块未启用"
             )
             return InjectRelay._disabled_response()
+
+        # 数据面被拒（auth=refused）时不开窗（fail closed，503 + 明确原因）：
+        # 窗口 = 闸门 + 中继 + 唤醒，中继未监听则注入无从发生（notes/10 §3）
+        data_auth = self.inject_relay.data_auth
+        if data_auth is not None and data_auth.mode == "refused":
+            logger.error(
+                f"[APIServer] /api/inject 拒绝开窗 caller={self._caller_tag(request)}："
+                f"数据面未启用鉴权（{data_auth.reason}）"
+            )
+            return web.json_response(
+                {
+                    "success": False,
+                    "enabled": True,
+                    "code": "inject_data_refused",
+                    "error": f"9093 数据面拒绝监听，注入不可用：{data_auth.reason}",
+                },
+                status=503,
+            )
 
         try:
             data = await request.json() if request.can_read_body else {}
@@ -1297,10 +1318,7 @@ class APIServer:
             "remaining": EventManager.injection_gate_remaining(),
             "relay": {
                 "active": self.inject_relay.active,
-                "auth": (
-                    self.inject_relay.data_auth.mode
-                    if self.inject_relay.data_auth is not None else "unknown"
-                ),
+                "auth": self.inject_relay.auth_mode,
                 "stats": dict(self.inject_relay.stats),
             },
         })

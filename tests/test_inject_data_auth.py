@@ -17,6 +17,7 @@
 import asyncio
 import importlib.util
 import ipaddress
+import json
 import os
 import socket
 import sys
@@ -428,6 +429,23 @@ class RelayDataPlaneAuthTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(relay._downstream_task)
         finally:
             await relay.stop()
+
+    async def test_inject_open_window_refused_returns_503(self):
+        # 数据面 auth=refused 时 POST /api/inject 不开窗：503 + 明确原因（notes/10 §3）
+        mod = self.mod
+        server = mod.APIServer(host="127.0.0.1", port=59999)
+        server.inject_enabled = True
+        server.inject_relay.data_auth = InjectDataAuth(
+            mode="refused", reason="未配置 INJECT_ALLOW_CIDR"
+        )
+        request = types.SimpleNamespace(
+            can_read_body=False, remote="127.0.0.1", headers={}, transport=None
+        )
+        resp = await server.handle_inject(request)
+        self.assertEqual(resp.status, 503)
+        body = json.loads(resp.body)
+        self.assertEqual(body["code"], "inject_data_refused")
+        self.assertIn("INJECT_ALLOW_CIDR", body["error"])
 
     async def test_health_payload_exposes_auth_mode(self):
         # /api/inject 与 health 的 relay 段应能回答「当前有没有鉴权」

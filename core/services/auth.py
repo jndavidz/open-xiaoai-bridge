@@ -209,7 +209,8 @@ def parse_token_set(raw: str) -> TokenSet:
             errors.append(f"条目 {index}: 缺少 label:token 分隔符")
             continue
         if not _LABEL_RE.fullmatch(label):
-            errors.append(f"条目 {index}: label={label!r} 不合法（限 [a-z0-9-]{{1,32}}）")
+            # 不回显 label 原文：误把 token 填进 label 位时，值不能进日志
+            errors.append(f"条目 {index}: label 不合法（限 [a-z0-9-]{{1,32}}）")
             continue
         if not _TOKEN_RE.fullmatch(token):
             errors.append(f"条目 {index}（label={label}）: token 不合法"

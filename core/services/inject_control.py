@@ -118,11 +118,16 @@ class InjectDataAuth:
     """
 
     mode: str
-    networks: tuple = ()
+    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
     reason: str = ""
 
 
-def parse_inject_cidrs(raw: str):
+def parse_inject_cidrs(
+    raw: str,
+) -> tuple[
+    tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+    tuple[str, ...],
+]:
     """解析逗号分隔 CIDR 列表 → (networks, errors)。
 
     `strict=False`：`10.10.10.20/24` 这类带主机位的输入按掩码归零接受
@@ -142,7 +147,10 @@ def parse_inject_cidrs(raw: str):
     return tuple(networks), tuple(errors)
 
 
-def peer_allowed(peer_ip: str | None, networks) -> bool:
+def peer_allowed(
+    peer_ip: str | None,
+    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> bool:
     """源 IP 是否命中任一允许网段；无网段/非法 IP 一律 False（fail closed）。
 
     IPv4-mapped IPv6（`::ffff:10.x.x.x`）归一化成 IPv4 再比对。

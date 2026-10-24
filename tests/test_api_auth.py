@@ -159,6 +159,10 @@ class ParseTokenSetTest(unittest.TestCase):
             ts = parse_token_set(f"{label}:{T1}")
             self.assertFalse(ts.valid, label)
             self.assertTrue(any("label" in e for e in ts.errors), label)
+            # 不回显原文：误把 token 填进 label 位时，值不能进日志（空串跳过：恒真断言无意义）
+            for e in ts.errors:
+                if label:
+                    self.assertNotIn(label, e)
 
     def test_bad_token_rejected(self):
         for token in (BAD_SHORT, "!" * 40, "", "a" * 129):
