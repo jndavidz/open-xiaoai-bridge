@@ -109,9 +109,7 @@ class SendBookkeepingTest(FakeBackendTestBase):
             await asyncio.sleep(0.01)
         self.assertEqual({}, FakeBackend._response_events)
         self.assertEqual({}, FakeBackend._response_texts)
-        # 注意：fire-and-forget 路径 _response_tts_speakers 不清理是旧行为
-        # （send(wait_response=False) 只经 _wait_response，其 finally 不 pop
-        # 音色槽），本票要求行为等价，原样保留。
+        self.assertEqual({}, FakeBackend._response_tts_speakers)
 
     async def test_transport_error_returns_none_and_records_last_error(self):
         FakeBackend._enabled = True

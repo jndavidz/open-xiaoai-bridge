@@ -3,77 +3,43 @@
 This module talks to a running QwenPaw application through its HTTP
 console task API and exposes the same minimal interface used by the
 external conversation controller.
+
+公共骨架（记账 / 超时 / TTS 委托 / 配置装载 / 埋点）在
+core.backend_base.BackendManagerBase；本模块只保留传输核
+（任务提交 + 轮询取结果 + 会话键解析）。
 """
 
 import asyncio
-import uuid
 from typing import Any
 
 import aiohttp
 
-from core.utils.base import get_env
-from core.utils.config import ConfigManager
+from core.backend_base import BackendManagerBase
+from core.utils.config import ConfigManager  # noqa: F401  兼容面：既有测试 patch core.qwenpaw.ConfigManager
 from core.utils.logger import logger
 
 
-class QwenPawManager:
+class QwenPawManager(BackendManagerBase):
     """Manager for QwenPaw HTTP chat backend."""
 
-    XIAOAI_TTS_SPEAKER = "xiaoai"
+    CONFIG_PREFIX = "qwenpaw"
+    ENABLE_ENV_VARS = ("QWENPAW_ENABLE",)
+    LOG_MODULE = "QwenPaw"
 
-    _initialized = False
-    _reload_listener_registered = False
-    _enabled = False
     _base_url = "http://127.0.0.1:8088"
     _agent_id = "default"
     _user_id = "open-xiaoai-bridge"
     _session_key = "agent:default:open-xiaoai-bridge"
     _send_path = "/api/console/chat/task"
     _task_status_path = "/api/console/chat/task/{task_id}"
-    _response_timeout = 120
     _poll_interval = 0.5
-    _tts_provider: str | None = None
-    _tts_speaker = None
-    _session_tts_speakers: dict[str, str] = {}
-    _tts_speed = 1.0
-    _rule_prompt = ""
-    _rule_prompt_for_skill = ""
     _auth_token = ""
     _auth_header = "Authorization"
     _auth_scheme = "Bearer"
-    _response_events: dict[str, asyncio.Future] = {}
-    _response_texts: dict[str, str] = {}
-    _response_tts_speakers: dict[str, str | None] = {}
-    last_error: str | None = None
 
     @classmethod
-    def initialize_from_config(cls, enabled: bool | None = None):
-        logger.info("[QwenPaw] Initializing from config...")
-        cls.reload_from_config(enabled=enabled)
-        cls._initialized = True
-
-    @classmethod
-    def reload_from_config(cls, enabled: bool | None = None):
-        """Refresh QwenPaw settings from config.py."""
-        config_manager = ConfigManager.instance()
-        if not cls._reload_listener_registered:
-            config_manager.add_reload_listener(
-                lambda _old, _new: cls.reload_from_config()
-            )
-            cls._reload_listener_registered = True
-
-        config = config_manager.get_app_config("qwenpaw", {})
-
-        if enabled is not None:
-            cls._enabled = enabled
-        else:
-            env_enabled = get_env("QWENPAW_ENABLE")
-            cls._enabled = (
-                env_enabled.lower() in ("1", "true", "yes")
-                if env_enabled is not None
-                else False
-            )
-
+    def _apply_config(cls, config: dict):
+        """装载 QwenPaw 传输核专属配置。"""
         cls._base_url = str(config.get("base_url", "http://127.0.0.1:8088")).rstrip("/")
         cls._agent_id = str(config.get("agent_id", "default") or "default")
         cls._user_id = str(config.get("user_id", "open-xiaoai-bridge") or "open-xiaoai-bridge")
@@ -83,74 +49,16 @@ class QwenPawManager:
             config.get("task_status_path", "/api/console/chat/task/{task_id}")
             or "/api/console/chat/task/{task_id}"
         )
-        cls._response_timeout = int(config.get("response_timeout", 120))
         cls._poll_interval = max(0.1, float(config.get("poll_interval", 0.5)))
-        configured_provider = config.get("tts_provider")
-        cls._tts_provider = (
-            str(configured_provider).strip().lower()
-            if configured_provider
-            else None
-        )
-        cls._tts_speaker = config.get("tts_speaker", None)
-        cls._session_tts_speakers = (
-            {
-                str(key): str(value)
-                for key, value in config.get("session_tts_speakers", {}).items()
-                if key and value
-            }
-            if isinstance(config.get("session_tts_speakers", {}), dict)
-            else {}
-        )
-        cls._tts_speed = float(config.get("tts_speed", 1.0))
-        cls._rule_prompt = str(config.get("rule_prompt", "") or "")
-        cls._rule_prompt_for_skill = str(config.get("rule_prompt_for_skill", "") or "")
         cls._auth_token = str(config.get("auth_token", "") or "")
         cls._auth_header = str(config.get("auth_header", "Authorization")).strip() or "Authorization"
         cls._auth_scheme = str(config.get("auth_scheme", "Bearer")).strip()
 
-        if cls._enabled:
-            logger.info(
-                f"[QwenPaw] Enabled, base_url={cls._base_url}, agent_id={cls._agent_id}"
-            )
-
     @classmethod
-    async def connect(cls) -> bool:
-        """No-op connect hook for parity with other backends."""
-        if not cls._initialized:
-            cls.initialize_from_config()
-        return cls._enabled
-
-    @classmethod
-    async def close(cls):
-        """Cancel pending response waiters."""
-        for waiter in list(cls._response_events.values()):
-            if not waiter.done():
-                waiter.cancel()
-        cls._response_events.clear()
-        cls._response_texts.clear()
-        cls._response_tts_speakers.clear()
-
-    @classmethod
-    def is_connected(cls) -> bool:
-        return cls.is_enabled()
-
-    @classmethod
-    def is_enabled(cls) -> bool:
-        if not cls._initialized:
-            cls.initialize_from_config()
-        return cls._enabled
-
-    @classmethod
-    def set_session_key(cls, session_key: str):
+    def _log_enabled(cls):
         logger.info(
-            f"[QwenPaw] Session key updated: {cls._session_key!r} -> {session_key!r}"
+            f"[QwenPaw] Enabled, base_url={cls._base_url}, agent_id={cls._agent_id}"
         )
-        cls._session_key = session_key
-
-    @classmethod
-    def get_tts_speaker_for_session_key(cls, session_key: str | None = None) -> str | None:
-        target_session_key = session_key or cls._session_key
-        return cls._session_tts_speakers.get(target_session_key) or cls._tts_speaker
 
     @classmethod
     def _parse_session_key(cls, session_key: str | None = None) -> tuple[str, str]:
@@ -169,87 +77,9 @@ class QwenPawManager:
         return cls._agent_id, key
 
     @classmethod
-    async def send(cls, text: str, wait_response: bool = False) -> str | None:
-        run_id = await cls._send_and_track(text)
-        if run_id is None:
-            return None
-        if not wait_response:
-            asyncio.create_task(cls._wait_response(run_id))
-            return run_id
-        try:
-            return await cls._wait_response(run_id)
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def send_and_play_reply(cls, text: str, wait_response: bool = False) -> str | None:
-        run_id = await cls._send_and_track(text)
-        if run_id is None:
-            return None
-        if not wait_response:
-            asyncio.create_task(cls._wait_and_play_response(run_id))
-            return run_id
-        try:
-            response_text = await cls._wait_response(run_id)
-            if response_text:
-                await cls._play_response_with_tts(
-                    response_text,
-                    tts_speaker=cls._response_tts_speakers.get(run_id),
-                )
-            return response_text
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def _send_and_track(cls, text: str) -> str | None:
-        if not cls._initialized:
-            cls.initialize_from_config()
-        if not cls._enabled:
-            logger.warning("[QwenPaw] send called but backend is disabled")
-            return None
-
-        run_id = str(uuid.uuid4())
-        loop = asyncio.get_running_loop()
-        cls._response_events[run_id] = loop.create_future()
-        cls._response_texts[run_id] = ""
-        cls._response_tts_speakers[run_id] = cls.get_tts_speaker_for_session_key()
-        logger.user_speech(text, module=f"QwenPaw({cls._session_key})")
-        asyncio.create_task(cls._run_qwenpaw_task(run_id, text))
-        return run_id
-
-    @classmethod
-    async def _wait_response(cls, run_id: str) -> str | None:
-        event = cls._response_events.get(run_id)
-        if not event:
-            logger.warning(f"[QwenPaw] No event found for run {run_id}")
-            return None
-        try:
-            await asyncio.wait_for(event, timeout=cls._response_timeout)
-            return cls._response_texts.pop(run_id, "") or None
-        except asyncio.TimeoutError:
-            logger.warning(f"[QwenPaw] Timeout waiting for response (runId: {run_id})")
-            return None
-        finally:
-            cls._response_events.pop(run_id, None)
-            cls._response_texts.pop(run_id, None)
-
-    @classmethod
-    async def _run_qwenpaw_task(cls, run_id: str, text: str):
-        try:
-            response_text = await cls._request_qwenpaw(text)
-            if response_text:
-                cls._response_texts[run_id] = response_text
-                logger.ai_response(response_text, module=f"QwenPaw({cls._session_key})")
-        except Exception as exc:
-            cls.last_error = f"{type(exc).__name__}: {exc}"
-            logger.error(f"[QwenPaw] Request failed: {cls.last_error}")
-        finally:
-            waiter = cls._response_events.get(run_id)
-            if waiter and not waiter.done():
-                waiter.get_loop().call_soon_threadsafe(waiter.set_result, None)
-
-    @classmethod
-    async def _request_qwenpaw(cls, text: str) -> str | None:
+    async def _request_completion(
+        cls, text: str, stats: dict[str, int] | None = None
+    ) -> str | None:
         timeout = aiohttp.ClientTimeout(total=cls._response_timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
@@ -369,37 +199,3 @@ class QwenPawManager:
         result = value.get("result")
         if result is not None:
             cls._collect_response_texts(result, texts)
-
-    @classmethod
-    async def _wait_and_play_response(cls, run_id: str):
-        try:
-            response_text = await cls._wait_response(run_id)
-            if response_text:
-                await cls._play_response_with_tts(
-                    response_text,
-                    tts_speaker=cls._response_tts_speakers.get(run_id),
-                )
-            else:
-                logger.warning(f"[QwenPaw] No response text received for run {run_id}")
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def _play_response_with_tts(
-        cls,
-        text: str,
-        tts_speaker: str | None = None,
-        playback_token: int | None = None,
-    ):
-        """Synthesize text using the configured provider and play it."""
-        from core.services.tts.router import TTSRouter
-
-        resolved_tts_speaker = tts_speaker or cls.get_tts_speaker_for_session_key()
-        await TTSRouter.play(
-            text,
-            configured_provider=cls._tts_provider,
-            tts_speaker=resolved_tts_speaker,
-            tts_speed=cls._tts_speed,
-            playback_token=playback_token,
-            log_prefix="QwenPaw",
-        )

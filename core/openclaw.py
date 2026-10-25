@@ -22,6 +22,11 @@ Usage:
     from core.openclaw import OpenClawManager
     await OpenClawManager.send("Hello OpenClaw")              # send only
     await OpenClawManager.send_and_play_reply("Hello OpenClaw")     # send + TTS playback
+
+公共骨架（等待超时 / TTS 委托 / 配置装载模板 / 埋点）在
+core.backend_base.BackendManagerBase；本模块保留 WS 长连接生命周期
+（Ed25519 设备身份、接收循环、心跳监控、指数退避重连、事件处理）与
+ack/run-id 映射的传输核。
 """
 
 import asyncio
@@ -37,17 +42,21 @@ import websockets
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from core.backend_base import BackendManagerBase
 from core.utils.base import get_env
-from core.utils.config import ConfigManager
+from core.utils.config import ConfigManager  # noqa: F401  兼容面：既有测试 patch core.openclaw.ConfigManager
+from core.utils import turn_trace
 from core.utils.logger import logger
 
 
-class OpenClawManager:
+class OpenClawManager(BackendManagerBase):
     """Manager for OpenClaw connection and messaging."""
 
-    _instance = None
-    _initialized = False
-    _reload_listener_registered = False
+    CONFIG_PREFIX = "openclaw"
+    # 兼容 OPENCLAW_ENABLE (新) 和 OPENCLAW_ENABLED (旧)
+    ENABLE_ENV_VARS = ("OPENCLAW_ENABLE", "OPENCLAW_ENABLED")
+    LOG_MODULE = "OpenClaw"
+
     _min_protocol = 3
     _max_protocol = 4
 
@@ -72,114 +81,43 @@ class OpenClawManager:
     _reconnect_attempts = 0
     _should_reconnect = False  # flag to indicate intentional disconnect vs unexpected
 
-    # Config
-    XIAOAI_TTS_SPEAKER = "xiaoai"  # Special value: use XiaoAI native TTS instead of Doubao
-    _enabled = False
-    _tts_provider: str | None = None
-    _tts_speaker = None  # Custom speaker for OpenClaw TTS (uses tts.doubao.default_speaker if not set)
+    # Config（连接与 TTS 之外的字段归基类；agent_tts_speakers 按 agentId 覆盖）
+    _ack_timeout = 60  # seconds to wait for request accepted response
     _agent_tts_speakers: dict[str, str] = {}  # Per-agent speaker overrides
-    _tts_speed = 1.0  # TTS speed (0.5-2.0, 1.0 is normal)
     _url = None
     _token = None
-    _session_key = None
-    last_error: str | None = None
-
-    # Response tracking for TTS
-    _response_events: dict[str, asyncio.Future] = {}
-    _response_texts: dict[str, str] = {}
-    _response_tts_speakers: dict[str, str | None] = {}
-    _response_timeout = 120  # seconds to wait for agent response (configurable)
-    _ack_timeout = 60  # seconds to wait for request accepted response
-    _rule_prompt = ""  # prompt to append to every message sent to OpenClaw (auto-prepends newline)
-    _rule_prompt_for_skill = ""  # prompt for skill-based autonomous playback
-
     _identity_path = os.path.expanduser("~/.openclaw/identity/device.json")
     _spki_ed25519_prefix = bytes.fromhex("302a300506032b6570032100")
 
-    @classmethod
-    def initialize_from_config(cls, enabled: bool | None = None):
-        """Initialize the manager from config.
-
-        Configuration source:
-        1. OPENCLAW_ENABLED environment variable or enabled parameter
-        2. APP_CONFIG["openclaw"] for all OpenClaw connection settings
-
-        Args:
-            enabled: Override enable flag. If None, use environment variable or config.
-        """
-        logger.info("[OpenClaw] Initializing from config...")
-        cls.reload_from_config(enabled=enabled)
-        cls._initialized = True
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # _agent_tts_speakers 同样是每子类独立的记账表（键为 agentId）。
+        cls._agent_tts_speakers = {}
+        cls._pending = {}
 
     @classmethod
-    def reload_from_config(cls, enabled: bool | None = None):
-        """从配置中心刷新 OpenClaw 配置。"""
-        config_manager = ConfigManager.instance()
+    def _apply_config(cls, config: dict):
+        """装载 OpenClaw 连接配置；url/token/session_key 变更时触发重连。"""
         previous_url = cls._url
         previous_token = cls._token
         previous_session_key = cls._session_key
 
-        if not cls._reload_listener_registered:
-            config_manager.add_reload_listener(
-                lambda _old, _new: cls.reload_from_config()
-            )
-            cls._reload_listener_registered = True
-
-        config = config_manager.get_app_config("openclaw", {})
-        cfg_url = config.get("url", "ws://localhost:4399")
-        cfg_token = config.get("token", "")
-        cfg_session = config.get("session_key", "agent:main:open-xiaoai-bridge")
-        cfg_identity_path = config.get("identity_path")
-        cfg_tts_provider = config.get("tts_provider")
-        cfg_tts_speaker = config.get("tts_speaker", None)
-        cfg_agent_tts_speakers = config.get("agent_tts_speakers", {})
-        cfg_tts_speed = config.get("tts_speed", 1.0)
-        cfg_ack_timeout = config.get("ack_timeout", 30)
-        cfg_response_timeout = config.get("response_timeout", 120)
-        cfg_rule_prompt = config.get("rule_prompt", "")
-        cfg_rule_prompt_for_skill = config.get("rule_prompt_for_skill", "")
-
-        # Enable/disable: parameter > environment variable > default (False)
-        if enabled is not None:
-            cls._enabled = enabled
-        else:
-            # 兼容 OPENCLAW_ENABLE (新) 和 OPENCLAW_ENABLED (旧)
-            env_enabled = get_env("OPENCLAW_ENABLE") or get_env("OPENCLAW_ENABLED")
-            if env_enabled is not None:
-                cls._enabled = env_enabled.lower() in ("1", "true", "yes")
-            else:
-                cls._enabled = False  # Default to disabled if no env var set
-
-        # TTS config: only from config file
-        cls._tts_provider = (
-            str(cfg_tts_provider).strip().lower()
-            if cfg_tts_provider
-            else None
-        )
-        cls._tts_speaker = cfg_tts_speaker
+        cls._url = config.get("url", "ws://localhost:4399")
+        cls._token = config.get("token", "")
+        cls._session_key = config.get("session_key", "agent:main:open-xiaoai-bridge")
+        cls._identity_path = cls._resolve_identity_path(config.get("identity_path"))
+        raw_agent_speakers = config.get("agent_tts_speakers", {})
         cls._agent_tts_speakers = (
             {
                 str(key): str(value)
-                for key, value in cfg_agent_tts_speakers.items()
+                for key, value in raw_agent_speakers.items()
                 if key and value
             }
-            if isinstance(cfg_agent_tts_speakers, dict)
+            if isinstance(raw_agent_speakers, dict)
             else {}
         )
-        cls._tts_speed = cfg_tts_speed
-        cls._ack_timeout = cfg_ack_timeout
-        cls._response_timeout = cfg_response_timeout
-        cls._rule_prompt = cfg_rule_prompt
-        cls._rule_prompt_for_skill = cfg_rule_prompt_for_skill
+        cls._ack_timeout = config.get("ack_timeout", 30)
 
-        cls._url = cfg_url
-        cls._token = cfg_token
-        cls._session_key = cfg_session
-        cls._identity_path = cls._resolve_identity_path(cfg_identity_path)
-
-        if cls._enabled:
-            logger.info(f"[OpenClaw] Enabled, will connect to {cls._url}")
-            logger.info(f"[OpenClaw] Device identity path: {cls._identity_path}")
         should_reconnect = cls._connected and (
             previous_url != cls._url
             or previous_token != cls._token
@@ -201,22 +139,9 @@ class OpenClawManager:
                 logger.warning(f"[OpenClaw] Failed to reconnect after config reload: {exc}")
 
     @classmethod
-    def initialize(cls, enabled: bool | None = None):
-        """Deprecated: Use initialize_from_config instead."""
-        cls.initialize_from_config(enabled=enabled)
-
-    @classmethod
-    def set_session_key(cls, session_key: str):
-        """Override the session key at runtime.
-
-        This takes effect immediately for the next message sent.
-        It does NOT trigger a reconnect — the WebSocket connection is session-agnostic.
-
-        Args:
-            session_key: New session key to use (e.g. "agent:user123:my-app").
-        """
-        logger.info(f"[OpenClaw] Session key updated: {cls._session_key!r} → {session_key!r}")
-        cls._session_key = session_key
+    def _log_enabled(cls):
+        logger.info(f"[OpenClaw] Enabled, will connect to {cls._url}")
+        logger.info(f"[OpenClaw] Device identity path: {cls._identity_path}")
 
     @classmethod
     def get_tts_speaker_for_session_key(cls, session_key: str | None = None) -> str | None:
@@ -238,16 +163,6 @@ class OpenClawManager:
                     return agent_match
 
         return cls._tts_speaker
-
-    @classmethod
-    def _base64url_encode(cls, raw: bytes) -> str:
-        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-    @classmethod
-    def _normalize_metadata_for_auth(cls, value: Optional[str]) -> str:
-        if not isinstance(value, str):
-            return ""
-        return value.strip().lower()
 
     @classmethod
     def _resolve_identity_path(cls, configured_path: Optional[str]) -> str:
@@ -313,6 +228,16 @@ class OpenClawManager:
         except Exception:
             pass
         return stored
+
+    @classmethod
+    def _base64url_encode(cls, raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    @classmethod
+    def _normalize_metadata_for_auth(cls, value: Optional[str]) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value.strip().lower()
 
     @classmethod
     def _build_device_signature(cls, *, token: str, nonce: str, scopes: list[str], client: dict) -> dict:
@@ -491,65 +416,13 @@ class OpenClawManager:
             cls._websocket = None
 
     @classmethod
-    async def send(cls, text: str, wait_response: bool = False) -> str | None:
-        """Send a message to OpenClaw.
+    def is_connected(cls) -> bool:
+        """Check if connected to OpenClaw."""
+        return cls._connected and cls._websocket is not None
 
-        Args:
-            text: The message text to send.
-            wait_response: If True, block until the agent's full reply arrives.
-
-        Returns:
-            - wait_response=False: run_id (str) on success, None on failure.
-            - wait_response=True:  response text (str) on success, None on failure/timeout.
-        """
-        run_id = await cls._send_and_track(text)
-        if run_id is None:
-            return None
-
-        if not wait_response:
-            # Fire-and-forget: clean up tracking dicts to prevent leak
-            cls._response_events.pop(run_id, None)
-            cls._response_texts.pop(run_id, None)
-            cls._response_tts_speakers.pop(run_id, None)
-            return run_id
-
-        try:
-            return await cls._wait_response(run_id)
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def send_and_play_reply(cls, text: str, wait_response: bool = False) -> str | None:
-        """Send a message to OpenClaw, then play the reply via TTS.
-
-        Args:
-            text: The message text to send.
-            wait_response: If True, block until TTS playback finishes and return
-                          the response text.  If False, play in the background
-                          and return the run_id immediately.
-
-        Returns:
-            Same as send(): run_id or response text on success, None on failure.
-        """
-        run_id = await cls._send_and_track(text)
-        if run_id is None:
-            return None
-
-        if not wait_response:
-            asyncio.create_task(cls._wait_and_play_response(run_id))
-            return run_id
-
-        try:
-            response_text = await cls._wait_response(run_id)
-            if response_text:
-                tts_speaker = cls._response_tts_speakers.get(run_id)
-                await cls._play_response_with_tts(
-                    response_text,
-                    tts_speaker=tts_speaker,
-                )
-            return response_text
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
+    # send / send_and_play_reply 直接继承基类：OpenClaw 的回复经 WS 事件由
+    # 接收循环 resolve 记账 Future，基类的 _wait_response/_discard_response
+    # 对该模型同样成立（fire-and-forget 挂后台等待收尾，事件路径照样派发）。
 
     # -- internal helpers --------------------------------------------------
 
@@ -563,7 +436,7 @@ class OpenClawManager:
             cls.initialize_from_config()
 
         if not cls._enabled:
-            logger.warning("[OpenClaw] send called but OpenClaw is disabled")
+            logger.warning("[OpenClaw] send called but backend is disabled")
             return None
 
         if not cls._connected:
@@ -574,14 +447,11 @@ class OpenClawManager:
         try:
             idem = str(uuid.uuid4())
             logger.user_speech(text, module=f"OpenClaw({cls._session_key})")
+            # TurnTrace：WS 后端同样接入延迟埋点（无本地完成任务的模板路径，
+            # 起点在此手工挂；终点在 _on_response_finalized / 失败分支）。
+            turn_trace.mark_llm_start()
 
-            loop = asyncio.get_running_loop()
-            response_waiter = loop.create_future()
-            cls._response_events[idem] = response_waiter
-            cls._response_texts[idem] = ""
-            cls._response_tts_speakers[idem] = cls.get_tts_speaker_for_session_key(
-                cls._session_key
-            )
+            cls._open_run(idem, cls.get_tts_speaker_for_session_key(cls._session_key))
             logger.debug(f"[OpenClaw] Tracking idem={idem}")
 
             request_params = {
@@ -605,11 +475,9 @@ class OpenClawManager:
                     err = (res.get("error") or {}).get("message") if isinstance(res, dict) else "agent request rejected"
                     cls.last_error = err or "agent request rejected"
                     logger.error(f"[OpenClaw] Agent request rejected: req_id={req_id}, idem={idem}, error={cls.last_error}")
-                    waiter = cls._response_events.pop(idem, None)
-                    cls._response_texts.pop(idem, None)
-                    cls._response_tts_speakers.pop(idem, None)
-                    if waiter and not waiter.done():
-                        waiter.get_loop().call_soon_threadsafe(waiter.set_result, None)
+                    cls._drop_tracked_run(idem)
+                    turn_trace.note_llm_error()
+                    turn_trace.mark_llm_end()
                     return None
 
                 final_run_id = run_id or idem
@@ -626,9 +494,9 @@ class OpenClawManager:
                 return final_run_id
             except asyncio.TimeoutError:
                 logger.warning(f"[OpenClaw] Agent ack timeout: req_id={req_id}, idem={idem}, timeout={cls._ack_timeout}s")
-                cls._response_events.pop(idem, None)
-                cls._response_texts.pop(idem, None)
-                cls._response_tts_speakers.pop(idem, None)
+                cls._drop_tracked_run(idem)
+                turn_trace.note_llm_error()
+                turn_trace.mark_llm_end()
                 return None
             finally:
                 cls._pending.pop(req_id, None)
@@ -636,28 +504,24 @@ class OpenClawManager:
             import traceback
             logger.error(f"[OpenClaw] Failed to send message: {type(e).__name__}: {e}")
             logger.debug(f"[OpenClaw] Send message traceback: {traceback.format_exc()}")
+            turn_trace.note_llm_error()
+            turn_trace.mark_llm_end()
             return None
 
     @classmethod
-    async def _wait_response(cls, run_id: str) -> str | None:
-        """Wait for agent response text by run_id.
+    def _drop_tracked_run(cls, run_id: str):
+        """清掉一次 run 的记账三元组，并安全唤醒其等待者。"""
+        waiter = cls._response_events.pop(run_id, None)
+        cls._response_texts.pop(run_id, None)
+        cls._response_tts_speakers.pop(run_id, None)
+        if waiter and not waiter.done():
+            waiter.get_loop().call_soon_threadsafe(waiter.set_result, None)
 
-        Returns the response text, or None on timeout.
-        """
-        event = cls._response_events.get(run_id)
-        if not event:
-            logger.warning(f"[OpenClaw] No event found for run {run_id}")
-            return None
-
-        try:
-            await asyncio.wait_for(event, timeout=cls._response_timeout)
-            return cls._response_texts.pop(run_id, "") or None
-        except asyncio.TimeoutError:
-            logger.warning(f"[OpenClaw] Timeout waiting for response (runId: {run_id})")
-            return None
-        finally:
-            cls._response_events.pop(run_id, None)
-            cls._response_texts.pop(run_id, None)
+    @classmethod
+    def _on_response_finalized(cls, run_id: str):
+        """TurnTrace：WS 后端的 LLM 段在响应定稿（守卫内单次）收口。"""
+        turn_trace.note_reply_chars(len(cls._response_texts.get(run_id, "")))
+        turn_trace.mark_llm_end()
 
     @classmethod
     async def _request(cls, method: str, params=None, timeout: float = 30):
@@ -853,27 +717,6 @@ class OpenClawManager:
             cls._trigger_reconnect()
 
     @classmethod
-    def is_connected(cls) -> bool:
-        """Check if connected to OpenClaw."""
-        return cls._connected and cls._websocket is not None
-
-    @classmethod
-    def is_enabled(cls) -> bool:
-        """Check if OpenClaw is enabled."""
-        if not cls._initialized:
-            cls.initialize_from_config()
-        return cls._enabled
-
-    @classmethod
-    def _signal_response_ready(cls, run_id: str):
-        """Mark response waiter as ready in a thread-safe way."""
-        waiter = cls._response_events.get(run_id)
-        if not waiter or waiter.done():
-            return
-        fut_loop = waiter.get_loop()
-        fut_loop.call_soon_threadsafe(waiter.set_result, None)
-
-    @classmethod
     async def _handle_agent_event(cls, event_data: dict):
         """Handle agent events to extract response text for TTS playback."""
         try:
@@ -964,26 +807,6 @@ class OpenClawManager:
             logger.error(f"[OpenClaw] Error waiting/playing response: {e}")
         finally:
             cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def _play_response_with_tts(
-        cls,
-        text: str,
-        tts_speaker: str | None = None,
-        playback_token: int | None = None,
-    ):
-        """Synthesize text using the configured provider and play it."""
-        from core.services.tts.router import TTSRouter
-
-        resolved_tts_speaker = tts_speaker or cls.get_tts_speaker_for_session_key()
-        await TTSRouter.play(
-            text,
-            configured_provider=cls._tts_provider,
-            tts_speaker=resolved_tts_speaker,
-            tts_speed=cls._tts_speed,
-            playback_token=playback_token,
-            log_prefix="OpenClaw",
-        )
 
 
 # No auto-initialization - call OpenClawManager.initialize_from_config() explicitly

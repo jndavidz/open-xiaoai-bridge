@@ -220,8 +220,13 @@ class BackendManagerBase:
         waiter = cls._response_events.get(run_id)
         if not waiter or waiter.done():
             return
+        cls._on_response_finalized(run_id)
         fut_loop = waiter.get_loop()
         fut_loop.call_soon_threadsafe(waiter.set_result, None)
+
+    @classmethod
+    def _on_response_finalized(cls, run_id: str):
+        """钩子：响应定稿即将唤醒等待者（守卫内，单次）；子类可在此记埋点。"""
 
     # —— send 与 send-and-play 双入口 --------------------------------------
 
@@ -231,10 +236,18 @@ class BackendManagerBase:
         if run_id is None:
             return None
         if not wait_response:
-            asyncio.create_task(cls._wait_response(run_id))
+            asyncio.create_task(cls._discard_response(run_id))
             return run_id
         try:
             return await cls._wait_response(run_id)
+        finally:
+            cls._response_tts_speakers.pop(run_id, None)
+
+    @classmethod
+    async def _discard_response(cls, run_id: str):
+        """fire-and-forget：等传输核自然收尾并清光记账（含音色槽）。"""
+        try:
+            await cls._wait_response(run_id)
         finally:
             cls._response_tts_speakers.pop(run_id, None)
 
