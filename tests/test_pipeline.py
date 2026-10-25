@@ -121,6 +121,7 @@ class FakeBackend:
 
     _play_response_with_tts 模拟真实链路（backend_base → TTSRouter.play）的
     TurnTrace 行为：TTS 段埋点 + Rust 通道收尾，与生产口径一致。
+    stream_response_segments 模拟基类默认「单句序列」退化（ticket 03）。
     """
 
     _rule_prompt = ""
@@ -153,6 +154,13 @@ class FakeBackend:
         turn_trace.note_reply_chars(len(self.response))
         self.sent.append(text)
         return self.response
+
+    async def stream_response_segments(self, text: str):
+        if self.cancel_before_send:
+            self.cancel_before_send()
+        response = await self.send(text, wait_response=True)
+        if response:
+            yield response
 
     def get_tts_speaker_for_session_key(self, session_key=None):
         return None
@@ -457,6 +465,38 @@ class LocalAsrTurnTest(ConversationLoopTestBase):
 
 
 class XiaoaiAsrTurnTest(ConversationLoopTestBase):
+    async def test_multi_segment_stream_is_joined_for_playback(self):
+        """流式多段消费（ticket 03）：句段逐段过检查点，播放文本 = 段拼接
+        （TTS 逐句起播属 ticket 04；本票行为等价 = 整段播）。"""
+
+        class MultiSegmentBackend(FakeBackend):
+            async def stream_response_segments(self, text: str):
+                for segment in ("第一句话了。", "第二句话了。"):
+                    yield segment
+
+        backend = MultiSegmentBackend()
+        self.backend = backend
+        self.controller = _make_controller(backend)
+        with mock.patch.object(
+            self.controller, "uses_xiaoai_asr", return_value=True
+        ):
+            task = self._start_loop()
+            ok = await _wait_until(
+                lambda: ("wake_up", True, True) in self.speaker.calls
+            )
+            self.assertTrue(ok, "loop did not trigger native listening")
+            self.assertTrue(
+                self.controller.consume_xiaoai_recognize_result(
+                    "d1", "讲个故事", True, False
+                )
+            )
+            ok = await _wait_until(lambda: len(backend.played) == 1)
+            self.assertTrue(ok)
+            self.assertEqual(("第一句话了。第二句话了。", 7), backend.played[0])
+            self.controller.stop()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=3)
+
     async def test_final_result_flows_and_cancel_swallows_next_final(self):
         with mock.patch.object(
             self.controller, "uses_xiaoai_asr", return_value=True

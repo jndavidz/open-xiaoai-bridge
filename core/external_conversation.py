@@ -28,6 +28,7 @@ from core.utils.pipeline import (
     CHECKPOINT_ASR_FINAL,
     CHECKPOINT_PLAYBACK,
     CHECKPOINT_PRE_LLM,
+    CHECKPOINT_STREAM_SEGMENT,
     PipelineState,
     TurnCancelledError,
 )
@@ -303,16 +304,19 @@ class ExternalConversationController:
         # 检查点②（LLM 请求前）+ 管线态 → processing
         self._enter_processing()
 
-        # 4. Send to backend and wait for response
+        # 4. Send to backend and consume the response as a segment sequence
+        #    (P1 ticket 03): streaming backends yield sentence segments as they
+        #    arrive; non-streaming backends degrade to a single-segment
+        #    sequence via the base class — same consumption path either way.
+        #    「咻」与非流式时序相当：收集任务先行调度，提示音播放让出
+        #    控制权后请求即上路（等价于旧 _send_and_track 的先发后播）。
         full_text = text
         if self.backend._rule_prompt:
             full_text = text + "\n" + self.backend._rule_prompt
-        # 先发出请求（不阻塞等回复），立即播"咻"给用户即时反馈，再等回复
-        # 注意：直接用 _send_and_track 而非 send(wait_response=False)，
-        # 后者会立即清掉 Future，导致后续 _wait_response 拿不到回复
-        run_id = await self.backend._send_and_track(full_text)
+        collect = asyncio.ensure_future(self._collect_segments(full_text))
         await self._play_send_sound()
-        response = await self.backend._wait_response(run_id) if run_id else None
+        segments = await collect
+        response = "".join(segments) or None
         if response is None:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
             speaker = get_speaker()
@@ -359,7 +363,8 @@ class ExternalConversationController:
         full_text = text
         if self.backend._rule_prompt:
             full_text = text + "\n" + self.backend._rule_prompt
-        response = await self.backend.send(full_text, wait_response=True)
+        segments = await self._collect_segments(full_text)
+        response = "".join(segments) or None
         if response is None:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
             speaker = get_speaker()
@@ -381,6 +386,23 @@ class ExternalConversationController:
         turn = self._pipeline_turn
         if turn is not None:
             turn.checkpoint(name)
+
+    async def _collect_segments(self, text: str) -> list[str]:
+        """消费句段序列（P1 ticket 03 统一消费路径）。
+
+        流式后端逐段到达、每个句段过检查点（取消即关流静默退出）；
+        非流式后端经基类退化为单句序列，行为与改前一致。
+        显式 aclose：取消路径下关闭上游 SSE 连接，不依赖 GC。
+        """
+        segments: list[str] = []
+        generator = self.backend.stream_response_segments(text)
+        try:
+            async for segment in generator:
+                self._checkpoint(CHECKPOINT_STREAM_SEGMENT)
+                segments.append(segment)
+        finally:
+            await generator.aclose()
+        return segments
 
     def _enter_processing(self) -> None:
         """检查点②（LLM 请求前）+ 管线态 → processing（两条 ASR 链路共用）。"""

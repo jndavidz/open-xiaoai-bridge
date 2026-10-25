@@ -48,11 +48,12 @@ class PipelineState(str, enum.Enum):
     SPEAKING = "speaking"
 
 
-# 固定检查点名（spec：ASR 定稿后 / LLM 请求前 / 播放等待内；句循环内检查点
-# 属 ticket 04，届时复用本骨架）。
+# 固定检查点名（spec：ASR 定稿后 / LLM 请求前 / 播放等待内 / 流式句循环内
+# 每个句段；句段检查点自 ticket 03 起由对话循环的句段消费路径使用）。
 CHECKPOINT_ASR_FINAL = "asr_final"
 CHECKPOINT_PRE_LLM = "pre_llm"
 CHECKPOINT_PLAYBACK = "playback"
+CHECKPOINT_STREAM_SEGMENT = "stream_segment"
 
 
 class TurnCancelledError(Exception):

@@ -63,6 +63,7 @@ open-xiaoai-bridge/
 │       ├── config_loader.py       # config.py 动态导入
 │       ├── turn_trace.py          # 每轮延迟埋点 [TurnTrace]（默认关；纯数值无 PII；P1 ticket 02 起轮次号与 pipeline 同源）
 │       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
+│       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段）
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
 ├── native/                        # Rust PyO3 扩展（maturin 编译）
@@ -557,6 +558,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 - `tools` 注入仅 **chat_completions 风格**；回环深度 `_max_tool_rounds=3`（配置项 `max_tool_rounds`），总开关 `tool_calls_enabled`（默认开）
 - ⚠ **reasoning_content 条件回传**：thinking 模式带 `tools` 时，后续每轮必须完整回传 assistant 的 `reasoning_content`（缺失直接 400）；仅当响应携带时才回传（非 thinking 模型无此字段，天然无影响）——改消息组装前先读官方 thinking_mode 文档
 - **只读边界**：当前暴露的工具全部只读；写操作工具（HA 控制/关机类）落地时必须带二次确认护栏（见工作区 selection-review §3.1）
+- **流式响应通道（P1 ticket 03）**：`stream_response_segments`（基类默认 = 非流式「单句序列」退化；OpenAI 子类在 `openai.stream` 配置开 + chat_completions 风格下走 SSE）；**工具轮探测降级**——带 tools 的流式请求首见 tool_calls 增量且未产出句段即转非流式回环（回环路径与改前逐字一致），模型不调工具的终答轮流式到底；已产出句段后到达的 tool_calls 增量丢弃（按纯文本终答，WARNING）；上游异常吞错降级不杀会话（与非流式同口径，仅完整回复入历史）；开关默认关，面板 `openai.stream` 热切换即回退
 
 ### 音频处理链
 
@@ -817,4 +819,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**459 tests OK (skipped=3)**（2026-10-26，P2 票 01 后；443 = P1 票 02 后，本票 +16 = `tests/test_commands.py` 指令层内核化契约用例，经干净 worktree 实测口径）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**500 tests OK (skipped=3)**（2026-10-26，P1 票 03 后；459 = P2 票 01 后，本票 +41 = `test_sentence_split.py` 17 + `test_llm_stream.py` 23 + `test_pipeline.py` 多段消费 1）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

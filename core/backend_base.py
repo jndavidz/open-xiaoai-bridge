@@ -370,6 +370,26 @@ class BackendManagerBase:
             log_prefix=cls.LOG_MODULE,
         )
 
+    # —— 流式响应通道（P1 ticket 03） --------------------------------------
+
+    @classmethod
+    def stream_enabled(cls) -> bool:
+        """流式开关（per-provider，默认关）。子类按配置与接口规格覆写。"""
+        return False
+
+    @classmethod
+    async def stream_response_segments(cls, text: str):
+        """流式响应通道：产出回复句段（async generator，P1 ticket 03）。
+
+        默认实现 = 非流式退化「单句序列」：整段回复作为单个句段产出——
+        非流式后端（openai_responses / anthropic_messages / OpenClaw /
+        QwenPaw）与流式后端共用对话控制器的同一消费路径。
+        支持流式的子类（OpenAI chat_completions + stream 开）覆写为真流式。
+        """
+        response = await cls.send(text, wait_response=True)
+        if response:
+            yield response
+
     # —— 传输核模板 --------------------------------------------------------
 
     @classmethod

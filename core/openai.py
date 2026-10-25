@@ -15,17 +15,55 @@ including Hermes Agent API server mode.
 core.backend_base.BackendManagerBase；本模块只保留传输核。
 """
 
+import json
 from typing import Any
 
 import aiohttp
 
 from core.backend_base import BackendManagerBase
 from core.tools.registry import get_all_tools, execute_tool
+from core.utils import turn_trace
 from core.utils.logger import logger
+from core.utils.sentence_split import SentenceSegmenter
 
 
 # 支持的接口规格（与 admin_api.CONFIG_SCHEMA 的 options 保持一致）
 API_STYLES = ("chat_completions", "openai_responses", "anthropic_messages")
+
+# SSE 流结束哨兵（data: [DONE]）
+_SSE_DONE = object()
+
+
+class _ToolLoopDetected(Exception):
+    """流式探测轮检测到 tool_calls 增量：放弃流式，整轮转非流式回环。"""
+
+
+def parse_sse_line(line: str) -> Any:
+    """解析一行 SSE 文本：data JSON → dict；data [DONE] → _SSE_DONE；其余 → None。
+
+    空行、注释（: keep-alive）、非 data 前缀、坏 JSON 一律返回 None
+    （跳过，不中断流）——与上游 SSE 兼容实现的容错口径一致。
+    """
+    text = line.strip()
+    if not text.startswith("data:"):
+        return None
+    payload = text[len("data:") :].strip()
+    if payload == "[DONE]":
+        return _SSE_DONE
+    try:
+        parsed = json.loads(payload)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _delta_has_tool_calls(event: dict) -> bool:
+    """SSE 事件是否携带 tool_calls 增量（探测降级的触发信号）。"""
+    choices = event.get("choices")
+    if not choices or not isinstance(choices[0], dict):
+        return False
+    delta = choices[0].get("delta")
+    return isinstance(delta, dict) and bool(delta.get("tool_calls"))
 
 
 class OpenAIManager(BackendManagerBase):
@@ -57,6 +95,8 @@ class OpenAIManager(BackendManagerBase):
     # 工具层（Agent 1.5 / 阶段 1.5）：function calling 回环开关与轮数上限
     _tool_calls_enabled = True
     _max_tool_rounds = 3
+    # 流式开关（P1 ticket 03）：per-provider 配置 openai.stream，默认关
+    _stream_enabled = False
     _sessions: dict[str, list[dict[str, str]]] = {}
 
     @classmethod
@@ -89,6 +129,8 @@ class OpenAIManager(BackendManagerBase):
         # 工具层（Agent 1.5）：默认开启；max_tool_rounds 限制 tool_calls 回环深度
         cls._tool_calls_enabled = bool(config.get("tool_calls_enabled", True))
         cls._max_tool_rounds = max(1, int(config.get("max_tool_rounds", 3)))
+        # 流式开关（P1 ticket 03）：默认关；热重载即生效（灰度回退 = 面板/配置一键关）
+        cls._stream_enabled = bool(config.get("stream", False))
 
     @classmethod
     def _log_enabled(cls):
@@ -137,6 +179,16 @@ class OpenAIManager(BackendManagerBase):
                 return body
 
     @classmethod
+    def _tools_active(cls) -> bool:
+        """工具回环三开关（AGENTS.md 排障判据）：总开关 × chat_completions
+        风格 × 注册表非空——缺一即回退纯对话。流式降级与传输核共用此判定。"""
+        return (
+            cls._tool_calls_enabled
+            and cls._api_style == "chat_completions"
+            and bool(get_all_tools())
+        )
+
+    @classmethod
     async def _request_completion(
         cls, text: str, stats: dict[str, int] | None = None
     ) -> str | None:
@@ -146,11 +198,7 @@ class OpenAIManager(BackendManagerBase):
 
         # 工具层（Agent 1.5 / 阶段 1.5）：仅 chat_completions 风格注入 tools。
         # 其它 api_style（anthropic/responses）本期不接工具，纯对话回退。
-        use_tools = (
-            cls._tool_calls_enabled
-            and cls._api_style == "chat_completions"
-            and bool(get_all_tools())
-        )
+        use_tools = cls._tools_active()
         tools = get_all_tools() if use_tools else None
 
         for _ in range(cls._max_tool_rounds + 1):
@@ -225,6 +273,148 @@ class OpenAIManager(BackendManagerBase):
 
         logger.warning("[OpenAI] tool rounds exceeded max_tool_rounds, no final text returned")
         return None
+
+    # —— 流式响应通道（P1 ticket 03：仅 chat_completions + 开关开） ----------
+
+    @classmethod
+    def stream_enabled(cls) -> bool:
+        """流式开关：仅 chat_completions 风格生效（其余两种风格明确降级非流式）。"""
+        return cls._stream_enabled and cls._api_style == "chat_completions"
+
+    @classmethod
+    async def stream_response_segments(cls, text: str):
+        """SSE 流式增量组装 → 句段序列（对话控制器统一消费路径）。
+
+        降级面（全部走基类「单句序列」，行为与改前一致）：
+          - 开关关（默认）/ 接口规格非 chat_completions；
+          - 工具回环轮：带 tools 的请求以「探测式流式」发起——首个
+            tool_calls 增量到达且尚未产出句段时，放弃流式、整轮转
+            非流式（既有 _request_completion 回环路径原样复用，
+            reasoning 回传守卫语义不变）；模型不调工具的轮次（终答轮）
+            流式到底。探测降级的代价是回环轮多一次被放弃的请求。
+        """
+        if not cls.stream_enabled():
+            async for segment in super().stream_response_segments(text):
+                yield segment
+            return
+
+        tools = get_all_tools() if cls._tools_active() else None
+        logger.user_speech(text, module=f"{cls.LOG_MODULE}({cls._session_key})")
+        turn_trace.mark_llm_start()
+        try:
+            generator = cls._stream_chat_completions_segments(
+                text,
+                tools=tools,
+                tool_probe=tools is not None,
+            )
+            try:
+                async for segment in generator:
+                    yield segment
+                return
+            except _ToolLoopDetected:
+                pass  # 回环轮：未产出任何段，整轮转非流式
+            async for segment in super().stream_response_segments(text):
+                yield segment
+        finally:
+            turn_trace.mark_llm_end()
+
+    @classmethod
+    async def _stream_chat_completions_segments(
+        cls,
+        text: str,
+        *,
+        tools: list | None = None,
+        tool_probe: bool = False,
+    ):
+        """chat_completions SSE 流式传输核：增量文本组装 + 句读切分。
+
+        tool_probe：带 tools 的轮次探测降级——首个 tool_calls 增量到达且
+        尚未产出句段时抛 _ToolLoopDetected（外层转非流式回环）；已产出
+        句段后到达的 tool_calls 增量被丢弃（该轮按纯文本终答，记 WARNING）。
+        """
+        session_key = cls._session_key
+        history = cls._sessions.setdefault(session_key, [])
+        messages = cls._build_messages(history, text)
+        url, payload, headers = cls._build_chat_completions_request(messages)
+        payload["stream"] = True  # 覆盖 extra_body 里的显式 stream，以开关为准
+        if tools is not None:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        segmenter = SentenceSegmenter()
+        full_parts: list[str] = []
+        completed = False
+        yielded = False
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=cls._response_timeout)
+            ) as session:
+                async with session.post(url, json=payload, headers=headers) as response:
+                    if response.status >= 400:
+                        body = await response.json(content_type=None)
+                        message = body.get("error", body) if isinstance(body, dict) else body
+                        raise RuntimeError(f"HTTP {response.status}: {message}")
+                    async for raw_line in response.content:
+                        event = parse_sse_line(raw_line.decode("utf-8", "replace"))
+                        if event is _SSE_DONE:
+                            break  # 上游结束标记：迟到的后续行不再消费
+                        if event is None:
+                            continue  # 空行 / 注释 / 坏 JSON 行：跳过
+                        if _delta_has_tool_calls(event):
+                            if tool_probe and not yielded:
+                                raise _ToolLoopDetected(text)
+                            logger.warning(
+                                "[OpenAI] tool_calls delta after streamed segments; "
+                                "dropped (streamed turn stays text-only)"
+                            )
+                            continue
+                        delta_text = cls._extract_delta_content(event)
+                        if not delta_text:
+                            continue  # 空 delta / role 帧 / reasoning 帧
+                        full_parts.append(delta_text)
+                        for segment in segmenter.feed(delta_text):
+                            yielded = True
+                            yield segment
+            tail = segmenter.flush()
+            if tail:
+                yielded = True
+                yield tail
+            completed = True  # 流自然结束（迭代器耗尽）= 正常完成
+        except _ToolLoopDetected:
+            raise
+        except Exception as exc:
+            # 与非流式 _request_completion 同口径：上游异常不杀会话——
+            # 已产出句段保留、本轮按已有内容收尾（零段则上层走「没有收到
+            # 回复」降级播报并继续听）。灰度回退的前提是流式故障可容忍。
+            cls.last_error = f"{type(exc).__name__}: {exc}"
+            turn_trace.note_llm_error()
+            logger.error(f"[OpenAI] stream request failed: {cls.last_error}")
+        finally:
+            # 与非流式口径一致：只有完整回复入会话历史——异常中断的半截
+            # 回答不入（turn_trace 照记，便于排障）。
+            full_text = "".join(full_parts)
+            if completed and full_text:
+                cls._append_history(history, text, full_text)
+                turn_trace.note_reply_chars(len(full_text))
+                logger.ai_response(
+                    full_text, module=f"{cls.LOG_MODULE}({cls._session_key})"
+                )
+
+    @staticmethod
+    def _extract_delta_content(event: dict) -> str:
+        """从 SSE 事件取增量文本（choices[0].delta.content）。
+
+        只组 content：reasoning_content（thinking 模型）与 tool_calls 帧
+        不进终答文本——流式轮是终答轮，无后续回环，无需回传。
+        """
+        choices = event.get("choices")
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        delta = choices[0].get("delta")
+        if not isinstance(delta, dict):
+            return ""
+        content = delta.get("content")
+        return content if isinstance(content, str) else ""
 
     @classmethod
     def _build_chat_completions_request(cls, messages: list[dict[str, str]]):

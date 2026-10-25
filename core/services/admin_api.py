@@ -57,6 +57,12 @@ CONFIG_SCHEMA: list[dict[str, Any]] = [
                 "type": "int",
                 "help": "对话请求的总超时；测速与预检另有各自更短的超时，互不影响",
             },
+            {
+                "path": "openai.stream",
+                "label": "流式响应（SSE）",
+                "type": "bool",
+                "help": "仅 chat_completions 规格生效；保存即热生效。上游流式接口异常时关掉即可回退非流式",
+            },
         ],
     },
     {
