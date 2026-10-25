@@ -683,7 +683,7 @@ python3 tests/test_admin_panel.py
 > **默认阻塞播报已不走此脚本**（ticket 03）：优先 `text_to_speech {save:1,play:0}` 落盘 →
 > `player_play_url file://<path>` → 回读 `player_get_context.info.status` 到空闲 →
 > `rm -f /tmp/tts/<path>` 清理。`tts_play.sh` 仅在合成失败时兜底；
-> 两条路径都**不得用脚本退出码判成败**（成功时 rc 也可能是 1）。
+> 兜底路径的成败判据已登记进能力表（P0 ticket 01）：rc∈{0,1}（成功时 rc 也可能是 1）+ stderr 出现 `Failed to parse` 判失败，业务层只读结构化 `ok`。
 
 `/usr/sbin/tts_play.sh` 是设备上的阻塞 TTS 脚本，内部流程：
 1. `mphelper pause` — 暂停当前播放

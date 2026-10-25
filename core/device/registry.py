@@ -39,6 +39,7 @@ class SuccessCriterion(str, Enum):
     JSON_PARSED = "json_parsed"  # 解析 stdout 为 JSON 对象即可（无 code 外层）
     JSON_FIELD = "json_field"  # 解析后必须存在指定字段
     EXIT_CODE = "exit_code"  # 成功时无响应体 / 非 JSON ⇒ 只看退出码
+    EXIT_CODE_IN = "exit_code_in"  # 退出码在 expectation 列出的集合内（成功码不止一个）
     STDOUT_CONTAINS = "stdout_contains"  # 多行输出 / 纯文本结果
     READBACK = "readback"  # 写操作：只以回读判定，返回码不构成失败判据
 
@@ -315,17 +316,19 @@ CAPABILITIES: dict[str, CapabilitySpec] = {
         name="play_text_blocking",
         method="shell:tts_play.sh <text>",
         params=(_p("text", "str", True, "TTS 文本"),),
-        success=SuccessCriterion.EXIT_CODE,
+        success=SuccessCriterion.EXIT_CODE_IN,
         group=CapabilityGroup.ACTION,
         readback=None,
         timeout_ms=_BLOCKING_PLAY_TIMEOUT_MS,
         blocking=True,
         idempotent=False,
-        description="阻塞 TTS 播报兜底（原厂 tts_play.sh；成功时 rc 也可能是 1）",
+        expectation="0,1",
+        description="阻塞 TTS 播报兜底（原厂 tts_play.sh）",
         notes=(
             "兜底路径：仅在合成落盘失败时使用，默认路径是合成落盘 + player_play_url",
             "参数必须先 JSON 转义、再 shell 转义（tts_play.sh 会把 $1 直接插进 JSON）",
-            "不得用退出码判成败（成功时 rc 也可能是 1）",
+            "设备真值：tts_play.sh 成功时 rc 也可能是 1 ⇒ 判据是 rc∈{0,1}；"
+            "stderr 出现 'Failed to parse' 是明确的失败（client 侧叠加判定）",
         ),
     ),
     "tts_speak": CapabilitySpec(

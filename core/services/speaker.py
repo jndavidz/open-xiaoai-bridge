@@ -60,7 +60,8 @@ class SpeakerManager:
     """音箱硬件控制外观。
 
     所有设备命令都经 `core.device` 能力层发出（ticket 02），本类只做多步编排
-    与对外方法签名；判据（合成落盘 / 回读 / 音量 / 麦语义）按设备真值（ticket 03）。
+    与对外方法签名；判据（合成落盘 / 回读 / 音量 / 麦语义）按设备真值（ticket 03），
+    且只读能力层结构化结果（ok / readback）——业务层不做 stdout 字符串判据（ticket 01）。
     """
 
     status: Literal["playing", "paused", "idle"] = "idle"
@@ -75,12 +76,11 @@ class SpeakerManager:
     async def get_playing(self, sync=False):
         """获取播放状态"""
         if sync:
-            # 同步远端最新状态
+            # 同步远端最新状态（能力层 readback：playing/paused/None）
             res = await self.device.playback_status()
-            if "1" in res.stdout:
-                self.status = "playing"
-            elif "2" in res.stdout:
-                self.status = "paused"
+            status = (res.readback or {}).get("status")
+            if status in ("playing", "paused"):
+                self.status = status
         return self.status
 
     async def set_playing(self, playing=True):
@@ -89,7 +89,7 @@ class SpeakerManager:
             res = await self.device.playback_resume()
         else:
             res = await self.device.pause()
-        return '"code": 0' in res.stdout
+        return bool(res.ok)
 
     async def play(
         self,
@@ -123,15 +123,16 @@ class SpeakerManager:
         if blocking:
             if url:
                 res = await self.device.play_url_blocking(url, timeout_ms=timeout)
-                # 阻塞 URL 播放器的退出码是可靠判据（与设备 TTS 脚本不同）。
-                return res.request is not None and res.request.exit_code == 0
+                # 阻塞 URL 播放器的退出码是可靠判据（与设备 TTS 脚本不同，
+                # 登记为 EXIT_CODE）；判据统一读能力层结构化 ok（ticket 01）。
+                return bool(res.ok)
             return await self._play_text_blocking(text, timeout)
 
         if url:
             res = await self.device.play_url(url, timeout_ms=timeout)
         else:
             res = await self.device.tts_speak(text, timeout_ms=timeout)
-        return '"code": 0' in res.stdout
+        return bool(res.ok)
 
     async def _play_text_blocking(self, text, timeout_ms) -> bool:
         """阻塞播报：合成落盘 → 设备本地播放 → 回读空闲 → 清理临时文件。
@@ -175,22 +176,15 @@ class SpeakerManager:
             await self._cleanup_tts_file(path)
 
     async def _play_text_via_script(self, text, timeout_ms) -> bool:
-        """兜底路径：设备阻塞 TTS 脚本。判据仍是回读，不是退出码。"""
+        """兜底路径：设备阻塞 TTS 脚本。判据由能力层登记（EXIT_CODE_IN +
+        stderr 解析错误检查），业务层只读结构化 `ok`。"""
 
         res = await self.device.play_text_blocking(text, timeout_ms=timeout_ms)
-        if res.exception is not None or res.request is None:
-            logger.warning(
-                f"[Speaker] device script fallback failed: {res.error or res.exception}"
-            )
-            return False
-        # 该脚本成功也返 1 ⇒ 不能用 rc==0 判成功；但 rc 既不是 0/1、
-        # 或出现已知 JSON 解析错误时，是明确的失败，不能按成功算。
-        if res.request.exit_code not in (0, 1) or "Failed to parse" in (
-            res.stderr or ""
-        ):
+        if not res.ok:
             logger.warning(
                 f"[Speaker] device script fallback rejected "
-                f"(rc={res.request.exit_code}, stderr={res.stderr.strip()!r})"
+                f"(rc={res.exit_code}, error={res.error}, "
+                f"stderr={res.stderr.strip()!r})"
             )
             return False
         return await self._wait_playback_done(text, timeout_ms)
@@ -284,7 +278,7 @@ class SpeakerManager:
             res = await self.device.wake(silent=silent)
         else:
             res = await self.device.sleep()
-        return '"code": 0' in res.stdout
+        return bool(res.ok)
 
     async def ask_xiaoai(self, text: str, silent=False):
         """
@@ -295,7 +289,7 @@ class SpeakerManager:
             silent: 是否静默执行
         """
         res = await self.device.ask_xiaoai(text, silent=silent)
-        return '"code": 0' in res.stdout
+        return bool(res.ok)
 
     async def abort_xiaoai(self):
         """
@@ -304,7 +298,7 @@ class SpeakerManager:
         注意：重启需要大约 1-2s 的时间，在此期间无法使用小爱音箱自带的 TTS 服务
         """
         res = await self.device.restart_xiaoai_service()
-        return res.request is not None and res.request.exit_code == 0
+        return bool(res.ok)
 
     async def get_boot(self):
         """获取启动分区"""
@@ -312,9 +306,9 @@ class SpeakerManager:
         return res.stdout.strip()
 
     async def set_boot(self, boot_part: Literal["boot0", "boot1"]):
-        """设置启动分区"""
+        """设置启动分区（成败以能力层 fw_env -g 回读为准）。"""
         res = await self.device.boot_partition_set(boot_part)
-        return boot_part in res.stdout
+        return bool(res.ok)
 
     async def get_device(self):
         """获取设备型号、序列号信息"""
@@ -326,9 +320,10 @@ class SpeakerManager:
         }
 
     async def get_mic(self):
-        """获取麦克风状态"""
+        """获取麦克风状态（能力层 readback；读不到按 off 语义返回）。"""
         res = await self.device.mic_get()
-        return "on" if "on" in res.stdout else "off"
+        mic = (res.readback or {}).get("mic")
+        return mic if mic in ("on", "off") else "off"
 
     async def set_mic(self, on=True):
         """打开/关闭麦克风（on=True ⇒ 开麦）。
@@ -352,7 +347,8 @@ class SpeakerManager:
     async def _read_mic_state(self) -> str | None:
         """读麦态快照：`"on"` / `"off"`；读取失败返回 `None`。
 
-        与 `get_mic()` 走同一条 `mic_get` 通道，但把「读不到」与「off」区分开，
+        与 `get_mic()` 走同一条 `mic_get` 通道，但把「读不到」与「off」区分开
+        （能力层 readback 在设备无响应时给出 `mic: None`），
         供闸门的 fallback 判定使用（`get_mic()` 的对外语义保持不变）。
         """
         try:
@@ -360,18 +356,13 @@ class SpeakerManager:
         except Exception as e:  # noqa: BLE001 - 读不到只能降级
             logger.warning(f"[Speaker] mic snapshot read failed: {e}")
             return None
-        if res.exception is not None or res.request is None:
+        mic = (res.readback or {}).get("mic")
+        if mic not in ("on", "off"):
             logger.warning(
                 f"[Speaker] mic snapshot unreadable: {res.error or res.exception}"
             )
             return None
-        out = (res.stdout or "").strip()
-        if "on" in out:
-            return "on"
-        if "off" in out:
-            return "off"
-        logger.warning(f"[Speaker] mic snapshot unexpected output: {out!r}")
-        return None
+        return mic
 
     @staticmethod
     def _kws_listen_disabled() -> bool:

@@ -316,6 +316,33 @@ class PlaybackCapabilityTest(_Base):
         script = self.device.calls[0][0]
         self.assertTrue(script.startswith("/usr/sbin/tts_play.sh '"))
         self.assertIn("it'\\''s fine", script)
+        self.assertTrue(res.ok, "rc=1 是该脚本的成功码之一")
+
+    def test_play_text_blocking_judged_by_registered_exit_codes(self) -> None:
+        spec = registry.capability_table()["play_text_blocking"]
+        self.assertEqual(spec.success, registry.SuccessCriterion.EXIT_CODE_IN)
+        self.assertEqual(spec.expectation, "0,1")
+
+        self.device.on("tts_play.sh", "", exit_code=0)
+        self.assertTrue(_run(self.caps.play_text_blocking("你好")).ok)
+
+        self.device.reset()
+        self.device.on("tts_play.sh", "", exit_code=255)
+        res = _run(self.caps.play_text_blocking("你好"))
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error, "exit_code_unexpected")
+
+    def test_play_text_blocking_parse_error_is_explicit_failure(self) -> None:
+        # rc 在成功集合内但 stderr 有已知解析错误 ⇒ 明确失败（设备真值，registry notes）。
+        self.device.on(
+            "tts_play.sh",
+            "",
+            stderr="Failed to parse message data",
+            exit_code=1,
+        )
+        res = _run(self.caps.play_text_blocking("你好"))
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error, "script_parse_error")
 
     def test_stop_audio_stops_all_playback_channels(self) -> None:
         self.device.on("killall", '{"code": 0}')
@@ -440,7 +467,7 @@ class SpeakerFacadeTest(_Base):
         self.assertTrue(_run(self.speaker.play(url="http://nas/a.mp3", blocking=True)))
         self.assertIn("miplayer -f 'http://nas/a.mp3'", self.device.last_script)
 
-    def test_play_nonblocking_uses_code_substring_judge(self) -> None:
+    def test_play_nonblocking_judged_by_capability_result(self) -> None:
         self.device.on("player_play_url", '{"code": 0}')
         self.device.on("player_get_context", _context(status=1))
         self.assertTrue(
@@ -527,6 +554,17 @@ class SpeakerFacadeTest(_Base):
                 self.assertNotIn(
                     token, source, f"{path.relative_to(ROOT)} still contains {token!r}"
                 )
+
+    def test_speaker_layer_has_no_stdout_substring_judgement(self) -> None:
+        # 判据统一（P0 ticket 01）：SpeakerManager 的成败判定只读能力层
+        # 结构化结果（ok / readback），不允许在业务层对 stdout 找 JSON 片段
+        # 或子串判成败；设备假象知识（code:0 ≠ 生效 等）只活在能力表登记项。
+        source = (ROOT / "core" / "services" / "speaker.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('"code": 0', source)
+        self.assertNotIn("in res.stdout", source)
+        self.assertNotIn("in (res.stderr", source)
 
 
 if __name__ == "__main__":

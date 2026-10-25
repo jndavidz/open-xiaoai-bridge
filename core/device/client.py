@@ -236,6 +236,19 @@ class DeviceCapabilities:
                 return True, None
             return False, "exit_code_nonzero"
 
+        if spec.success is SuccessCriterion.EXIT_CODE_IN:
+            allowed = {
+                int(part)
+                for part in (spec.expectation or "").split(",")
+                if part.strip().lstrip("-").isdigit()
+            }
+            if not allowed:
+                # 登记项笔误要显式暴露，不能伪装成「设备退出码异常」。
+                return False, "criterion_expectation_invalid"
+            if request.exit_code in allowed:
+                return True, None
+            return False, "exit_code_unexpected"
+
         if spec.success is SuccessCriterion.STDOUT_CONTAINS:
             if spec.expectation and spec.expectation in request.stdout:
                 return True, None
@@ -310,10 +323,13 @@ class DeviceCapabilities:
     async def playback_status(self) -> CapabilityResult:
         spec = resolve_capability("playback_status")
         res = await self._invoke(spec, PLAYBACK_STATUS)
+        raw = (res.stdout or "").strip()
+        # 设备真值（mphelper mute_stat）：1=播放中 / 2=暂停；其余按「读不出」处理。
+        status = {"1": "playing", "2": "paused"}.get(raw)
         return replace(
             res,
-            readback={"status": res.stdout.strip()},
-            readback_ok=res.ok,
+            readback={"status": status, "raw": raw},
+            readback_ok=res.ok and status is not None,
         )
 
     async def service_status(self, name: str = "mediaplayer") -> CapabilityResult:
@@ -462,13 +478,21 @@ class DeviceCapabilities:
     async def play_text_blocking(
         self, text: str, timeout_ms: float = _BLOCKING_PLAY_TIMEOUT_MS
     ) -> CapabilityResult:
-        """兜底阻塞播报：先 JSON 转义、再 shell 转义（顺序不可反）。"""
+        """兜底阻塞播报：先 JSON 转义、再 shell 转义（顺序不可反）。
+
+        判据（设备真值见 registry notes）：`tts_play.sh` 成功时 rc 也可能是 1
+        （登记为 EXIT_CODE_IN），但 stderr 出现 `Failed to parse` 是明确的
+        失败——该脚本会把参数直接插进 JSON，转义破损时以解析错误退出。
+        """
 
         spec = resolve_capability("play_text_blocking")
         script = (
             f"/usr/sbin/tts_play.sh {_shell_quote(_json_string_body(text or '你好'))}"
         )
-        return await self._invoke(spec, script, timeout_ms=timeout_ms)
+        res = await self._invoke(spec, script, timeout_ms=timeout_ms)
+        if res.ok and "Failed to parse" in (res.stderr or ""):
+            return replace(res, ok=False, error="script_parse_error")
+        return res
 
     async def tts_speak(
         self, text: str, timeout_ms: float | None = None
