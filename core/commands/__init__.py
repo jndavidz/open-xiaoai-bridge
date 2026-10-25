@@ -8,9 +8,12 @@ config（数据面，热重载）只留两张指令表、KWS 词表、人设表�
   - run_steps(speaker, steps) 步骤序列执行器（str=播报 / ("ha",…)=HA / callable）
   - ha_script / ha_switch     声明式动作构造器（config 数据行用）
   - kodi_launch(speaker)      特殊动作：ADB 启动电视端 KODI
+  - audit_kws_coverage()      词表 ⊇ 指令表键对账（P2 ticket 02，WARN 不阻断）
 """
 
 from core.commands.actions import ha_script, ha_switch, kodi_launch
+from core.commands.audit import audit_kws_coverage
+from core.commands.executor import run_steps
 from core.commands.executor import run_steps
 from core.commands.hass import hass_action
 from core.commands.router import route_before_wakeup, stop_listening
@@ -23,4 +26,5 @@ __all__ = [
     "run_steps",
     "route_before_wakeup",
     "stop_listening",
+    "audit_kws_coverage",
 ]

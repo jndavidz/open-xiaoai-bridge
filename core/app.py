@@ -16,6 +16,7 @@ import time
 
 from core.xiaozhi import XiaoZhi
 from core.xiaoai import XiaoAI
+from core.commands.audit import audit_kws_coverage
 from core.ref import set_xiaozhi, set_app
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
@@ -177,6 +178,11 @@ class MainApp:
 
         self._start_config_watcher()
 
+        # 词表 ⊇ 指令表键对账（P2 ticket 02）：开机一次，此后每次热重载各一次；
+        # 只告警不阻断，缺失键见 WARN 日志。
+        self.config.add_reload_listener(self._on_config_reload_audit_kws)
+        self._on_config_reload_audit_kws()
+
         time.sleep(0.1)
 
         # Initialize XiaoAI service
@@ -280,6 +286,11 @@ class MainApp:
             daemon=True,
         )
         self.config_watch_thread.start()
+
+    @staticmethod
+    def _on_config_reload_audit_kws(*_args):
+        """词表对账（P2 ticket 02）：run() 开机直调 + 注册为 reload listener。"""
+        audit_kws_coverage()
 
     def _watch_config_file(self):
         """Poll config file for changes and hot-reload."""

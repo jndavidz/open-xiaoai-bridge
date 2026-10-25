@@ -29,7 +29,7 @@ open-xiaoai-bridge/
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + hass/weather/music 只读工具（阶段 1.5）
-│   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup
+│   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
@@ -538,7 +538,8 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `XIAOAI_COMMANDS` | `before_wakeup(source=="xiaoai")` 小爱对话中截胡 | 「小爱同学，打开电脑」类口语触发自动化 |
 
 - **config.py 只留纯数据**：两张指令表 + KWS 词表 + 人设表（`PERSONAS`）+ 路由钩子绑定（`before_wakeup` 一行委托 `core.commands.route_before_wakeup`），**不得出现执行逻辑或反向 import 核心单例**（`core.ref` 依赖已移除）；改表保存即热重载生效
-- **core/commands/ 对外接口**：`route_before_wakeup(...)`（唤醒边界默认路由：表命中执行 / 停止聆听 / 人设切换 / 截胡清场）、`run_steps(speaker, steps)`（步骤序列执行器）、`ha_script`/`ha_switch`（声明式动作构造器）、`hass_action`（HA REST client，失败只记日志不打断语音流程）
+- **core/commands/ 对外接口**：`route_before_wakeup(...)`（唤醒边界默认路由：表命中执行 / 停止聆听 / 人设切换 / 截胡清场）、`run_steps(speaker, steps)`（步骤序列执行器）、`ha_script`/`ha_switch`（声明式动作构造器）、`hass_action`（HA REST client，失败只记日志不打断语音流程）、`audit_kws_coverage()`（词表 ⊇ 指令表键对账，P2 票 02）
+- **词表对账（P2 票 02，`core/commands/audit.py`）**：开机（`MainApp.run`）+ 每次配置热重载（reload listener）各跑一次；缺失输出含全部键名的单条 WARN，**只告警不阻断**。对账口径 = kws 路由面：`DIRECT_COMMANDS` 键 + `STOP_LISTENING_KEYWORD` 必须在 `wakeup.keywords`（KWS 认不出就永远到不了路由表）；`XIAOAI_COMMANDS` 走小爱原生 ASR 截胡、不经过 KWS，**不在对账范围**；`PERSONAS` 子串匹配不要求整词入表。数据源不可用（config 模块缺表等）降级跳过不崩溃。守门测试：`tests/test_kws_audit.py`（含 deploy 真实数据零缺失守门——改表忘同步词表即红）
 - **动作元素三型**（混排，按序执行）：`str`（经 `announce` 双闸门 + 词表默认拒绝；首条充当确认播报）→ `("ha", domain, service, data)` 元组（构造器产出）→ 任意 `async def(speaker)` 函数
 - **契约测试**：`tests/test_commands.py` 纯内存覆盖（三型混排次序 / 失败传播 / 清场→播报→执行→收尾 / 路由语义 / deploy 数据面守门）
 - **截胡边界**：米家设备控制类口语（「把空调开到 26 度」）放行原生小爱，两表都不截——判定表见工作区 `selection-review.md` §3.1.2；边界错了就是吞指令
