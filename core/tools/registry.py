@@ -18,7 +18,7 @@ import json
 from core.utils.logger import logger
 
 from . import device_status, hass, ir_send, music, weather
-from .guardrails import module_risk
+from .guardrails import ConfirmationManager, execute_guarded, module_risk
 
 # 注册顺序即模型可见顺序；只读工具优先，C 级写工具（红外）经护栏注册
 _TOOL_MODULES = [hass, weather, music, device_status, ir_send]
@@ -34,6 +34,16 @@ for _m in _TOOL_MODULES:
             f"tool module {getattr(_m, '__name__', _m)} rejected (missing/invalid RISK)",
             module="Tools",
         )
+
+# B/C 级共享的确认状态机（P3 票 04 对话层接线）：execute_tool 的首次
+# 调用登记 pending 并返回复述请求；用户应答由对话循环经
+# guardrails.handle_confirmation_utterance 拦截执行。
+_CONFIRMATIONS = ConfirmationManager()
+
+
+def confirmation_manager() -> ConfirmationManager:
+    """共享确认状态机（对话层拦截应答用；测试重置换新实例）。"""
+    return _CONFIRMATIONS
 
 
 # 出公网的工具（用量记账「联网次数」口径，P2 ticket 03）：hass/music 走
@@ -66,11 +76,15 @@ async def execute_tool(name: str, arguments_json: str | None = None) -> str:
     arguments_json 可能是 None / 空串 / 合法 JSON 对象串；解析失败时回退空 dict，
     交由具体工具决定如何反应。任何异常都被捕获为错误串返回（不向上抛）。
     D 级调用直接拒绝并留证（纵深防御——模型本就看不到它们）。
+    B/C 级（P3 票 04 对话层接线）：经 execute_guarded——首次调用登记
+    pending 并返回「需要确认」的复述请求（由模型转述播报）；用户应答
+    由对话循环在 ASR 定稿处拦截（guardrails.handle_confirmation_utterance）。
     """
     mod = _REGISTRY.get(name)
     if mod is None:
         return f"tool_error: unknown tool '{name}'"
-    if module_risk(mod) == "d":
+    risk = module_risk(mod)
+    if risk == "d":
         logger.warning(
             f"tool {name} is risk-D; direct call refused", module="Guardrails"
         )
@@ -84,6 +98,13 @@ async def execute_tool(name: str, arguments_json: str | None = None) -> str:
                     args = parsed
             except (json.JSONDecodeError, TypeError):
                 return f"tool_error: invalid arguments json for '{name}': {arguments_json!r}"
+        if risk in ("b", "c"):
+            return await execute_guarded(
+                mod,
+                args,
+                action_id=f"{name}:latest",
+                confirmation=_CONFIRMATIONS,
+            )
         return await mod.run(args)
     except Exception as exc:  # 工具内部异常绝不能击穿对话轮
         return f"tool_error: {type(exc).__name__}: {exc}"

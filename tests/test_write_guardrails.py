@@ -305,5 +305,57 @@ class RegistryGuardrailTest(unittest.TestCase):
             tools_registry._REGISTRY.update(saved)
 
 
+# ---- P3-04 对话层接线：execute_tool 走 guarded + handle_confirmation_utterance ----
+
+
+class DialogueWiringTest(unittest.TestCase):
+    def setUp(self):
+        from core.tools import registry as tr
+
+        self.tr = tr
+        self._saved = dict(tr._REGISTRY)
+        self._saved_cm = tr._CONFIRMATIONS
+        tr._CONFIRMATIONS = guardrails.ConfirmationManager(ttl_seconds=60)
+        self.tool = _fake_tool("ir_send", "c")
+        tr._REGISTRY["ir_send"] = self.tool
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self.tr._REGISTRY.clear()
+        self.tr._REGISTRY.update(self._saved)
+        self.tr._CONFIRMATIONS = self._saved_cm
+
+    def test_execute_tool_c_level_first_call_returns_recap(self):
+        result = _run(self.tr.execute_tool("ir_send", '{"device": "ac"}'))
+        self.assertIn("需要确认", result)
+        self.assertEqual([], self.tool.calls)  # 未执行
+        action = self.tr.confirmation_manager().pending_action("ir_send:latest")
+        self.assertIsNotNone(action)
+        self.assertEqual({"device": "ac"}, action.args)
+
+    def test_handle_confirmation_utterance_confirm_executes(self):
+        _run(self.tr.execute_tool("ir_send", '{"device": "ac"}'))
+        reply = _run(guardrails.handle_confirmation_utterance("确认"))
+        self.assertIsNotNone(reply)
+        self.assertIn("已确认并执行", reply)
+        self.assertEqual([{"device": "ac"}], self.tool.calls)
+        # 收尾后再答：不再拦截（走 LLM）
+        self.assertIsNone(_run(guardrails.handle_confirmation_utterance("确认")))
+
+    def test_handle_confirmation_utterance_deny(self):
+        _run(self.tr.execute_tool("ir_send", '{"device": "ac"}'))
+        reply = _run(guardrails.handle_confirmation_utterance("算了，取消"))
+        self.assertIn("已取消", reply)
+        self.assertEqual([], self.tool.calls)
+
+    def test_unrelated_utterance_returns_none(self):
+        _run(self.tr.execute_tool("ir_send", '{"device": "ac"}'))
+        self.assertIsNone(_run(guardrails.handle_confirmation_utterance("今天天气怎么样")))
+        self.assertIsNone(_run(guardrails.handle_confirmation_utterance("")))
+
+    def test_no_pending_returns_none(self):
+        self.assertIsNone(_run(guardrails.handle_confirmation_utterance("确认")))
+
+
 if __name__ == "__main__":
     unittest.main()

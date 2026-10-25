@@ -293,6 +293,20 @@ class ExternalConversationController:
                 trace.mark("speech_end", self._speech_end_at)
             trace.mark("asr_final")
 
+        # C/B 级写操作应答拦截（P3 票 04）：在 exit 关键词之前——「取消」
+        # 也是合法应答，不能先被退出关键词截胡。
+        confirm_reply = await self._try_handle_confirmation(text)
+        if confirm_reply is not None:
+            turn_trace.abandon_turn()
+            await self._begin_speaking()
+            speaker = get_speaker()
+            if speaker:
+                await speaker.play(text=confirm_reply)
+            await self._play_notify()
+            await self._start_recording()
+            await self._wait_for_silence(vad)
+            return "continue"
+
         # 3. Check exit keywords
         for kw in self.exit_keywords:
             if kw in text:
@@ -349,6 +363,19 @@ class ExternalConversationController:
         # 循环侧醒来后再过一次检查点（取消则静默退出，不发 LLM 请求）。
         self._checkpoint(CHECKPOINT_ASR_FINAL)
 
+        # C/B 级写操作应答拦截（P3 票 04）：在 exit 关键词之前（同本地链路）。
+        confirm_reply = await self._try_handle_confirmation(text)
+        if confirm_reply is not None:
+            turn_trace.abandon_turn()
+            await self._begin_speaking()
+            speaker = get_speaker()
+            if speaker:
+                await speaker.play(text=confirm_reply)
+            await self._play_notify()
+            await self._start_recording()
+            logger.debug("Ready for next XiaoAI native ASR round", module=self.LOG_MODULE)
+            return "continue"
+
         for kw in self.exit_keywords:
             if kw in text:
                 logger.info(f"Exit keyword: {kw}", module=self.LOG_MODULE)
@@ -380,6 +407,24 @@ class ExternalConversationController:
         turn = self._pipeline_turn
         if turn is not None:
             turn.checkpoint(name)
+
+    async def _try_handle_confirmation(self, text: str) -> str | None:
+        """C/B 级写操作的应答拦截（P3 票 04 对话层接线）。
+
+        ASR 定稿后、exit 关键词前调用：有等待确认的写操作且用户话语是
+        确认/否认 ⇒ 执行或放弃，返回播报文案（announce 后本轮不走 LLM）；
+        否则返回 None（本轮照常）。
+        """
+        try:
+            from core.tools.guardrails import handle_confirmation_utterance
+
+            return await handle_confirmation_utterance(text)
+        except Exception as exc:  # noqa: BLE001 - 护栏拦截绝不杀对话
+            logger.error(
+                f"confirmation intercept failed: {type(exc).__name__}: {exc}",
+                module=self.LOG_MODULE,
+            )
+            return None
 
     async def _speak_response_segments(
         self, text: str, *, with_send_sound: bool

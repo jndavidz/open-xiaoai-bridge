@@ -234,3 +234,51 @@ async def execute_guarded(
         manager.finish(action_id, "executed")
         return result
     return "没有听清确认或取消，操作未执行；请重新发起"
+
+
+async def handle_confirmation_utterance(utterance: str) -> str | None:
+    """对话层应答拦截（P3 票 04 接线）：ASR 定稿处先于 LLM 调用。
+
+    有等待确认的写操作且用户话语是确认/否认 ⇒ 执行或放弃，返回播报
+    文本（对话层 announce 后跳过本轮 LLM）；无 pending 或话语无关 ⇒
+    返回 None（本轮照常走 LLM）。
+    """
+    from core.tools import registry as tools_registry
+
+    manager = tools_registry.confirmation_manager()
+    manager.expire_all()
+    # 单设备串行：同名 id 顶替 ⇒ 至多一个活动 pending（:latest id 约定）
+    action = manager.pending_action(_LATEST_ID(manager))
+    if action is None:
+        return None
+    verdict = match_confirmation(utterance)
+    if verdict is None:
+        return None
+    if verdict == "deny":
+        manager.deny(action.action_id)
+        return "好的，已取消该操作。"
+    ok, summary = manager.confirm(action.action_id)
+    if not ok:
+        return None
+    mod = tools_registry._REGISTRY.get(action.tool)
+    if mod is None:
+        manager.finish(action.action_id, "failed")
+        return "确认的操作已不可用，未执行。"
+    try:
+        result = await mod.run(dict(action.args))
+    except Exception as exc:  # noqa: BLE001
+        manager.finish(action.action_id, "failed")
+        logger.error(
+            f"confirmed action {action.tool} failed: {exc}", module=LOG_MODULE
+        )
+        return f"执行失败：{exc}"
+    manager.finish(action.action_id, "executed")
+    return f"已确认并执行：{sanitize_for_speech(action.summary)}。结果：{result}"
+
+
+def _LATEST_ID(manager: ConfirmationManager) -> str:
+    """约定 id 后缀（execute_tool 用 `<tool>:latest`）；取任一活动 pending。"""
+    for action_id, action in manager._pending.items():
+        if action.resolved is None and action_id.endswith(":latest"):
+            return action_id
+    return ""
