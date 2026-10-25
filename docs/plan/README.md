@@ -83,7 +83,7 @@
 | **B-15** | **QwenPaw / OpenClaw 迁基类**（fire-and-forget 语义三后端归一，含 120s 兜底） | ⭐⭐ 三后端只剩传输核/连接生命周期 | 中 | 无 | ✅ **已施工（P0 ticket 05+06，`6438d01`）** |
 | **B-16** | **静态后端注册表**（唤醒会话/主控制器查表化；会话键复位走公开接口，私有直写清零；xiaozhi 保持特殊条目） | ⭐⭐ 新增后端 = 一个子类 + 一条登记；旧方法名薄兼容委托，生产 config 零迁移 | 中 | 无 | ✅ **已施工（P0 ticket 07，`72b84ef`）** |
 
-> **P0 批（B-11…B-16）集成验证**：全量测试 429 OK (skipped=3)；静态核验（判据/分支/私有直写三清零）与 config 热重载冒烟已过（见 `ws: .scratch/bridge-p0-announce-registry/` 票 08 §Answer）；**真机冒烟三组待执行**——执行前禁部署镜像（`rollback-*` tag 惯例不变）。
+> **P0 批（B-11…B-16）集成验证（2026-10-26 收口）**：全量测试 429 OK (skipped=3)；静态核验（判据/分支/私有直写三清零）与 config 热重载冒烟已过；真机冒烟已执行——HTTP 三连全过（词表拒绝 400 真机生效）、免唤醒 announce 链路 ✓（HIFI 场景动作面经用户裁决延后）、OpenAI 对话 4 轮 TurnTrace 全绿。生产镜像 `:home` = 本表 B-11…B-16（bridge `6ce615c` 快照），回滚支点 `open-xiaoai-bridge:rollback-pre-p0-20261026`。详情见 `ws: .scratch/bridge-p0-announce-registry/` 票 08 §Answer。
 
 > 本轮 baseline 的 ticket 01–10 与逐项落点见 `ws: .scratch/lx06-voice-hub-baseline/`；本表状态与其同步。
 > 2026-10-24 已部署到 NAS：镜像 `open-xiaoai-bridge:04b0709e51`；回滚 tag `open-xiaoai-bridge:rollback-20261024`。
