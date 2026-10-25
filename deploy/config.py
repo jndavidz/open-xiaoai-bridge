@@ -211,22 +211,22 @@ APP_CONFIG = {
         "enabled": False,
     },
     "event_plane": {
-        # 播放完成事件主源：context（轮询 player_get_context，默认）/
-        # client（playing 事件）/ native（设备原生 play_status_broadcast_event）
-        "source": "context",
+        # 播放完成事件主源：context（轮询 player_get_context）/
+        # client（playing 事件）/ native（设备原生 play_status_broadcast_event）。
+        # 生产已切 native（P0.5 票 B-17 转正，2026-10-26；观察期至 11-09，
+        # 回退 = 改回 "context" 热重载即生效）
+        "source": "native",
         # 影子源：并行采集、只记录时间线与差异，不改变阻塞播报行为
-        "shadow_sources": ["client"],
+        "shadow_sources": ["client", "native"],
         "poll_interval_ms": 200,
         "start_grace_ms": 1000,
-        # native 拉流命令；留空 = 不启动（默认，生产 source 保持 context）。
-        # P0.5 起镜像已含 openssh-client + 密钥只读挂载 /app/keys/lx06-ir（compose）。
-        # 启用参考值（dropbear 兼容 + NAT 保活，一行回滚 = 置空）：
-        # "native_cmd": "ssh -i /app/keys/lx06-ir/id_rsa -o HostKeyAlgorithms=+ssh-rsa "
-        #               "-o PubkeyAcceptedAlgorithms=+ssh-rsa -o ServerAliveInterval=30 "
-        #               "-o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes "
-        #               "-o UserKnownHostsFile=/app/keys/lx06-ir/known_hosts "
-        #               "root@10.10.10.20 ubus listen",
-        "native_cmd": "",
+        # native 拉流命令（生产已启用，compose 已含 openssh-client + 密钥只读挂载
+        # /app/keys/lx06-ir；dropbear 兼容 + NAT 保活。一行回滚 = 置空 + source 回 context）
+        "native_cmd": "ssh -i /app/keys/lx06-ir/id_rsa -o HostKeyAlgorithms=+ssh-rsa "
+                      "-o PubkeyAcceptedAlgorithms=+ssh-rsa -o ServerAliveInterval=30 "
+                      "-o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes "
+                      "-o UserKnownHostsFile=/app/keys/lx06-ir/known_hosts "
+                      "root@10.10.10.20 ubus listen",
     },
     "turn_trace": {
         # 每轮延迟埋点（ticket 11）：默认关闭；开启后每轮一条 [TurnTrace] INFO
