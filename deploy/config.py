@@ -2,96 +2,29 @@
 # 家庭定制配置 —— jndavidz 部署版
 # 原则：密钥一律走环境变量（见 .env），本文件可安全提交
 # 修改本文件保存即热重载（约 1 秒生效），无需重启容器
+#
+# 数据面/逻辑面分工（C4/P2 ticket 01 指令层内核化）：
+#   本文件只留纯数据 —— 两张指令表 + KWS 词表 + 人设表 + 路由钩子绑定；
+#   执行器、HA REST client、动作构造器、清场次序在 core/commands/（随镜像）。
+#   路由钩子只是「数据 → 核心执行器」的绑定层，不含执行逻辑，
+#   也不再反向 import 核心单例（原 core.ref get_kws 依赖已随内核化移入 core）。
 # ============================================================
-import asyncio
 import os
 
-import aiohttp
-
-from core.utils.logger import logger  # noqa: E402  规范：禁止裸 print
-from core.ref import get_kws  # noqa: E402  T7.6「停止聆听」需直接操作 KWS 单例
+from core.commands import (
+    ha_script,
+    ha_switch,
+    kodi_launch,
+    route_before_wakeup,
+)
 
 # ---------- 环境变量 ----------
-HA_BASE_URL = os.environ.get("HA_BASE_URL", "http://10.10.10.2:8123")
-HA_TOKEN = os.environ.get("HA_TOKEN", "")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
-# ---------- Home Assistant REST 调用 ----------
-async def hass_action(domain: str, service: str, data: dict | None = None):
-    """调用 HA 服务（异步非阻塞）。失败只记日志不打断语音流程。"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{HA_BASE_URL}/api/services/{domain}/{service}",
-                headers={
-                    "Authorization": f"Bearer {HA_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-                json=data or {},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status >= 300:
-                    logger.error(f"[home] HA {domain}.{service} -> HTTP {resp.status}")
-                else:
-                    logger.info(f"[home] HA {domain}.{service} OK")
-                return resp.status
-    except Exception as e:
-        logger.error(f"[home] HA {domain}.{service} failed: {e}")
-        return None
 
-
-# ---------- 指令动作构造器（声明式：一行声明一条指令） ----------
-def ha_script(name: str):
-    """一行声明调用一个 HA script（如 hifi_mode / music_stop / music_next）。"""
-    return ("ha", "script", "turn_on", {"entity_id": f"script.{name}"})
-
-
-def ha_switch(entity_id: str):
-    """一行声明打开一个 HA switch（如 WOL 网络唤醒开关 switch.nuc_hifi_wol）。"""
-    return ("ha", "switch", "turn_on", {"entity_id": entity_id})
-
-
-# ---------- 网络层原子控制：KODI 启动（经 HA androidtv 集成走 ADB） ----------
-# 前提（缺一不可，均不属本文件职责）：
-#   ① Vidda 电视已开机——Vidda 无 WOL，关机即网络全断，ADB 不可达；开机属红外/Phase E；
-#   ② 电视已安装 KODI（org.xbmc.kodi）——2026-08-29 联机实测已确认安装，主 Activity=org.xbmc.kodi/.Splash
-#      （Splash 为 LAUNCHER 入口，启动后接管到 .Main；.StartActivity/.Main 均非 LAUNCHER，勿用）。
-# 满足前提后，HA androidtv 集成自动 ADB 重连，本调用即时生效；否则调用失败（仅记日志、不崩溃）。
-async def kodi_launch(speaker):
-    """经 HA androidtv 集成向电视发 ADB 指令启动 KODI（STRM 直链播放入口）。"""
-    await hass_action(
-        "androidtv", "adb_command",
-        {"entity_id": "media_player.vidda_tv",
-         "command": "am start -n org.xbmc.kodi/.Splash"},
-    )
-
-
-async def _run_steps(speaker, steps):
-    """执行指令表的一步序列：str=播报，("ha",…)=HA 调用，callable=任意函数。
-    kws 免唤醒（DIRECT_COMMANDS）与小爱截胡（XIAOAI_COMMANDS）共用同一执行逻辑。
-
-    P0 ticket 03：`str` 播报改走 `speaker.announce`（双闸门 + 词表安全检查 +
-    完成等待 + finally 归还），本文件不再手工编排闸门。词表检查沿用默认拒绝：
-    指令确认文案属部署配置，若与词表冲突应在改词表/文案时显式处置，
-    而不是静默豁免（现存全部 str 文案经测试核验不在词表内）。
-    """
-    for step in steps:
-        if isinstance(step, str):
-            async with speaker.announce(
-                text=step,
-                reason="run_steps TTS",
-                wait=False,  # play(text) 阻塞式内含等完成
-                gate_seconds=300,
-            ):
-                await speaker.play(text=step)
-        elif isinstance(step, tuple) and step[0] == "ha":
-            await hass_action(step[1], step[2], step[3] if len(step) > 3 else None)
-        elif callable(step):
-            await step(speaker)
-
-
-# ---------- 学科辅导导师人设（「你好老师」专属会话） ----------
-# 四年级 MVP：苏格拉底式引导，语音友好，场景限定
+# ---------- 会话人设（专属会话表，按声明顺序做子串匹配） ----------
+# 学科辅导导师人设（「你好老师」专属会话）：四年级 MVP，苏格拉底式引导，
+# 语音友好，场景限定。system_prompt=None 表示显式复位人设覆盖（贾维斯行用）。
 TUTOR_SYSTEM_PROMPT = (
     "你是'老师'，一位耐心的小学四年级学科辅导老师，通过音箱与学生语音对话。"
     "学生是9-10岁的孩子。规则："
@@ -102,14 +35,29 @@ TUTOR_SYSTEM_PROMPT = (
     "5.答对要具体表扬，答错给提示而不是纠正。"
 )
 
+PERSONAS = {
+    "你好老师": {
+        "session_key": "agent:tutor:home",
+        "system_prompt": TUTOR_SYSTEM_PROMPT,
+        "intro": "老师在，请讲",
+        "backend": "openai",
+    },
+    "贾维斯": {
+        "session_key": "agent:javis:home",
+        "system_prompt": None,  # 切回贾维斯：显式复位导师人设覆盖
+        "intro": "我在",
+        "backend": "openai",
+    },
+}
+
 
 # ---------- 免唤醒指令表（source=="kws" 命中即执行，不进对话） ----------
-# 动作元素类型（与 XIAOAI_COMMANDS 共用 _run_steps 执行）：
+# 动作元素类型（与 XIAOAI_COMMANDS 共用 core/commands run_steps 执行）：
 #   str                          -> 音箱 TTS 播报（先播的 str 充当"提示音掩盖延迟"）
 #   ("ha", domain, service, {})  -> 调用 HA 服务（用 ha_script / ha_switch 构造器声明）
 #   callable(speaker)            -> 任意异步函数
 # 说明：所有设备动作统一走 HA script（在 HA 侧维护具体逻辑），
-#       本文件只认 script 名，与实体/集成解耦。
+#       本表只认 script 名，与实体/集成解耦。
 DIRECT_COMMANDS = {
     # --- 调试 ---
     "测试模式": ["桥接正常，家庭中枢在线"],
@@ -159,7 +107,8 @@ XIAOAI_COMMANDS = {
     # 因 KWS 离线模型不识别含英文的「HiFi模式」，改由「小爱同学，Hi-Fi模式」触发
     "HiFi模式": ["正在准备客厅音响", ha_script("hifi_mode")],
     "Hi-Fi模式": ["正在准备客厅音响", ha_script("hifi_mode")],
-    # 网络层：KODI 启动（ADB 控电视，不依赖红外）。需电视开机 + KODI 已装（见 kodi_launch 注释）。
+    # 网络层：KODI 启动（ADB 控电视，不依赖红外）。需电视开机 + KODI 已装
+    # （前提与实现见 core/commands/actions.py kodi_launch 注释）。
     # 走小爱截胡：原生小爱无法 ADB 启动电视端 KODI，属跨系统编排，命中即截胡。
     "打开Kodi": ["正在打开 Kodi", kodi_launch],
     "启动Kodi": ["正在打开 Kodi", kodi_launch],
@@ -168,67 +117,20 @@ XIAOAI_COMMANDS = {
 
 
 async def before_wakeup(speaker, text, source, app):
+    """唤醒边界路由钩子：纯数据绑定，分发与执行逻辑在 core/commands/router.py。
+
+      - source == "kws"   ：免唤醒短语命中 DIRECT_COMMANDS 则执行并结束；
+                            「停止聆听」走常驻隐私开关（T7.6，core 侧）；
+                            人设子串命中则切会话人设进入 AI 连续对话
+      - source == "xiaoai"：命中 XIAOAI_COMMANDS（原生小爱做不到的跨系统编排）
+                            则先清场再截胡执行；未命中放行原生小爱全权处理
     """
-    唤醒边界路由：
-      - source == "kws"   ：免唤醒短语命中 DIRECT_COMMANDS 则执行并结束；否则视为 AI 唤醒词进入对话
-      - source == "xiaoai"：命中 XIAOAI_COMMANDS（原生小爱做不到的跨系统编排）则截胡执行；
-                            未命中放行原生小爱全权处理
-    """
-    if source == "kws":
-        key = (text or "").strip()
-        steps = DIRECT_COMMANDS.get(key)
-        if steps is not None:
-            await _run_steps(speaker, steps)
-            return None  # 执行完毕，不进入 AI 连续对话
-
-        # T7.6「停止聆听」常驻隐私开关：硬件麦克风静音 + KWS 持久停止分析。
-        # 一旦停止，语音通道自关——唯一恢复路径是 :9092 的 POST /api/audio_input。
-        if key == "停止聆听":
-            try:
-                await speaker.set_mic(False)
-            except Exception as e:  # 静音失败绝不应阻断播报
-                logger.warning(f"[home] set_mic(False) on 停止聆听 failed: {e}")
-            kws = get_kws()
-            if kws:
-                kws.disable_listening()
-            logger.info("[home] 停止聆听: mic muted + KWS listening disabled")
-            await speaker.play(text="已停止聆听")
-            return None
-
-        if "你好老师" in key:
-            # 切入导师会话：独立 session_key（历史隔离）+ 独立人设覆盖
-            app.set_openai_session_key("agent:tutor:home")
-            app.set_openai_system_prompt(TUTOR_SYSTEM_PROMPT)
-            await speaker.play(text="老师在，请讲")
-            return "openai"  # 进入 DeepSeek 连续对话（导师人设）
-
-        if "贾维斯" in key:
-            # 切回贾维斯：显式复位 session_key 并清除导师人设覆盖
-            app.set_openai_session_key("agent:javis:home")
-            app.set_openai_system_prompt(None)
-            await speaker.play(text="我在")
-            return "openai"  # 进入 DeepSeek 连续对话
-        return None
-
-    if source == "xiaoai":
-        # 拦截"原生小爱做不到的跨系统编排口令"（见 XIAOAI_COMMANDS 边界规则）。
-        # 未命中则放行原生小爱——米家设备控制等口语不受影响。
-        key = (text or "").strip()
-        steps = XIAOAI_COMMANDS.get(key)
-        if steps is not None:
-            # T7.3 执行前清场：压掉原生小爱可能的重叠应答。
-            # 用 stop_device_audio()（只停播放、可逆、无 abort/sleep），
-            # 不照抄 oxa-server 的 interrupt_xiaoai()（abort+sleep(2) 与本 fork 冲突）。
-            # 净安全：本 fork 若原生不重叠应答，此调用为空操作；若重叠则被压掉。
-            try:
-                await speaker.stop_device_audio()
-            except Exception as e:  # 清场失败绝不应阻断编排执行
-                logger.warning(f"[home] stop_device_audio before xiaoai intercept: {e}")
-            await _run_steps(speaker, steps)
-            return None  # 截胡执行完毕，不进原生小爱
-        return None  # 未命中 → 放行原生小爱全权处理
-
-    return None
+    return await route_before_wakeup(
+        speaker, text, source, app,
+        direct_table=DIRECT_COMMANDS,
+        xiaoai_table=XIAOAI_COMMANDS,
+        personas=PERSONAS,
+    )
 
 
 async def after_wakeup(speaker, source=None, session_key=None):

@@ -37,6 +37,7 @@ from test_mic_gate import MuteAwareDevice  # noqa: E402
 speaker_module = load_speaker_module()
 
 from core import ref  # noqa: E402
+from core.commands import ha_script, run_steps  # noqa: E402  P2 ticket 01 内核化后执行器在 core
 from core.device import playback_events  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -631,7 +632,11 @@ def _load_deploy_config(module_name: str = "deploy_config_under_test"):
 
 
 class RunStepsAnnounceTest(AnnounceTestBase):
-    """免唤醒/截胡指令执行器的 str 播报改走 announce（票 03 验收项 3）。"""
+    """免唤醒/截胡指令执行器的 str 播报走 announce（票 03 验收项 3）。
+
+    P2 ticket 01 内核化后执行器在 core/commands/，本组用例经 deploy/config.py
+    的真实表数据（ha_script 构造的步骤元组）驱动 core 执行器，接线同形。
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -655,11 +660,11 @@ class RunStepsAnnounceTest(AnnounceTestBase):
 
         steps = [
             "正在准备客厅音响",
-            self.deploy.ha_script("hifi_mode"),
+            ha_script("hifi_mode"),
             _callable_step,
         ]
-        with mock.patch.object(self.deploy, "hass_action", _fake_hass):
-            _run(self.deploy._run_steps(self.speaker, steps))
+        with mock.patch("core.commands.hass.hass_action", _fake_hass):
+            _run(run_steps(self.speaker, steps))
 
         self.device.assert_called("text_to_speech")
         self.device.assert_called('"event":7')
@@ -708,14 +713,14 @@ class RunStepsAnnounceTest(AnnounceTestBase):
             ha_calls.append((domain, service, data))
             return 200
 
-        steps = ["正在准备客厅音响", self.deploy.ha_script("hifi_mode")]
+        steps = ["正在准备客厅音响", ha_script("hifi_mode")]
         with (
             mock.patch.object(speaker_module, "_kws_keywords", lambda: ["准备客厅"]),
             mock.patch.object(speaker_module, "_config_command_keys", lambda: []),
-            mock.patch.object(self.deploy, "hass_action", _fake_hass),
+            mock.patch("core.commands.hass.hass_action", _fake_hass),
         ):
             with self.assertRaises(speaker_module.AnnounceRejected):
-                _run(self.deploy._run_steps(self.speaker, steps))
+                _run(run_steps(self.speaker, steps))
 
         self.device.assert_not_called("text_to_speech")
         self.assertEqual(ha_calls, [], "被拒步骤之后的动作不得执行")

@@ -12,7 +12,7 @@
 ```
 open-xiaoai-bridge/
 ├── main.py                        # 入口：解析环境变量，启动 MainApp
-├── config.py                      # 用户配置（唤醒词、双指令表、路由钩子、TTS、OpenClaw 等）
+├── config.py                      # 用户配置（唤醒词、路由钩子、TTS、OpenClaw 等；生产版双指令表见 deploy/config.py）
 ├── core/
 │   ├── app.py                     # MainApp 主控制器（单例，管理生命周期）
 │   ├── xiaoai.py                  # XiaoAI 设备接入 / 事件桥接
@@ -29,6 +29,7 @@ open-xiaoai-bridge/
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + hass/weather/music 只读工具（阶段 1.5）
+│   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
@@ -525,18 +526,21 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 - 密钥字段读取只回掩码（尾 4 位），明文不出服务端
 - **接口规格**（`openai.api_style`）三选：`chat_completions`（默认）/ `openai_responses` / `anthropic_messages`；内部会话历史统一 chat 格式、出口按规格转换；连通性预检使用**本次提交的待测 Key** 构造鉴权头（不得复用运行时旧 Key）
 
-### 指令双表与动作构造器 (config.py)
+### 指令层双表与执行器 (core/commands/ + config.py)
 
-config.py 承载两张指令表 + 声明式动作构造器，两条路径共用 `_run_steps()` 执行逻辑：
+指令层内核化（C4/P2 ticket 01）后的分工：**逻辑面在 `core/commands/`（随镜像），数据面在 config.py（热重载）**。
 
-| 表 | 触发源 | 场景 |
+| 表（config.py 数据） | 触发源 | 场景 |
 |----|--------|------|
 | `DIRECT_COMMANDS` | `before_wakeup(source=="kws")` 免唤醒短语 | 高频确定性播控/场景（毫秒级、100% 确定） |
 | `XIAOAI_COMMANDS` | `before_wakeup(source=="xiaoai")` 小爱对话中截胡 | 「小爱同学，打开电脑」类口语触发自动化 |
 
-- **动作元素三型**（混排，按序执行）：`str`（首条充当确认播报，如「正在开启高保真模式」）→ `ha_script(name)` / `ha_switch(entity_id)` 构造器（HA REST 调用）→ 任意 `async def(speaker)` 函数
+- **config.py 只留纯数据**：两张指令表 + KWS 词表 + 人设表（`PERSONAS`）+ 路由钩子绑定（`before_wakeup` 一行委托 `core.commands.route_before_wakeup`），**不得出现执行逻辑或反向 import 核心单例**（`core.ref` 依赖已移除）；改表保存即热重载生效
+- **core/commands/ 对外接口**：`route_before_wakeup(...)`（唤醒边界默认路由：表命中执行 / 停止聆听 / 人设切换 / 截胡清场）、`run_steps(speaker, steps)`（步骤序列执行器）、`ha_script`/`ha_switch`（声明式动作构造器）、`hass_action`（HA REST client，失败只记日志不打断语音流程）
+- **动作元素三型**（混排，按序执行）：`str`（经 `announce` 双闸门 + 词表默认拒绝；首条充当确认播报）→ `("ha", domain, service, data)` 元组（构造器产出）→ 任意 `async def(speaker)` 函数
+- **契约测试**：`tests/test_commands.py` 纯内存覆盖（三型混排次序 / 失败传播 / 清场→播报→执行→收尾 / 路由语义 / deploy 数据面守门）
 - **截胡边界**：米家设备控制类口语（「把空调开到 26 度」）放行原生小爱，两表都不截——判定表见工作区 `selection-review.md` §3.1.2；边界错了就是吞指令
-- **执行前清场**：`speaker.stop_device_audio()`；**禁止** `abort_xiaoai()`（见「不可用的中断方式」）
+- **执行前清场**：`speaker.stop_device_audio()`（`core/commands/router.py clear_device_audio`）；**禁止** `abort_xiaoai()`（见「不可用的中断方式」）
 
 ### Agent 工具层 (core/tools/)
 
@@ -813,4 +817,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**443 tests OK (skipped=3)**（2026-10-26，P1 ticket 02 后；P0 收口时为 429，本票 +14 = `tests/test_pipeline.py` 管线态/取消传播/TTSRouter 埋点用例）。每次 main 合入后应复跑此基线；onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**459 tests OK (skipped=3)**（2026-10-26，P2 票 01 后；443 = P1 票 02 后，本票 +16 = `tests/test_commands.py` 指令层内核化契约用例，经干净 worktree 实测口径）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
