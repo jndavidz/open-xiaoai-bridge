@@ -76,11 +76,21 @@
 | **B-08** | **音量通道收口**（设用百分比、读用 `player_get_context`） | ⭐⭐ 去掉自然语言绕路 + 修量纲 | 低 | 无 | ✅ **已施工（ticket 03，2026-10-24）** |
 | **B-09** | **`InjectRelay` 文本回放**（`seq` + `?since=` 断点续取） | ⭐⭐ 修「推流成功但没人收到」 | 低 | 无 | ✅ **已施工（2026-10-21）** |
 | **B-10** | **时钟死锁干净解**（`ping/time`） | ⭐ 每次断电复发的断网隐患 | 低 | 无（2026-10-25 用户授权） | ✅ **已施工（init.sh 后台段，仅 ntp.status 缺失时生效；顺带修复 init.sh exec 阻塞 bug——原 exec client 导致其后所有持久化段永不执行，2026-10-25 reboot 实测发现并修复）** |
+| **B-11** | **SpeakerManager 判据口径统一**（全部走能力层结构化结果，stdout 字符串判据清零） | ⭐⭐「同一件事两套判据」消除；`code:0 ≠ 生效`类设备假象知识只活在能力表 | 低 | 无 | ✅ **已施工（P0 ticket 01，`6cf65b5`；守卫测试锁定）** |
+| **B-12** | **announce 播报编排深模块**（双闸门 + 词表安全检查 + 等完成 + finally 归还，一个入口） | ⭐⭐⭐ 新播报入口一行接入、不再可能抄漏闸门复现自触发事故 | 中 | 无 | ✅ **已施工（P0 ticket 02，`78b700b`；/api/play/text 先行切换）** |
+| **B-13** | **播报入口全量收敛 announce**（/api/play/url、/api/play/file、`_run_steps`；闸门手工副本删除） | ⭐⭐ 闸门知识单一权威；早间简报类新功能从此一行接入 | 低 | 无 | ✅ **已施工（P0 ticket 03，`2b283bb`）** |
+| **B-14** | **后端公共骨架上提 BackendManagerBase**（run-id 记账、TTS 配置、TurnTrace 六挂点入基类；OpenAI 首迁） | ⭐⭐ 接入新后端 = 加 1 个子类；「埋点只接一个后端」漂移根治 | 中 | 无 | ✅ **已施工（P0 ticket 04，`5756b71`）** |
+| **B-15** | **QwenPaw / OpenClaw 迁基类**（fire-and-forget 语义三后端归一，含 120s 兜底） | ⭐⭐ 三后端只剩传输核/连接生命周期 | 中 | 无 | ✅ **已施工（P0 ticket 05+06，`6438d01`）** |
+| **B-16** | **静态后端注册表**（唤醒会话/主控制器查表化；会话键复位走公开接口，私有直写清零；xiaozhi 保持特殊条目） | ⭐⭐ 新增后端 = 一个子类 + 一条登记；旧方法名薄兼容委托，生产 config 零迁移 | 中 | 无 | ✅ **已施工（P0 ticket 07，`72b84ef`）** |
+
+> **P0 批（B-11…B-16）集成验证**：全量测试 429 OK (skipped=3)；静态核验（判据/分支/私有直写三清零）与 config 热重载冒烟已过（见 `ws: .scratch/bridge-p0-announce-registry/` 票 08 §Answer）；**真机冒烟三组待执行**——执行前禁部署镜像（`rollback-*` tag 惯例不变）。
 
 > 本轮 baseline 的 ticket 01–10 与逐项落点见 `ws: .scratch/lx06-voice-hub-baseline/`；本表状态与其同步。
 > 2026-10-24 已部署到 NAS：镜像 `open-xiaoai-bridge:04b0709e51`；回滚 tag `open-xiaoai-bridge:rollback-20261024`。
 > 后续验证/优化（ASR A/B、注入 E2E、native 事件源、架构 preflight）见
 > `ws: .scratch/lx06-voice-hub-followups/`；B 列表只保留 bridge 施工。
+> **下一批待办来源（2026-10-25）**：preflight 14 票已收口，B-11 起的候选项与分批裁决见
+> `ws: docs/plan/bridge-architecture-optimization-plan.md`（C1…C8 深化候选 + P0–P3 路线）；开工时逐项转入本表。
 
 **已降级为台账（不再列为待办）**：
 
