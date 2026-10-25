@@ -70,45 +70,24 @@ async def _run_steps(speaker, steps):
     """执行指令表的一步序列：str=播报，("ha",…)=HA 调用，callable=任意函数。
     kws 免唤醒（DIRECT_COMMANDS）与小爱截胡（XIAOAI_COMMANDS）共用同一执行逻辑。
 
-    incident-kws-self-trigger-loop.md §5 建议 1：每逢 `str` 播报都开/关 KWS 播放闸门，
-    防止播报文案命中自身词表形成自触发回环（本次事故的直接根因）。
-    ticket 10：软件闸门之外再叠一层固件级闭麦（`speaker.mic_gate`），两层互不替代。
+    P0 ticket 03：`str` 播报改走 `speaker.announce`（双闸门 + 词表安全检查 +
+    完成等待 + finally 归还），本文件不再手工编排闸门。词表检查沿用默认拒绝：
+    指令确认文案属部署配置，若与词表冲突应在改词表/文案时显式处置，
+    而不是静默豁免（现存全部 str 文案经测试核验不在词表内）。
     """
     for step in steps:
         if isinstance(step, str):
-            async with speaker.mic_gate("run_steps TTS", max_seconds=300):
-                token = _gate_kws("run_steps TTS", max_seconds=300)
-                try:
-                    await speaker.play(text=step)
-                finally:
-                    _ungate_kws(token)
+            async with speaker.announce(
+                text=step,
+                reason="run_steps TTS",
+                wait=False,  # play(text) 阻塞式内含等完成
+                gate_seconds=300,
+            ):
+                await speaker.play(text=step)
         elif isinstance(step, tuple) and step[0] == "ha":
             await hass_action(step[1], step[2], step[3] if len(step) > 3 else None)
         elif callable(step):
             await step(speaker)
-
-
-def _gate_kws(reason: str, max_seconds: float = 60.0):
-    """开启 KWS 播放闸门（失败不阻断播报）。返回 token 或 None。"""
-    kws = get_kws()
-    if not kws:
-        return None
-    try:
-        return kws.gate_on(reason=reason, max_seconds=max_seconds)
-    except Exception as e:
-        logger.warning(f"[home] KWS gate_on failed ({reason}): {e}")
-        return None
-
-
-def _ungate_kws(token):
-    """关闭 KWS 播放闸门（失败不抛）。"""
-    kws = get_kws()
-    if not kws:
-        return
-    try:
-        kws.gate_off(token)
-    except Exception as e:
-        logger.warning(f"[home] KWS gate_off failed: {e}")
 
 
 # ---------- 学科辅导导师人设（「你好老师」专属会话） ----------

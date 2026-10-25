@@ -206,14 +206,19 @@ class WakeupSessionManager:
 
         if kws:
             kws.pause()
-        should_wakeup = await before_wakeup(
-            get_speaker(),
-            text,
-            source,
-            get_app(),
-        )
-        if kws:
-            kws.resume()
+        # P0 ticket 03：before_wakeup 里的播报经 announce 后有了确定性异常路径
+        # （AnnounceRejected）；resume 必须放 finally，否则 KWS 会话暂停态
+        # （内存标志，无看门狗）会保持到重启，音箱再也听不到唤醒词。
+        try:
+            should_wakeup = await before_wakeup(
+                get_speaker(),
+                text,
+                source,
+                get_app(),
+            )
+        finally:
+            if kws:
+                kws.resume()
         logger.info(f"[Wakeup] before_wakeup returned: {should_wakeup}")
         if should_wakeup is not None:
             await self.reset_all_sessions()

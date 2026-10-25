@@ -522,25 +522,6 @@ class APIServer:
             seconds = 600.0
         return max(30.0, min(seconds + extra, 900.0))
 
-    def _gate_kws(self, kws, reason: str, max_seconds: float = 60.0):
-        """开 KWS 播放闸门（失败不阻断播报）。"""
-        if not kws:
-            return None
-        try:
-            return kws.gate_on(reason=reason, max_seconds=max_seconds)
-        except Exception as e:
-            logger.warning(f"[APIServer] KWS gate_on failed ({reason}): {e}")
-            return None
-
-    def _ungate_kws(self, kws, token):
-        """关 KWS 播放闸门（失败不抛）。"""
-        if not kws:
-            return
-        try:
-            kws.gate_off(token)
-        except Exception as e:
-            logger.warning(f"[APIServer] KWS gate_off failed: {e}")
-
     def _setup_routes(self):
         """Setup API routes"""
         self.app.router.add_post("/api/play/text", self.handle_play_text)
@@ -765,52 +746,46 @@ class APIServer:
                     status=503
                 )
 
-            # incident §5: 任何外部播报都需 KWS 闸门（同 /api/play/text）
+            # incident §5: 任何外部播报都需闸门编排（经 speaker.announce，P0 ticket 03）
             # 建议 7：记录调用方
             logger.info(
                 f"[APIServer] /api/play/url caller={self._caller_tag(request)} "
                 f"blocking={blocking} url={self._redact_text(url, 60)!r}"
             )
-            kws = get_kws()
 
             if blocking:
-                gate_seconds = self._mic_gate_seconds(timeout)
-                async with speaker.mic_gate(
-                    "api/play/url blocking",
-                    max_seconds=gate_seconds,
-                ):
-                    token = self._gate_kws(
-                        kws, "api/play/url blocking", max_seconds=gate_seconds
-                    )
-                    try:
+                try:
+                    async with speaker.announce(
+                        text=None,  # URL 内容不可做词表检查
+                        reason="api/play/url blocking",
+                        gate_seconds=self._mic_gate_seconds(timeout),
+                        wait=False,  # 阻塞播放内含等完成
+                    ):
                         result = await speaker.play(
                             url=url, blocking=True, timeout=timeout
                         )
-                    finally:
-                        self._ungate_kws(kws, token)
+                except AnnounceRejected as e:
+                    return web.json_response(
+                        {"success": False, "error": str(e), "code": "announce_rejected"},
+                        status=400,
+                    )
                 return web.json_response({"success": result})
             else:
-                budget = 125.0
-
-                async def _play_url_and_ungate():
-                    # 固件闸门覆盖到真正播完（事件适配器 + 超时兜底）。
-                    async with speaker.mic_gate(
-                        "api/play/url background", max_seconds=budget
+                async def _announce_url_in_background():
+                    # 预算沿用改前口径：闸门上限 125s、完成等待 120s。
+                    async with speaker.announce(
+                        text=None,
+                        reason="api/play/url background",
+                        gate_seconds=125.0,
+                        wait_budget_ms=120_000.0,
                     ):
-                        token = self._gate_kws(
-                            kws, "api/play/url background", max_seconds=budget
+                        await speaker.play(
+                            url=url, blocking=False, timeout=timeout
                         )
-                        try:
-                            await speaker.play(
-                                url=url, blocking=False, timeout=timeout
-                            )
-                            await get_playback_events().wait_for_finish(
-                                120_000.0
-                            )
-                        finally:
-                            self._ungate_kws(kws, token)
 
-                asyncio.create_task(_play_url_and_ungate())
+                self._create_background_task(
+                    _announce_url_in_background(), "play/url announce"
+                )
                 return web.json_response({"success": True, "message": "Playing URL in background"})
 
         except json.JSONDecodeError:
@@ -890,26 +865,25 @@ class APIServer:
             logger.info(f"[APIServer] Saved upload to temp file: {temp_path}")
 
             async def play_audio():
-                # incident §5: 文件播报也走音箱功放，同样需 KWS 闸门
-                kws_local = get_kws()
+                # incident §5: 文件播报也走音箱功放（闸门编排经 speaker.announce，P0 ticket 03；
+                # 文件内容不可做词表检查，text=None）
                 try:
-                    async with speaker.mic_gate("api/play/file", max_seconds=305.0):
-                        token = self._gate_kws(
-                            kws_local, "api/play/file", max_seconds=305.0
+                    async with speaker.announce(
+                        text=None,
+                        reason="api/play/file",
+                        gate_seconds=305.0,
+                        wait=False,  # play_server_file 阻塞到播完
+                    ):
+                        success = await speaker.play_server_file(
+                            temp_path,
+                            blocking=True,
+                            sample_rate=sample_rate,
                         )
-                        try:
-                            success = await speaker.play_server_file(
-                                temp_path,
-                                blocking=True,
-                                sample_rate=sample_rate,
-                            )
-                        finally:
-                            self._ungate_kws(kws_local, token)
-                        if success:
-                            logger.info(f"[APIServer] Finished playing: {filename}")
-                        else:
-                            logger.error(f"[APIServer] Error playing file: {filename}")
-                        return success
+                    if success:
+                        logger.info(f"[APIServer] Finished playing: {filename}")
+                    else:
+                        logger.error(f"[APIServer] Error playing file: {filename}")
+                    return success
                 finally:
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)

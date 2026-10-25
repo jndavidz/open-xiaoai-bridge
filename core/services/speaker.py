@@ -563,8 +563,6 @@ class SpeakerManager:
     # 完成等待（事件适配 + 文本估算超时兜底），finally 保证双闸门归还。
     # 事故档案 docs/plan/incident-kws-self-trigger-loop.md §5 建议 1 的
     # 手工清单在这里转为自动化纪律；新播报入口一律经此接入。
-    # ⚠️ /api/play/url、/api/play/file、_run_steps 仍是旧手工编排，
-    #    按 P0 票 03 迁移后删除其本地副本。
     # ------------------------------------------------------------------
 
     def _gate_kws(self, kws: Any, reason: str, max_seconds: float) -> str | None:

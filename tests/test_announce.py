@@ -342,6 +342,40 @@ class FakeRequest:
         return self._payload
 
 
+class _FakeMultipartField:
+    def __init__(self, data: bytes):
+        self.name = "file"
+        self.filename = "hello.mp3"
+        self._data = data
+        self._sent = False
+
+    async def read_chunk(self, size=8192):
+        if self._sent:
+            return b""
+        self._sent = True
+        return self._data
+
+
+class _FakeMultipartReader:
+    def __init__(self, field):
+        self._field = field
+
+    async def next(self):
+        return self._field
+
+
+class FakeMultipartRequest(FakeRequest):
+    """/api/play/file 的 multipart 替身。"""
+
+    def __init__(self, data: bytes = b"\x00\x01", query=None):
+        super().__init__(payload=None)
+        self.query = query or {}
+        self._reader = _FakeMultipartReader(_FakeMultipartField(data))
+
+    async def multipart(self):
+        return self._reader
+
+
 class _FakeAdminAPI:
     async def auth_middleware(self, request, handler):
         return await handler(request)
@@ -416,8 +450,8 @@ def _load_api_server_module():
     return module, saved
 
 
-class PlayTextEndpointTest(unittest.IsolatedAsyncioTestCase):
-    """/api/play/text 全路径走 announce（tracer 入口）。"""
+class PlayEndpointsTest(unittest.IsolatedAsyncioTestCase):
+    """/api/play/{text,url,file} 全路径走 announce（票 02 tracer + 票 03 全量迁移）。"""
 
     @classmethod
     def setUpClass(cls):
@@ -516,6 +550,175 @@ class PlayTextEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.sleep(0.1)
         self.device.assert_called("text_to_speech")
+        self.assertEqual(self.kws.count, 0)
+        self.assertFalse(self.device.muted)
+
+    # ---- /api/play/url（P0 ticket 03 迁移）----
+
+    async def test_url_blocking_plays_and_releases_gates(self) -> None:
+        self.device.on("miplayer", "", exit_code=0)
+
+        resp = await self.server.handle_play_url(
+            FakeRequest({"url": "http://nas/a.mp3", "blocking": True})
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(json.loads(resp.text)["success"])
+        self.device.assert_called("miplayer -f 'http://nas/a.mp3'")
+        self.assertEqual(self.kws.count, 0)
+        self.assertFalse(self.device.muted)
+
+    async def test_url_nonblocking_waits_finish_and_releases_gates(self) -> None:
+        self.device.on("player_play_url", '{"code": 0}')
+        self.device.on("player_get_context", _context(0))  # 空闲 → 等完成立即判定
+
+        resp = await self.server.handle_play_url(
+            FakeRequest({"url": "http://nas/a.mp3", "blocking": False})
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(json.loads(resp.text)["success"])
+
+        await asyncio.sleep(0.1)
+        self.device.assert_called("player_play_url")
+        self.assertEqual(self.kws.count, 0)
+        self.assertFalse(self.device.muted)
+
+    async def test_url_is_not_word_list_checked(self) -> None:
+        # URL 内容不可做词表检查（text=None）：即便词表已注入，URL 照常播报。
+        self._wire_blocked()
+        self.device.on("miplayer", "", exit_code=0)
+
+        resp = await self.server.handle_play_url(
+            FakeRequest({"url": "http://nas/开启高保真.mp3", "blocking": True})
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(json.loads(resp.text)["success"])
+        self.device.assert_called("miplayer -f")
+
+    # ---- /api/play/file（P0 ticket 03 迁移）----
+
+    async def test_file_blocking_plays_and_releases_gates(self) -> None:
+        resp = await self.server.handle_play_file(
+            FakeMultipartRequest(query={"blocking": "true"})
+        )
+        self.assertEqual(resp.status, 200)
+        body = json.loads(resp.text)
+        self.assertTrue(body["success"])
+        self.assertEqual(self.kws.count, 0)
+        self.assertFalse(self.device.muted)
+
+    async def test_file_nonblocking_plays_in_background_and_releases_gates(self) -> None:
+        resp = await self.server.handle_play_file(
+            FakeMultipartRequest(query={"blocking": "false"})
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(json.loads(resp.text)["success"])
+
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.kws.count, 0)
+        self.assertFalse(self.device.muted)
+
+
+# ---------------------------------------------------------------- _run_steps（P0 ticket 03）
+
+
+def _load_deploy_config(module_name: str = "deploy_config_under_test"):
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / "deploy" / "config.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class RunStepsAnnounceTest(AnnounceTestBase):
+    """免唤醒/截胡指令执行器的 str 播报改走 announce（票 03 验收项 3）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.deploy = _load_deploy_config()
+
+    def test_run_steps_plays_via_announce_and_keeps_gates_paired(self) -> None:
+        self.device.on("text_to_speech", _synth())
+        self.device.on("[ -f", "yes")
+        self.device.on("player_play_url", '{"code": 0}')
+        self.device.on("player_get_context", _context(0))
+
+        ha_calls: list[tuple] = []
+        callable_calls: list[object] = []
+
+        async def _fake_hass(domain, service, data=None):
+            ha_calls.append((domain, service, data))
+            return 200
+
+        async def _callable_step(speaker):
+            callable_calls.append(speaker)
+
+        steps = [
+            "正在准备客厅音响",
+            self.deploy.ha_script("hifi_mode"),
+            _callable_step,
+        ]
+        with mock.patch.object(self.deploy, "hass_action", _fake_hass):
+            _run(self.deploy._run_steps(self.speaker, steps))
+
+        self.device.assert_called("text_to_speech")
+        self.device.assert_called('"event":7')
+        self.device.assert_called('"event":8')
+        self.assertEqual(self.kws.count, 0)
+        self.assertFalse(self.device.muted)
+        self.assertEqual(ha_calls, [("script", "turn_on", {"entity_id": "script.hifi_mode"})])
+        self.assertEqual(callable_calls, [self.speaker])
+
+    def test_deployed_command_texts_are_clean_against_deployed_word_sources(self) -> None:
+        # 票 03 验收项 3 的自动化：把 deploy/config.py 按运行时同形方式
+        # 加载为 config 模块（CONFIG_PATH 机制即如此），断言全部 str 播报
+        # 文案对两组词源（deploy 词表 + 指令键）零命中——不需要豁免。
+        saved = sys.modules.get("config")
+        sys.modules["config"] = _load_deploy_config("config")
+        try:
+            keywords = self.deploy.APP_CONFIG["wakeup"]["keywords"]
+            with mock.patch.object(speaker_module, "_kws_keywords", lambda: keywords):
+                # _config_command_keys 不打桩：让它真读 sys.modules["config"]
+                # （上面按运行时同形方式加载的 deploy 配置），顺带覆盖其接线。
+                for table in (
+                    self.deploy.DIRECT_COMMANDS,
+                    self.deploy.XIAOAI_COMMANDS,
+                ):
+                    for key, steps in table.items():
+                        for step in steps:
+                            if isinstance(step, str):
+                                self.assertIsNone(
+                                    speaker_module.find_blocked_word(step),
+                                    f"{key} 的确认文案命中词表：{step!r}",
+                                )
+        finally:
+            if saved is None:
+                sys.modules.pop("config", None)
+            else:
+                sys.modules["config"] = saved
+
+    def test_word_hit_in_run_steps_rejects_and_stops_sequence(self) -> None:
+        # 默认拒绝语义：若未来部署文案与词表冲突，_run_steps 在该步失败、
+        # 后续动作不执行——部署者必须在改词表/文案时显式处置，而不是静默豁免。
+        self.device.on("text_to_speech", '{"code": 0}')
+
+        ha_calls: list[tuple] = []
+
+        async def _fake_hass(domain, service, data=None):
+            ha_calls.append((domain, service, data))
+            return 200
+
+        steps = ["正在准备客厅音响", self.deploy.ha_script("hifi_mode")]
+        with (
+            mock.patch.object(speaker_module, "_kws_keywords", lambda: ["准备客厅"]),
+            mock.patch.object(speaker_module, "_config_command_keys", lambda: []),
+            mock.patch.object(self.deploy, "hass_action", _fake_hass),
+        ):
+            with self.assertRaises(speaker_module.AnnounceRejected):
+                _run(self.deploy._run_steps(self.speaker, steps))
+
+        self.device.assert_not_called("text_to_speech")
+        self.assertEqual(ha_calls, [], "被拒步骤之后的动作不得执行")
         self.assertEqual(self.kws.count, 0)
         self.assertFalse(self.device.muted)
 

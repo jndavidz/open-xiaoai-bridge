@@ -217,7 +217,7 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 - `ask_xiaoai(text, silent)` → 让小爱执行指令
 - `run_shell(command, timeout)` → RPC shell
 - `mic_gate(reason, max_seconds)` → 播报期间固件闭麦；退出恢复进入前麦态快照（绝无条件开麦）；持有期间串行化，避免并发播报嵌套
-- `announce(text, *, reason, exempt, wait, gate_seconds, wait_budget_ms)` → **播报编排深模块（P0 ticket 02）**：进入做双闸门 + 词表安全检查（文案命中唤醒/指令词表默认拒绝并告警，raise `AnnounceRejected`；`exempt=True` 显式豁免），body 经设备能力层播放，退出等完成（事件适配 + 文本估算超时兜底）并 finally 双闸门归还。**新播报入口一律经此接入**（P0 票 03 迁移 /api/play/url、/api/play/file、`_run_steps` 后，闸门手工编排只剩这一个权威位置）
+- `announce(text, *, reason, exempt, wait, gate_seconds, wait_budget_ms)` → **播报编排深模块（P0 ticket 02/03）**：进入做双闸门 + 词表安全检查（文案命中唤醒/指令词表默认拒绝并告警，raise `AnnounceRejected`；`exempt=True` 显式豁免），body 经设备能力层播放，退出等完成（事件适配 + 文本估算超时兜底）并 finally 双闸门归还。**全部播报入口（/api/play/{text,url,file} 与 `_run_steps`）已经此接入——闸门手工编排的权威位置只有这一个**，新增播报入口（早间简报等）一律一行接入
 - `reconcile_mic_state()` → 首个事件到达后清理 bridge 崩溃遗留的设备级静音
   > ⚠️ KWS `listen_disabled` 当前是内存态：bridge 重启后无法区分「用户停止聆听」与
   > 「崩溃遗留静音」，reconcile 会按未停止聆听处理。需要严格区分时须持久化该开关（未实现）。
@@ -733,12 +733,11 @@ TTS 播报期间 KWS 从未被暂停 → 播报文案命中自身词表 → 音�
 | `paused`（派生属性） | `_conv_paused or 闸门计数>0` —— 会话暂停与播放闸门**正交** |
 | `gate_status()` | `(计数, 原因列表)`，供可观测性 |
 
-**落点**（P0 ticket 02 起收敛到 `speaker.announce`，其余待票 03 迁移）：
-1. `speaker.announce(...)`（`core/services/speaker.py`）—— **权威位置**：双闸门 + 词表安全检查 +
-   完成等待 + finally 归还；`/api/play/text` 已切换（P0 ticket 02）
-2. `deploy/config.py` 的 `_run_steps` —— 免唤醒/截胡指令的 `str` 播报（**P0 票 03 迁移**）
-3. `core/services/api_server.py` 的 `/api/play/url`、`/api/play/file`
-   —— **HA/企业微信/DDNS 等所有外部播报**（事故的真正入口，**P0 票 03 迁移**）
+**落点**（P0 ticket 02/03 起全部收敛到 `speaker.announce`）：
+1. `speaker.announce(...)`（`core/services/speaker.py`）—— **唯一权威位置**：双闸门 + 词表安全检查 +
+   完成等待 + finally 归还；`/api/play/text`（票 02）、`/api/play/url`、`/api/play/file`、
+   `deploy/config.py` 的 `_run_steps`（均票 03）已全部切换
+2. ~~各入口的 mic_gate/`gate_on` 手工编排~~ 已删除——闸门知识只活在 announce 与 KWS 类内
 
 **硬约束**：
 - 必须 `try/finally`（异常也要 `gate_off`），否则 KWS 永久失效
