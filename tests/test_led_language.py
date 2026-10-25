@@ -131,19 +131,21 @@ class LedLanguageRenderingTest(_Base):
 
         async def scenario():
             await led._render_state("listening")
+            # 批量写：一态一条 shell（18 灯合并，真机实测逐灯 RPC 太慢）
             calls_blue = [c for c in self.device.calls if "2e6fdb" in c[0]]
-            self.assertEqual(led_module.PIXEL_COUNT, len(calls_blue))
+            self.assertEqual(1, len(calls_blue))
+            self.assertIn("for i in $(seq 0 17)", calls_blue[0][0])
             await led._render_state("processing")
             calls_amber = [c for c in self.device.calls if "f0a902" in c[0]]
-            self.assertEqual(led_module.PIXEL_COUNT, len(calls_amber))
+            self.assertEqual(1, len(calls_amber))
             # speaking：不干预（系统 L=3/L=12 播放动画自带）
             before = len(self.device.calls)
             await led._render_state("speaking")
             self.assertEqual(before, len(self.device.calls))
-            # idle：写黑归位（18 灯 0x000000）
+            # idle：写黑归位
             await led._render_state("idle")
             calls_off = [c for c in self.device.calls if "000000" in c[0]]
-            self.assertEqual(led_module.PIXEL_COUNT, len(calls_off))
+            self.assertEqual(1, len(calls_off))
 
         _run(scenario())
 
@@ -166,11 +168,11 @@ class LedLanguageRenderingTest(_Base):
                 await led._render("turn_ended", {"outcome": "cancelled:wakeup_interrupt"})
                 red = [c for c in self.device.calls if "f85869" in c[0]]
                 off = [c for c in self.device.calls if "000000" in c[0]]
-                self.assertEqual(led_module.PIXEL_COUNT, len(red))
-                self.assertEqual(led_module.PIXEL_COUNT, len(off))
+                self.assertEqual(1, len(red))
+                self.assertEqual(1, len(off))
                 await led._render("turn_ended", {"outcome": "error"})
                 red2 = [c for c in self.device.calls if "f85869" in c[0]]
-                self.assertEqual(led_module.PIXEL_COUNT * 2, len(red2))
+                self.assertEqual(2, len(red2))
 
         _run(scenario())
 

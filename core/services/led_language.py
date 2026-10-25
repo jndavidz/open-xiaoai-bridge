@@ -122,18 +122,25 @@ class LedLanguage:
 
     # ---- 灯面原语（串行锁内执行） ----
 
+    async def _write_all(self, device, color: str) -> None:
+        """单条 shell 批量写 18 灯（真机实测：逐灯 RPC 每条一次设备往返，
+        18 条 ≈1s+，琥珀会迟到；合并为一条往返，观感即时）。"""
+        script = (
+            "for i in $(seq 0 {n}); do echo \"$i 0x{c}\" > "
+            "/sys/devices/i2c-0/0-003a/led_rgb; done"
+        ).format(n=PIXEL_COUNT - 1, c=color)
+        await device.shell(script)
+
     async def _fill(self, device, color: str) -> None:
         async with self._serial:
-            for index in range(PIXEL_COUNT):
-                await device.led_set_pixel(index, color)
+            await self._write_all(device, color)
             self._held_color = color
 
     async def _clear(self, device) -> None:
         if self._held_color is None:
             return  # 没点过灯就不碰（不抢系统的灯）
         async with self._serial:
-            for index in range(PIXEL_COUNT):
-                await device.led_set_pixel(index, COLOR_OFF)
+            await self._write_all(device, COLOR_OFF)
             self._held_color = None
 
     async def _flash(self, color: str, seconds: float) -> None:
@@ -142,13 +149,11 @@ class LedLanguage:
 
         device = get_device()
         async with self._serial:
-            for index in range(PIXEL_COUNT):
-                await device.led_set_pixel(index, color)
+            await self._write_all(device, color)
             self._held_color = color
         await asyncio.sleep(seconds)
         async with self._serial:
-            for index in range(PIXEL_COUNT):
-                await device.led_set_pixel(index, COLOR_OFF)
+            await self._write_all(device, COLOR_OFF)
             self._held_color = None
 
 
