@@ -45,6 +45,7 @@ class OpenAIManager(BackendManagerBase):
     # "X-Hermes-Session-Key" for long-term memory scoping). Standard OpenAI /
     # Ollama / LM Studio ignore the unknown header; set empty to disable.
     _session_header = "X-Hermes-Session-Key"
+    DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     _system_prompt = ""
     # Per-session persona override: session_key -> system prompt.
     # Takes precedence over _system_prompt when present (e.g. tutor vs Jarvis).
@@ -71,7 +72,7 @@ class OpenAIManager(BackendManagerBase):
             )
             api_style = "chat_completions"
         cls._api_style = api_style
-        cls._session_key = str(config.get("session_key", "agent:default:open-xiaoai-bridge"))
+        cls._session_key = str(config.get("session_key", cls.DEFAULT_SESSION_KEY))
         cls._session_header = str(config.get("session_header", "X-Hermes-Session-Key") or "").strip()
         cls._system_prompt = str(config.get("system_prompt", "") or "")
         # Optional static overrides from config: {"agent:tutor:home": "..."}

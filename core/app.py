@@ -408,37 +408,45 @@ class MainApp:
         if self.xiaozhi and self.xiaozhi.is_connected():
             await self.xiaozhi.send_text(text)
 
-    async def send_to_openclaw(self, text: str, wait_response: bool = False) -> str | None:
-        """Send message to OpenClaw (for skill-based autonomous playback).
+    # ---- 外部后端发送（查注册表的通用实现；旧方法名为薄兼容委托） ----
 
-        Automatically appends rule_prompt_for_skill if configured.
-        Returns run_id or response text on success, None on failure.
+    async def _send_to_backend(
+        self,
+        name: str,
+        text: str,
+        wait_response: bool = False,
+        and_play: bool = False,
+    ) -> str | None:
+        """向注册表后端发送消息（and_play=True 时经 TTS 播放回复）。
+
+        按路径自动追加规则提示：播放路径用 rule_prompt，纯发送用
+        rule_prompt_for_skill。成功返回 run_id 或回复文本，失败返回 None。
         """
-        try:
-            from core.openclaw import OpenClawManager
-            full_text = text
-            if OpenClawManager._rule_prompt_for_skill:
-                full_text = text + "\n" + OpenClawManager._rule_prompt_for_skill
-            return await OpenClawManager.send(full_text, wait_response=wait_response)
-        except Exception as e:
-            logger.error(f"[MainApp] 发送消息到 OpenClaw 失败: {type(e).__name__}: {e}")
+        from core.backend_registry import backend_registry
+
+        entry = backend_registry.get(name)
+        if entry is None:
+            logger.error(f"[MainApp] Unknown backend: {name}")
             return None
+        manager = entry.manager
+        try:
+            rule = manager.rule_prompt_for(and_play)
+            full_text = text + "\n" + rule if rule else text
+            sender = manager.send_and_play_reply if and_play else manager.send
+            return await sender(full_text, wait_response=wait_response)
+        except Exception as e:
+            logger.error(
+                f"[MainApp] 发送消息到 {entry.display_name} 失败: {type(e).__name__}: {e}"
+            )
+            return None
+
+    async def send_to_openclaw(self, text: str, wait_response: bool = False) -> str | None:
+        """发送消息到 OpenClaw（技能自治播报通道）。"""
+        return await self._send_to_backend("openclaw", text, wait_response)
 
     async def send_to_openclaw_and_play_reply(self, text: str, wait_response: bool = False) -> str | None:
-        """Send message to OpenClaw and play the reply via TTS.
-
-        Automatically appends rule_prompt if configured.
-        Returns run_id or response text on success, None on failure.
-        """
-        try:
-            from core.openclaw import OpenClawManager
-            full_text = text
-            if OpenClawManager._rule_prompt:
-                full_text = text + "\n" + OpenClawManager._rule_prompt
-            return await OpenClawManager.send_and_play_reply(full_text, wait_response=wait_response)
-        except Exception as e:
-            logger.error(f"[MainApp] 发送消息到 OpenClaw 失败: {type(e).__name__}: {e}")
-            return None
+        """发送消息到 OpenClaw 并经 TTS 播放回复。"""
+        return await self._send_to_backend("openclaw", text, wait_response, and_play=True)
 
     def set_openclaw_session_key(self, session_key: str):
         """Override the OpenClaw session key at runtime.
@@ -452,33 +460,16 @@ class MainApp:
         OpenClawManager.set_session_key(session_key)
 
     async def send_to_openai(self, text: str, wait_response: bool = False) -> str | None:
-        """Send message to the OpenAI-compatible service."""
-        try:
-            full_text = text
-            if OpenAIManager._rule_prompt_for_skill:
-                full_text = text + "\n" + OpenAIManager._rule_prompt_for_skill
-            return await OpenAIManager.send(full_text, wait_response=wait_response)
-        except Exception as e:
-            logger.error(f"[MainApp] 发送消息到 OpenAI 兼容服务失败: {type(e).__name__}: {e}")
-            return None
+        """发送消息到 OpenAI 兼容服务。"""
+        return await self._send_to_backend("openai", text, wait_response)
 
     async def send_to_openai_and_play_reply(
         self,
         text: str,
         wait_response: bool = False,
     ) -> str | None:
-        """Send message to the OpenAI-compatible service and play the reply."""
-        try:
-            full_text = text
-            if OpenAIManager._rule_prompt:
-                full_text = text + "\n" + OpenAIManager._rule_prompt
-            return await OpenAIManager.send_and_play_reply(
-                full_text,
-                wait_response=wait_response,
-            )
-        except Exception as e:
-            logger.error(f"[MainApp] 发送消息到 OpenAI 兼容服务失败: {type(e).__name__}: {e}")
-            return None
+        """发送消息到 OpenAI 兼容服务并经 TTS 播放回复。"""
+        return await self._send_to_backend("openai", text, wait_response, and_play=True)
 
     def set_openai_session_key(self, session_key: str):
         """Override the OpenAI-compatible service session key at runtime."""
@@ -492,33 +483,16 @@ class MainApp:
         OpenAIManager.set_session_system_prompt(prompt)
 
     async def send_to_qwenpaw(self, text: str, wait_response: bool = False) -> str | None:
-        """Send message to QwenPaw."""
-        try:
-            full_text = text
-            if QwenPawManager._rule_prompt_for_skill:
-                full_text = text + "\n" + QwenPawManager._rule_prompt_for_skill
-            return await QwenPawManager.send(full_text, wait_response=wait_response)
-        except Exception as e:
-            logger.error(f"[MainApp] 发送消息到 QwenPaw 失败: {type(e).__name__}: {e}")
-            return None
+        """发送消息到 QwenPaw。"""
+        return await self._send_to_backend("qwenpaw", text, wait_response)
 
     async def send_to_qwenpaw_and_play_reply(
         self,
         text: str,
         wait_response: bool = False,
     ) -> str | None:
-        """Send message to QwenPaw and play the reply."""
-        try:
-            full_text = text
-            if QwenPawManager._rule_prompt:
-                full_text = text + "\n" + QwenPawManager._rule_prompt
-            return await QwenPawManager.send_and_play_reply(
-                full_text,
-                wait_response=wait_response,
-            )
-        except Exception as e:
-            logger.error(f"[MainApp] 发送消息到 QwenPaw 失败: {type(e).__name__}: {e}")
-            return None
+        """发送消息到 QwenPaw 并经 TTS 播放回复。"""
+        return await self._send_to_backend("qwenpaw", text, wait_response, and_play=True)
 
     def set_qwenpaw_session_key(self, session_key: str):
         """Override the QwenPaw session key at runtime."""

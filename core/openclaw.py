@@ -82,6 +82,7 @@ class OpenClawManager(BackendManagerBase):
     _should_reconnect = False  # flag to indicate intentional disconnect vs unexpected
 
     # Config（连接与 TTS 之外的字段归基类；agent_tts_speakers 按 agentId 覆盖）
+    DEFAULT_SESSION_KEY = "agent:main:open-xiaoai-bridge"
     _ack_timeout = 60  # seconds to wait for request accepted response
     _agent_tts_speakers: dict[str, str] = {}  # Per-agent speaker overrides
     _url = None
@@ -104,7 +105,7 @@ class OpenClawManager(BackendManagerBase):
 
         cls._url = config.get("url", "ws://localhost:4399")
         cls._token = config.get("token", "")
-        cls._session_key = config.get("session_key", "agent:main:open-xiaoai-bridge")
+        cls._session_key = config.get("session_key", cls.DEFAULT_SESSION_KEY)
         cls._identity_path = cls._resolve_identity_path(config.get("identity_path"))
         raw_agent_speakers = config.get("agent_tts_speakers", {})
         cls._agent_tts_speakers = (

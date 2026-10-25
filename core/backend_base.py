@@ -46,6 +46,8 @@ class BackendManagerBase:
     ENABLE_ENV_VARS: tuple[str, ...] = ()
     # 日志模块名，例如 "OpenAI"；日志行形如 "[OpenAI] ..."
     LOG_MODULE: str = ""
+    # 会话键配置缺省值（config 未配 session_key 时的回落）
+    DEFAULT_SESSION_KEY: str = ""
 
     XIAOAI_TTS_SPEAKER = "xiaoai"
 
@@ -198,6 +200,25 @@ class BackendManagerBase:
             f"{cls._session_key!r} -> {session_key!r}"
         )
         cls._session_key = session_key
+
+    @classmethod
+    def reset_session_key(cls, config_manager=None):
+        """把会话键复位到当前配置默认值（每次唤醒前调用；静默，不打日志）。
+
+        这是会话键复位的唯一公开接口——消费方不得直写 _session_key。
+        与 config.get("session_key", DEFAULT_SESSION_KEY) 同语义：键缺失
+        回落默认，显式空串原样保留（OpenAI 用空串禁用会话头，不得吞掉）。
+        """
+        if config_manager is None:
+            config_manager = ConfigManager.instance()
+        cls._session_key = config_manager.get_app_config(
+            cls.CONFIG_PREFIX, {}
+        ).get("session_key", cls.DEFAULT_SESSION_KEY)
+
+    @classmethod
+    def rule_prompt_for(cls, and_play: bool) -> str:
+        """取规则提示：播放路径用 rule_prompt，纯发送路径用 rule_prompt_for_skill。"""
+        return cls._rule_prompt if and_play else cls._rule_prompt_for_skill
 
     @classmethod
     def get_tts_speaker_for_session_key(cls, session_key: str | None = None) -> str | None:
