@@ -28,6 +28,7 @@ token 估算口径（面板脚注同源）：上游响应带 `usage` 时记真�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -44,7 +45,8 @@ CHARS_PER_TOKEN = 1.6
 ESTIMATION_NOTE = (
     "token 为估算值：上游返回 usage 时用真实值（真实列），"
     "否则按 1 token ≈ 1.6 字符估算（估算列，中文口径）；"
-    "两列口径独立不混加。本页仅记账展示，无任何限额/断路/切换控制。"
+    "估算列按全部字符计（含已报真实值的请求），两列口径独立不混加、"
+    "不可相加互代。本页仅记账展示，无任何限额/断路/切换控制。"
 )
 
 # 轮次记录的计数字段（聚合时求和；全部 int）
@@ -142,6 +144,9 @@ def observe(summary: dict[str, Any]) -> bool:
     """把一轮的 TurnTrace summary 写成一行 JSONL（任何异常静默吞掉）。
 
     返回是否成功落盘；开关关闭或 summary 非法时返回 False，不抛异常。
+    调用方多在事件循环线程（turn_trace._emit）：有运行中 loop 时把磁盘
+    写卸载到默认 executor（NAS HDD 一次 seek ~10ms，不值得阻塞循环），
+    写入经 _WRITE_LOCK 串行化；无 loop（纯同步调用）时直接写。
     """
     try:
         if not isinstance(summary, dict) or not enabled():
@@ -168,14 +173,27 @@ def observe(summary: dict[str, Any]) -> bool:
             "llm_timeouts": _int_or_zero(summary.get("llm_timeout")),
         }
         base = ledger_dir()
-        base.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        with _WRITE_LOCK:
-            with open(_record_path(record["date"], base), "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _append_line(record["date"], line, base)
+            return True
+        # 事件循环内：fire-and-forget 卸载到 executor（异常在 _append_line 内吞掉）
+        loop.run_in_executor(None, _append_line, record["date"], line, base)
         return True
     except Exception:  # noqa: BLE001 - 记账不得影响主流程
         return False
+
+
+def _append_line(day: str, line: str, base: Path) -> None:
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        with _WRITE_LOCK:
+            with open(_record_path(day, base), "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception:  # noqa: BLE001 - 记账不得影响主流程
+        pass
 
 
 def _empty_row() -> dict[str, int]:

@@ -66,6 +66,17 @@ def _delta_has_tool_calls(event: dict) -> bool:
     return isinstance(delta, dict) and bool(delta.get("tool_calls"))
 
 
+def _usage_tokens(usage: Any) -> dict[str, Any]:
+    """上游 usage 字典 → note_usage_tokens 关键字参数（两种命名都认；
+    非 dict / 缺失返回空 dict = 未观测，台账按字符估算）。"""
+    if not isinstance(usage, dict):
+        return {}
+    return {
+        "prompt": usage.get("prompt_tokens", usage.get("input_tokens")),
+        "completion": usage.get("completion_tokens", usage.get("output_tokens")),
+    }
+
+
 class OpenAIManager(BackendManagerBase):
     """Manager for OpenAI-compatible chat backends."""
 
@@ -243,13 +254,7 @@ class OpenAIManager(BackendManagerBase):
 
             # 上游自报 usage 时记真实 token（缺失则台账按字符估算，口径见脚注）
             usage = body.get("usage") if isinstance(body, dict) else None
-            if isinstance(usage, dict):
-                turn_trace.note_usage_tokens(
-                    prompt=usage.get("prompt_tokens", usage.get("input_tokens")),
-                    completion=usage.get(
-                        "completion_tokens", usage.get("output_tokens")
-                    ),
-                )
+            turn_trace.note_usage_tokens(**_usage_tokens(usage))
 
             choices = body.get("choices") if isinstance(body, dict) else None
             choice = choices[0] if choices else {}
@@ -403,17 +408,11 @@ class OpenAIManager(BackendManagerBase):
                             break  # 上游结束标记：迟到的后续行不再消费
                         if event is None:
                             continue  # 空行 / 注释 / 坏 JSON 行：跳过
-                        if isinstance(event.get("usage"), dict):
+                        usage = event.get("usage")
+                        if isinstance(usage, dict):
                             # 请求了 stream_options.include_usage 的上游会在
                             # 末帧带 usage；未请求时缺失，台账按字符估算
-                            turn_trace.note_usage_tokens(
-                                prompt=event["usage"].get(
-                                    "prompt_tokens", event["usage"].get("input_tokens")
-                                ),
-                                completion=event["usage"].get(
-                                    "completion_tokens", event["usage"].get("output_tokens")
-                                ),
-                            )
+                            turn_trace.note_usage_tokens(**_usage_tokens(usage))
                         if _delta_has_tool_calls(event):
                             if tool_probe and not yielded:
                                 raise _ToolLoopDetected(text)

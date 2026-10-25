@@ -239,6 +239,11 @@ APP_CONFIG = {
         # 面板「用量」页按天/模型/后端/会话键查询。只记账零控制——无限额/断路/
         # 切换（2026-10-25 裁决 Q2：控制面等 2 个月真实账单后再定阈值）。
         # 环境变量 USAGE_LEDGER_ENABLED 可覆盖；目录可经 USAGE_LEDGER_DIR 重定向。
+        #
+        # 流式轮的真实 token：上游须在 SSE 末帧报 usage 才有真实值，否则走
+        # 字符估算列。请求侧开关（provider 兼容性自负，个别网关拒未知参数会
+        # 400）在 openai.extra_body 里加一行：
+        #   "extra_body": {"stream_options": {"include_usage": True}},
         "enabled": True,
     },
     "asr": {

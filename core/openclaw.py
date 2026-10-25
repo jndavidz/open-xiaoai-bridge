@@ -453,7 +453,8 @@ class OpenClawManager(BackendManagerBase):
             turn_trace.mark_llm_start()
             # 用量记账维度（P2 ticket 03）：网关不暴露模型名，model 留空（面板显示 -）。
             turn_trace.note_context(
-                backend=cls.LOG_MODULE, model=cls.usage_model_label(),
+                backend=cls.LOG_MODULE,
+                model=cls.usage_model_label(),
                 session_key=cls._session_key,
             )
             # 一次 agent 请求 = 一次记账请求（无本地工具回环）

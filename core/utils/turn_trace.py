@@ -1,13 +1,16 @@
 """每轮对话的延迟埋点（TurnTrace，默认关闭）。
 
-设计约束（ticket 11）：
+设计约束（ticket 11；P2 ticket 03 扩展用量记账面）：
 
-- **默认关闭**：`turn_trace.enabled`（config.py，默认 false）或环境变量
-  `TURN_TRACE_ENABLED`（1/true/yes/on 开，0/false/no/off 关）控制；env > config。
-  关闭时所有入口只做一次开关判断后返回，不产生日志、不改变任何行为。
+- **开关分两层**：`turn_trace.enabled`（config.py，默认 false）或环境变量
+  `TURN_TRACE_ENABLED`（1/true/yes/on 开，0/false/no/off 关）控制
+  `[TurnTrace]` 日志行；`usage_ledger.enabled`（P2 票 03）单独控制用量台账
+  落盘。**任一开启即建立轮对象**——台账开而日志关时只落盘不打日志；
+  两者皆关时所有入口只做一次开关判断后返回，不产生日志、不改变任何行为。
 - **只记数值**：每轮结束时输出**一条** `[TurnTrace]` INFO 行，内容是各段耗时
   （ms）、文案/回复长度（字符数）、工具轮数与 timeout/fallback 标志。
-  **绝不输出 ASR 原文或回复文本**（PII）。
+  **绝不输出 ASR 原文或回复文本**（PII）；backend/model/session_key 三个
+  聚合维度只进 summary 字典喂 usage_ledger，不进日志行。
 - **单轮锚点**：原生 ASR 链路以 `is_final` 到达为 t0；本地 ASR 链路没有这个
   事件，则在 LLM 请求开始时惰性建轮（ASR 段记为缺失）。
 - **失败即静默**：埋点代码的任何异常都不得影响对话、播报或播放等待。

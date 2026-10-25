@@ -15,6 +15,7 @@ from typing import Any
 import aiohttp
 
 from core.backend_base import BackendManagerBase
+from core.utils import turn_trace
 from core.utils.config import ConfigManager  # noqa: F401  兼容面：既有测试 patch core.qwenpaw.ConfigManager
 from core.utils.logger import logger
 
@@ -82,8 +83,6 @@ class QwenPawManager(BackendManagerBase):
         cls, text: str, stats: dict[str, int] | None = None
     ) -> str | None:
         # 用量记账（P2 ticket 03）：一次 agent 提交 = 一次记账请求（轮询不计）。
-        from core.utils import turn_trace
-
         turn_trace.note_llm_request()
         timeout = aiohttp.ClientTimeout(total=cls._response_timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:

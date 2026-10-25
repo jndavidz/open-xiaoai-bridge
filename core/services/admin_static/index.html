@@ -452,7 +452,7 @@ const USAGE_HEADS = { turns: "轮次", requests: "请求", prompt_tokens_est: "�
 
 const usageRow = (label, r) =>
   `<tr><td>${esc(label)}</td>` + USAGE_COLS.map(c =>
-    `<td class="num">${r[c] ? r[c] : (c === "turns" || c === "requests" ? 0 : "-")}</td>`).join("") + "</tr>";
+    `<td class="num">${typeof r[c] === "number" ? r[c] : "-"}</td>`).join("") + "</tr>";
 
 const usageTable = (title, keyProp, keyLabel, rows) => {
   if (!rows || !rows.length) return "";
