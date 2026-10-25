@@ -19,7 +19,12 @@ open-xiaoai-bridge/
 │   ├── xiaoai_conversation.py     # 小爱连续对话策略
 │   ├── xiaozhi.py                 # 小智 AI WebSocket 协议客户端
 │   ├── openclaw.py                # OpenClaw 网关客户端（连接、消息、TTS 播放）
-│   ├── openclaw_conversation.py   # OpenClaw 连续对话循环（VAD → ASR → Agent → TTS）
+│   ├── external_conversation.py   # 外部后端连续对话循环主体（VAD/原生 ASR → 后端 → TTS；P1 ticket 02 起带管线态与取消检查点）
+│   ├── openclaw_conversation.py   # OpenClaw 对话控制器（薄封装，继承 external_conversation）
+│   ├── openai_conversation.py     # OpenAI 对话控制器（薄封装，同上）
+│   ├── qwenpaw_conversation.py    # QwenPaw 对话控制器（薄封装，同上）
+│   ├── backend_base.py            # 外部后端管理器公共骨架（BackendManagerBase，C1）
+│   ├── backend_registry.py        # 后端注册表（C1/P0 票 07）
 │   ├── wakeup_session.py          # 小智唤醒会话状态机
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
@@ -55,6 +60,8 @@ open-xiaoai-bridge/
 │       ├── runtime_overrides.py   # 运行时配置覆盖层（data/runtime-overrides.json）
 │       ├── config.py              # ConfigManager（嵌套路径查询、热重载、覆盖层合并）
 │       ├── config_loader.py       # config.py 动态导入
+│       ├── turn_trace.py          # 每轮延迟埋点 [TurnTrace]（默认关；纯数值无 PII；P1 ticket 02 起轮次号与 pipeline 同源）
+│       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
 ├── native/                        # Rust PyO3 扩展（maturin 编译）
@@ -140,22 +147,33 @@ OpenClaw 网关客户端，管理 WebSocket 连接、消息分发、自动重连
 - `client.mode`: 必须是预定义常量
 - `session_key`: 只从 config.py 读取
 
-### OpenClawConversationController (core/openclaw_conversation.py)
+### OpenClawConversationController (core/external_conversation.py)
 
-OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR → OpenClaw → TTS 循环。
+外部后端连续对话控制器（主体在 `ExternalConversationController`，OpenClaw/OpenAI/QwenPaw 三个控制器是薄封装子类）。唤醒词触发后进入独立的 VAD/原生 ASR → 后端 → TTS 循环。
 
 - `start()` → 进入对话模式
 - `stop()` → 退出对话
 - `is_active()` → 状态查询
 
-**对话循环** (`_run_one_turn`):
-1. VAD 检测语音开始（`_wait_for_speech`）
+**对话循环** (`_run_one_turn_with_local_asr` / `_run_one_turn_with_xiaoai_asr`):
+1. VAD 检测语音开始（`_wait_for_speech`）/ 等待原生 ASR 定稿（`_wait_for_xiaoai_asr_text`）
 2. 录制完整语音（VAD 帧 hook）
 3. SherpaASR 离线识别
 4. 退出关键词检测
-5. 发送到 OpenClaw
+5. 发送到后端
 6. TTS 播放回复（阻塞等待完成）
 7. 恢复监听
+
+**管线态与取消传播（P1 ticket 02，流式化地基）**:
+- 每轮对话经 `core/utils/pipeline.py` 分配轮次号并按管线态迁移
+  （idle → listening → processing → speaking → idle），`[Pipeline] turn=N` 日志行
+  与 `[TurnTrace] turn=N` 埋点同号；管线态与 MainApp 协议态**分层并存**，互不驱动。
+- 固定异步检查点：**ASR 定稿后 / LLM 请求前 / 播放等待内（起播前+返回后）**；
+  本轮已取消（`pipeline.cancel_*`，由 `on_interrupt`/`reset_all_sessions` 置位）即抛
+  `TurnCancelledError` 静默退出——不发请求、不播后续音频、不打 ERROR。
+  事件线程侧（`consume_xiaoai_recognize_result`）用非抛式 `turn.check()` 吞定稿文本。
+- 打断两层机制不变：置取消（新增面）+ `controller.stop`/`task.cancel`/播放令牌
+  定向杀流（既有面）。
 
 **回声防护机制**:
 - `stop_recording` → kill 远端 arecord → 麦克风物理静音
@@ -795,4 +813,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**369 tests OK (skipped=3)**（2026-10-25，main a0e56d2）。每次 main 合入后应复跑此基线；onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要。
+当前基线：**443 tests OK (skipped=3)**（2026-10-26，P1 ticket 02 后；P0 收口时为 429，本票 +14 = `tests/test_pipeline.py` 管线态/取消传播/TTSRouter 埋点用例）。每次 main 合入后应复跑此基线；onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

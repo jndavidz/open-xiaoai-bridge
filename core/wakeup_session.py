@@ -9,6 +9,7 @@ from core.ref import (
     get_xiaozhi,
 )
 from core.services.protocols.typing import AbortReason
+from core.utils import pipeline as conversation_pipeline
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
 
@@ -61,6 +62,10 @@ class WakeupSessionManager:
         logger.info("[Wakeup] XiaoAI wakeup — interrupting active sessions")
 
         loop = self._get_loop()
+
+        # 取消传播（P1 ticket 02）：置取消当前对话轮——对话循环的固定检查点
+        # 据此静默退出；与下方 task.cancel / 播放令牌杀流是配合关系，不改既有行为。
+        conversation_pipeline.cancel_all_turns("wakeup_interrupt")
 
         # Stop XiaoZhi wakeup session (cancels futures + aborts server audio)
         if self._xiaozhi_future and not self._xiaozhi_future.done():
@@ -248,6 +253,9 @@ class WakeupSessionManager:
         """
         from core.xiaoai import XiaoAI
         from core.ref import get_xiaozhi
+
+        # 取消传播（P1 ticket 02）：新会话开始前作废旧对话轮（含其检查点）。
+        conversation_pipeline.cancel_all_turns("session_reset")
 
         # Stop XiaoAI continuous conversation
         XiaoAI.stop_conversation()

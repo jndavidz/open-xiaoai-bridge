@@ -242,6 +242,9 @@ class SpeakerManager:
 
         play = await self.device.play_url(f"file://{path}")
         turn_trace.note_play_url(bool(play.ok))
+        # 播放起点链（ticket 02）：调用返回时刻戳（含拒绝轮的请求耗时）——
+        # tts_to_play / accept_to_start 的锚。
+        turn_trace.mark_play_url()
         if not play.ok:
             logger.warning(
                 f"[Speaker] player_play_url rejected file://{path}: {play.error}"

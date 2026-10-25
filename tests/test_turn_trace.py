@@ -391,6 +391,9 @@ class SpeakerTraceHookTest(unittest.TestCase):
         self.assertEqual(fields["playback_started"], "1")
         self.assertNotEqual(fields["tts_ms"], "-1.0")
         self.assertNotEqual(fields["playback_ms"], "-1.0")
+        # 播放起点链（ticket 02）：play_url 时间戳补齐后，两段不再恒 -1
+        self.assertNotEqual(fields["tts_to_play_ms"], "-1.0")
+        self.assertNotEqual(fields["accept_to_start_ms"], "-1.0")
         self.assertIsNone(turn_trace.current_trace())
 
     def test_synthesis_fallback_is_flagged(self):

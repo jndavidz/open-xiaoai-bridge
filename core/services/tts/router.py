@@ -8,6 +8,7 @@ import open_xiaoai_server
 from core.services.tts.doubao import DoubaoTTS
 from core.services.tts.mlx_audio import MLXAudioTTS
 from core.services.tts.openai import PLAYBACK_SUPPORTED_FORMATS, OpenAITTS
+from core.utils import turn_trace
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
 
@@ -48,6 +49,11 @@ class TTSRouter:
     ) -> None:
         """Synthesize and play text, falling back to XiaoAI native TTS."""
         provider = cls.resolve_provider(configured_provider, tts_speaker)
+        # TurnTrace（ticket 02）：TTS 段埋点挂到路由层——三个缺口里的
+        # 「TTS provider 错误记录」在此落位（此前仅打日志，turn19 类失败在
+        # 埋点里不可见）；xiaoai 分支内部的同位 mark 保首不冲突。
+        turn_trace.mark_tts_start()
+        turn_trace.note_tts_chars(len(text))
         try:
             if provider == "xiaoai":
                 from core.ref import get_speaker
@@ -64,18 +70,34 @@ class TTSRouter:
                     tts_speed=tts_speed,
                     playback_token=playback_token,
                 )
-                return
-
-            await cls._play_openai_compatible(
-                text,
-                provider=provider,
-                tts_speaker=tts_speaker,
+            else:
+                await cls._play_openai_compatible(
+                    text,
+                    provider=provider,
+                    tts_speaker=tts_speaker,
+                )
+            # Rust/HTTP 通道（doubao / openai 兼容）成功：通道返回即播放完成。
+            # Python 侧无 play_url 概念、起播时刻在通道内部不可观测——
+            # 以「通道返回」收尾本轮（accept_to_start_ms 留 -1，口径见
+            # turn_trace 模块头）。设备 play_url 路径仍由播放事件适配器收尾。
+            turn_trace.mark_tts_end()
+            turn_trace.note_tts_result(ok=True, fallback=False)
+            turn_trace.note_playback(
+                finished=True,
+                started=False,
+                reason="rust_channel",
+                wait_started_at=None,
+                started_at_ms=None,
+                finished_at_ms=None,
             )
         except Exception as exc:
             logger.error(
                 f"[{log_prefix}] Error playing response with TTS: "
                 f"{type(exc).__name__}: {exc}"
             )
+            # provider 错误入埋点（fallback 标志；fallback 播放的收尾由
+            # speaker + 播放事件适配器完成，此路径不重复收尾）。
+            turn_trace.note_tts_result(ok=False, fallback=True)
             await cls._fallback_to_xiaoai(text, log_prefix=log_prefix)
 
     @classmethod

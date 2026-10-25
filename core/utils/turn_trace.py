@@ -14,6 +14,8 @@
 
 字段口径（`fmt` 中 -1 表示该段未观测到）：
 
+    speech_end_to_asr_ms  本地链路「VAD 判定说完 → ASR 返回文本」（ticket 02；
+                          原生 ASR 链路无说完信号，恒 -1）
     asr_to_llm_ms   ASR final → LLM 请求开始
     llm_ms          LLM 请求开始 → 完成（无流式，等价于全量耗时）
     llm_to_tts_ms   LLM 完成 → TTS 合成开始
@@ -22,6 +24,10 @@
     accept_to_start_ms  play_url 接受 → 设备播放 started
     playback_ms     播放 started → finished
     total_ms        t0 → 最后一个观测点
+
+轮次号同源（ticket 02）：对话循环经 core.utils.pipeline 分配轮次号后，
+begin_turn(turn_id=...) 复用同一编号——`[TurnTrace] turn=N` 与 `[Pipeline]
+turn=N` 日志行可按轮对齐；不传 turn_id 时维持内部自增（测试/非对话入口）。
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ _FIELDS = (
     "playback_started",
     "playback_finished",
     "playback_timeout",
+    "speech_end_to_asr_ms",
     "asr_to_llm_ms",
     "llm_ms",
     "llm_to_tts_ms",
@@ -208,7 +215,12 @@ class TurnTrace:
             self.llm_timeout = True
 
     def note_tts_result(self, ok: bool, fallback: bool = False) -> None:
+        """TTS 结果首置优先：provider 错误（ok=False/fallback=True）不被
+        fallback 播放的成功覆写——「TTS provider 错误记录」缺口的关键语义
+        （ticket 02；生产实测 turn19 类失败曾因此在埋点里不可见）。"""
         with self._lock:
+            if self.tts_synth_ok is not None:
+                return
             self.tts_synth_ok = bool(ok)
             self.tts_fallback = bool(fallback)
 
@@ -265,6 +277,7 @@ class TurnTrace:
             playback_timeout = self.playback_timeout
 
         asr = marks.get("asr_final")
+        speech_end = marks.get("speech_end")
         llm_start = marks.get("llm_start")
         llm_end = marks.get("llm_end")
         tts_start = marks.get("tts_start")
@@ -294,6 +307,7 @@ class TurnTrace:
             "playback_started": 1 if playback_started else 0,
             "playback_finished": _tri_state(playback_finished),
             "playback_timeout": 1 if playback_timeout else 0,
+            "speech_end_to_asr_ms": _delta_ms(speech_end, asr),
             "asr_to_llm_ms": _delta_ms(asr, llm_start) if asr is not None else _MISSING_MS,
             "llm_ms": _delta_ms(llm_start, llm_end),
             "llm_to_tts_ms": _delta_ms(llm_end, tts_start),
@@ -360,10 +374,20 @@ def abandon_turn() -> None:
         pass
 
 
-def _new_trace_locked(source: str, asr_chars: int | None = None) -> TurnTrace:
+def _new_trace_locked(
+    source: str,
+    asr_chars: int | None = None,
+    turn_id: int | None = None,
+) -> TurnTrace:
     global _current, _turn_counter
-    _turn_counter += 1
-    _current = TurnTrace(_turn_counter, source=source, asr_chars=asr_chars)
+    if turn_id is None:
+        _turn_counter += 1
+        turn_id = _turn_counter
+    else:
+        # 传入号（pipeline 源）同样推进内部计数器——后续自增号不会与
+        # 传入号重叠，两号源不产生相同的 turn=N。
+        _turn_counter = max(_turn_counter, turn_id)
+    _current = TurnTrace(turn_id, source=source, asr_chars=asr_chars)
     return _current
 
 
@@ -374,15 +398,23 @@ def _emit(trace: TurnTrace, incomplete: bool = False) -> None:
         pass
 
 
-def begin_turn(source: str = "xiaoai_asr", asr_chars: int | None = None) -> TurnTrace | None:
-    """开始新一轮；若上一轮未收尾，先按 incomplete 输出（每轮仍只有一条）。"""
+def begin_turn(
+    source: str = "xiaoai_asr",
+    asr_chars: int | None = None,
+    turn_id: int | None = None,
+) -> TurnTrace | None:
+    """开始新一轮；若上一轮未收尾，先按 incomplete 输出（每轮仍只有一条）。
+
+    turn_id：对话循环传入 core.utils.pipeline 的轮次号，使埋点行与管线
+    日志同号；缺省时内部自增（测试/非对话入口的兼容口径）。
+    """
     global _current
     try:
         if not trace_enabled():
             return None
         with _LOCK:
             previous = _current
-            trace = _new_trace_locked(source, asr_chars)
+            trace = _new_trace_locked(source, asr_chars, turn_id=turn_id)
         if previous is not None:
             _emit(previous, incomplete=True)
         return trace
@@ -445,6 +477,14 @@ def note_tts_result(ok: bool, fallback: bool = False) -> None:
 
 def note_play_url(accepted: bool) -> None:
     _update(lambda t: t.note_play_url(accepted))
+
+
+def mark_play_url() -> None:
+    """播放起点链（ticket 02）：play_url 调用返回的时刻戳（无论接受与否——
+    拒绝轮的 tts_to_play_ms 仍反映合成→请求的耗时）——补齐
+    tts_to_play_ms / accept_to_start_ms 两段（此前只有布尔标志、无时间戳，
+    生产实测这两段全 -1）。"""
+    _update(lambda t: t.mark("play_url"))
 
 
 def note_playback(
