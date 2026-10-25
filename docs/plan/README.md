@@ -83,6 +83,7 @@
 | **B-15** | **QwenPaw / OpenClaw 迁基类**（fire-and-forget 语义三后端归一，含 120s 兜底） | ⭐⭐ 三后端只剩传输核/连接生命周期 | 中 | 无 | ✅ **已施工（P0 ticket 05+06，`6438d01`）** |
 | **B-16** | **静态后端注册表**（唤醒会话/主控制器查表化；会话键复位走公开接口，私有直写清零；xiaozhi 保持特殊条目） | ⭐⭐ 新增后端 = 一个子类 + 一条登记；旧方法名薄兼容委托，生产 config 零迁移 | 中 | 无 | ✅ **已施工（P0 ticket 07，`72b84ef`）** |
 | **B-17** | **native 事件源转正**（C6/P0.5：镜像 +openssh-client、LX06 密钥只读挂载、`native_cmd` ssh 拉流、生产 `event_plane.source=native`；超时兜底永久保留，client 影子观察期至 2026-11-09） | ⭐⭐⭐ 播放完成判据从轮询 (~200ms 轮询 + idle 宽限) 换到设备原生广播事件；打断收尾 3008ms→15ms（2026-10-26 实测） | 低 | `source` 一行回 context（热重载）；镜像回滚 tag `rollback-p05` | ✅ **已施工（P0.5 ticket 01+02 切换面，2026-10-26 凌晨；观察期数据见 `ws: .scratch/bridge-p05-native-event-source/`）** |
+| **B-18** | **Rust 流式管线收敛**（C3/P1 prefactor：`tts_stream_play(_background)` 合一为单一 pipeline，-105 行复制；MP3 解码增量化解全量重解码，耗时可观测 15.1x（20×11.7KB 流，debug 构建）且增量=一次性解码逐字节一致；PCM 透传不变，OGG/WAV 保留旧全量路径，切帧失败自动降级重放） | ⭐⭐ 长流式回答 CPU 随时长线性（不再平方）；句级流式接入只剩一份代码要改 | 中 | 无（Python 可见签名与语义不变；真 API 冒烟随 P1 部署窗口） | ✅ **已施工（P1 票 01，2026-10-26；cargo test 6/6 绿 + 干净构建过，数据见 `ws: .scratch/bridge-p1-streaming/` 票 01 §Answer）** |
 
 > **P0 批（B-11…B-16）集成验证（2026-10-26 收口）**：全量测试 429 OK (skipped=3)；静态核验（判据/分支/私有直写三清零）与 config 热重载冒烟已过；真机冒烟已执行——HTTP 三连全过（词表拒绝 400 真机生效）、免唤醒 announce 链路 ✓（HIFI 场景动作面经用户裁决延后）、OpenAI 对话 4 轮 TurnTrace 全绿。生产镜像 `:home` = 本表 B-11…B-16（bridge `6ce615c` 快照），回滚支点 `open-xiaoai-bridge:rollback-pre-p0-20261026`。详情见 `ws: .scratch/bridge-p0-announce-registry/` 票 08 §Answer。
 

@@ -219,6 +219,263 @@ fn detect_format_from_path(path: &str) -> String {
         .unwrap_or_else(|| "mp3".to_string())
 }
 
+/// Parameters shared by the streaming TTS playback entry points.
+struct TtsStreamParams {
+    text: String,
+    app_id: String,
+    access_key: String,
+    resource_id: String,
+    speaker: String,
+    speed: f32,
+    format: String,
+    sample_rate: u32,
+    emotion: Option<String>,
+    context_texts: Option<Vec<String>>,
+}
+
+/// Drain buffered PCM into the device in playback-sized chunks, recording the
+/// first-chunk timing and throttling so the device never buffers more than
+/// MAX_AHEAD_MS of audio. Returns false when the playback session ended
+/// (cancelled or send failed) — the caller aborts the fetch task and stops.
+async fn emit_ready_chunks(
+    playback_buffer: &mut PcmPlaybackBuffer,
+    final_drain: bool,
+    playback_started_ms: &mut Option<u128>,
+    playback_start: &mut Option<Instant>,
+    pcm_sent_bytes: &mut usize,
+    sample_rate: u32,
+    playback_token: u64,
+    started_at: Instant,
+) -> bool {
+    let chunks = if final_drain {
+        playback_buffer.drain_remaining()
+    } else {
+        playback_buffer.drain_ready_chunks()
+    };
+    for pcm_chunk in chunks {
+        if playback_started_ms.is_none() {
+            *playback_started_ms = Some(started_at.elapsed().as_millis());
+        }
+        if playback_start.is_none() {
+            *playback_start = Some(Instant::now());
+        }
+        let chunk_len = pcm_chunk.len();
+        if !send_pcm(pcm_chunk, playback_token).await {
+            return false;
+        }
+        *pcm_sent_bytes += chunk_len;
+        throttle_if_needed(
+            *pcm_sent_bytes,
+            sample_rate,
+            playback_start.unwrap(),
+            playback_token,
+        )
+        .await;
+        if !is_playback_session_active(playback_token) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Single streaming TTS pipeline shared by the blocking and background entry
+/// points: fetch encoded audio from Doubao, decode incrementally, and play via
+/// WebSocket with start-buffering and throttling.
+///
+/// `ready_tx` (used by the background variant) resolves once the remote request
+/// is accepted, so callers can fail fast without waiting for the full stream.
+/// Returns Err only when the fetch failed with no audio produced.
+async fn run_tts_stream_pipeline(
+    params: TtsStreamParams,
+    playback_token: u64,
+    ready_tx: Option<oneshot::Sender<Result<(), String>>>,
+) -> Result<(), String> {
+    let TtsStreamParams {
+        text,
+        app_id,
+        access_key,
+        resource_id,
+        speaker,
+        speed,
+        format,
+        sample_rate,
+        emotion,
+        context_texts,
+    } = params;
+    let started_at = Instant::now();
+    let is_pcm_passthrough = format == "pcm";
+    let client = DoubaoStreamClient::new(app_id, access_key, resource_id, speaker);
+
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
+
+    let fetch_handle = tokio::spawn({
+        let text = text.clone();
+        let format = format.clone();
+        async move {
+            client
+                .stream_audio_with_ready(
+                    &text,
+                    &format,
+                    sample_rate,
+                    speed,
+                    context_texts,
+                    emotion,
+                    tx,
+                    ready_tx,
+                )
+                .await
+        }
+    });
+
+    let mut decoder = StreamingDecoder::new(&format, sample_rate);
+    let mut playback_buffer = PcmPlaybackBuffer::new(sample_rate);
+    let mut accumulated_size: usize = 0;
+    let mut first_audio_chunk_ms: Option<u128> = None;
+    let mut playback_started_ms: Option<u128> = None;
+    let mut total_encoded_bytes: usize = 0;
+    let mut total_pcm_bytes: usize = 0;
+    // Track how many PCM bytes have been sent to device for throttling.
+    let mut pcm_sent_bytes: usize = 0;
+    let mut playback_start: Option<Instant> = None;
+
+    // Restart aplay right before we start feeding data, so its buffer
+    // is fresh and won't underrun while waiting for the first chunk.
+    ensure_player_started().await;
+
+    while let Some(chunk) = rx.recv().await {
+        if !is_playback_session_active(playback_token) {
+            fetch_handle.abort();
+            break;
+        }
+        if first_audio_chunk_ms.is_none() {
+            first_audio_chunk_ms = Some(started_at.elapsed().as_millis());
+        }
+        total_encoded_bytes += chunk.len();
+
+        if is_pcm_passthrough {
+            playback_buffer.push(&chunk);
+            total_pcm_bytes += chunk.len();
+            if !emit_ready_chunks(
+                &mut playback_buffer,
+                false,
+                &mut playback_started_ms,
+                &mut playback_start,
+                &mut pcm_sent_bytes,
+                sample_rate,
+                playback_token,
+                started_at,
+            )
+            .await
+            {
+                fetch_handle.abort();
+                break;
+            }
+            continue;
+        }
+
+        accumulated_size += chunk.len();
+        decoder.feed(&chunk);
+
+        if accumulated_size >= STREAM_BUFFER_THRESHOLD {
+            match decoder.decode_available() {
+                Ok(pcm) if !pcm.is_empty() => {
+                    total_pcm_bytes += pcm.len();
+                    playback_buffer.push(&pcm);
+                    if !emit_ready_chunks(
+                        &mut playback_buffer,
+                        false,
+                        &mut playback_started_ms,
+                        &mut playback_start,
+                        &mut pcm_sent_bytes,
+                        sample_rate,
+                        playback_token,
+                        started_at,
+                    )
+                    .await
+                    {
+                        fetch_handle.abort();
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    crate::pylog!("[TTS] Decode error (continuing): {}", e);
+                }
+            }
+            accumulated_size = 0;
+        }
+    }
+
+    match decoder.finish() {
+        Ok(pcm) if !pcm.is_empty() => {
+            if !is_pcm_passthrough {
+                playback_buffer.push(&pcm);
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            crate::pylog!("[TTS] Final decode error: {}", e);
+        }
+    }
+
+    if !emit_ready_chunks(
+        &mut playback_buffer,
+        true,
+        &mut playback_started_ms,
+        &mut playback_start,
+        &mut pcm_sent_bytes,
+        sample_rate,
+        playback_token,
+        started_at,
+    )
+    .await
+    {
+        fetch_handle.abort();
+    }
+
+    let fetch_failed = match fetch_handle.await {
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(e) => Some(format!("stream fetch task panicked: {}", e)),
+        _ => None,
+    };
+
+    let total_ms = started_at.elapsed().as_millis();
+    let playback_duration_ms = total_pcm_bytes as u128 * 1000 / (sample_rate as u128 * 2);
+    let remaining_ms = playback_duration_ms.saturating_sub(total_ms);
+
+    crate::pylog!(
+        "[TTS] Stream summary: format={}, first_chunk={} ms, playback_start={} ms, total={} ms, encoded={} bytes, pcm={} bytes, remaining={} ms",
+        format,
+        first_audio_chunk_ms.unwrap_or(0),
+        playback_started_ms.unwrap_or(0),
+        total_ms,
+        total_encoded_bytes,
+        total_pcm_bytes,
+        remaining_ms,
+    );
+
+    if let Some(err_msg) = fetch_failed {
+        if total_pcm_bytes == 0 {
+            return Err(format!(
+                "TTS stream fetch failed with no audio produced: {}",
+                err_msg
+            ));
+        }
+
+        crate::pylog_error!(
+            "[TTS] Stream interrupted after partial audio output: format={}, encoded={} bytes, pcm={} bytes, error={}",
+            format,
+            total_encoded_bytes,
+            total_pcm_bytes,
+            err_msg
+        );
+    }
+
+    sleep_until_playback_finishes(remaining_ms, playback_token).await;
+
+    Ok(())
+}
+
 /// Stream TTS: fetch audio from Doubao API, decode to PCM in chunks, and play via WebSocket.
 /// Supports MP3, OGG Vorbis, WAV, FLAC formats.
 #[pyfunction]
@@ -239,208 +496,24 @@ pub fn tts_stream_play(
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let playback_token = playback_token.unwrap_or_else(|| begin_playback_session());
-        let started_at = Instant::now();
-        let is_pcm_passthrough = format == "pcm";
-        let client = DoubaoStreamClient::new(app_id, access_key, resource_id, speaker);
-
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
-
-        let fetch_handle = tokio::spawn({
-            let text = text.clone();
-            let format = format.clone();
-            async move {
-                client
-                    .stream_audio(
-                        &text,
-                        &format,
-                        sample_rate,
-                        speed,
-                        context_texts,
-                        emotion,
-                        tx,
-                    )
-                    .await
-            }
-        });
-
-        let mut decoder = StreamingDecoder::new(&format, sample_rate);
-        let mut playback_buffer = PcmPlaybackBuffer::new(sample_rate);
-        let mut accumulated_size: usize = 0;
-        let mut first_audio_chunk_ms: Option<u128> = None;
-        let mut playback_started_ms: Option<u128> = None;
-        let mut total_encoded_bytes: usize = 0;
-        let mut total_pcm_bytes: usize = 0;
-        // Track how many PCM bytes have been sent to device for throttling.
-        let mut pcm_sent_bytes: usize = 0;
-        let mut playback_start: Option<Instant> = None;
-
-        // Restart aplay right before we start feeding data, so its buffer
-        // is fresh and won't underrun while waiting for the first chunk.
-        ensure_player_started().await;
-
-        while let Some(chunk) = rx.recv().await {
-            if !is_playback_session_active(playback_token) {
-                fetch_handle.abort();
-                break;
-            }
-            if first_audio_chunk_ms.is_none() {
-                first_audio_chunk_ms = Some(started_at.elapsed().as_millis());
-            }
-            total_encoded_bytes += chunk.len();
-
-            if is_pcm_passthrough {
-                playback_buffer.push(&chunk);
-                total_pcm_bytes += chunk.len();
-                for pcm_chunk in playback_buffer.drain_ready_chunks() {
-                    if playback_started_ms.is_none() {
-                        playback_started_ms = Some(started_at.elapsed().as_millis());
-                    }
-                    if playback_start.is_none() {
-                        playback_start = Some(Instant::now());
-                    }
-                    let chunk_len = pcm_chunk.len();
-                    if !send_pcm(pcm_chunk, playback_token).await {
-                        fetch_handle.abort();
-                        break;
-                    }
-                    pcm_sent_bytes += chunk_len;
-                    throttle_if_needed(
-                        pcm_sent_bytes,
-                        sample_rate,
-                        playback_start.unwrap(),
-                        playback_token,
-                    )
-                    .await;
-                    if !is_playback_session_active(playback_token) {
-                        fetch_handle.abort();
-                        break;
-                    }
-                }
-                continue;
-            }
-
-            accumulated_size += chunk.len();
-            decoder.feed(&chunk);
-
-            if accumulated_size >= STREAM_BUFFER_THRESHOLD {
-                match decoder.decode_all() {
-                    Ok(pcm) if !pcm.is_empty() => {
-                        total_pcm_bytes += pcm.len();
-                        playback_buffer.push(&pcm);
-                        for pcm_chunk in playback_buffer.drain_ready_chunks() {
-                            if playback_started_ms.is_none() {
-                                playback_started_ms = Some(started_at.elapsed().as_millis());
-                            }
-                            if playback_start.is_none() {
-                                playback_start = Some(Instant::now());
-                            }
-                            let chunk_len = pcm_chunk.len();
-                            if !send_pcm(pcm_chunk, playback_token).await {
-                                fetch_handle.abort();
-                                break;
-                            }
-                            pcm_sent_bytes += chunk_len;
-                            throttle_if_needed(
-                                pcm_sent_bytes,
-                                sample_rate,
-                                playback_start.unwrap(),
-                                playback_token,
-                            )
-                            .await;
-                            if !is_playback_session_active(playback_token) {
-                                fetch_handle.abort();
-                                break;
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        crate::pylog!("[TTS] Decode error (continuing): {}", e);
-                    }
-                }
-                accumulated_size = 0;
-            }
-        }
-
-        match decoder.decode_all() {
-            Ok(pcm) if !pcm.is_empty() => {
-                if !is_pcm_passthrough {
-                    playback_buffer.push(&pcm);
-                }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                crate::pylog!("[TTS] Final decode error: {}", e);
-            }
-        }
-
-        for pcm_chunk in playback_buffer.drain_remaining() {
-            if playback_started_ms.is_none() {
-                playback_started_ms = Some(started_at.elapsed().as_millis());
-            }
-            if playback_start.is_none() {
-                playback_start = Some(Instant::now());
-            }
-            let chunk_len = pcm_chunk.len();
-            if !send_pcm(pcm_chunk, playback_token).await {
-                fetch_handle.abort();
-                break;
-            }
-            pcm_sent_bytes += chunk_len;
-            throttle_if_needed(
-                pcm_sent_bytes,
-                sample_rate,
-                playback_start.unwrap(),
-                playback_token,
-            )
-            .await;
-            if !is_playback_session_active(playback_token) {
-                fetch_handle.abort();
-                break;
-            }
-        }
-
-        let fetch_failed = match fetch_handle.await {
-            Ok(Err(e)) => Some(e.to_string()),
-            Err(e) => Some(format!("stream fetch task panicked: {}", e)),
-            _ => None,
-        };
-
-        let total_ms = started_at.elapsed().as_millis();
-        let playback_duration_ms = total_pcm_bytes as u128 * 1000 / (sample_rate as u128 * 2);
-        let remaining_ms = playback_duration_ms.saturating_sub(total_ms);
-
-        crate::pylog!(
-            "[TTS] Stream summary: format={}, first_chunk={} ms, playback_start={} ms, total={} ms, encoded={} bytes, pcm={} bytes, remaining={} ms",
-            format,
-            first_audio_chunk_ms.unwrap_or(0),
-            playback_started_ms.unwrap_or(0),
-            total_ms,
-            total_encoded_bytes,
-            total_pcm_bytes,
-            remaining_ms,
-        );
-
-        if let Some(err_msg) = fetch_failed {
-            if total_pcm_bytes == 0 {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "TTS stream fetch failed with no audio produced: {}",
-                    err_msg
-                )));
-            }
-
-            crate::pylog_error!(
-                "[TTS] Stream interrupted after partial audio output: format={}, encoded={} bytes, pcm={} bytes, error={}",
+        run_tts_stream_pipeline(
+            TtsStreamParams {
+                text,
+                app_id,
+                access_key,
+                resource_id,
+                speaker,
+                speed,
                 format,
-                total_encoded_bytes,
-                total_pcm_bytes,
-                err_msg
-            );
-        }
-
-        sleep_until_playback_finishes(remaining_ms, playback_token).await;
-
-        Ok(())
+                sample_rate,
+                emotion,
+                context_texts,
+            },
+            playback_token,
+            None,
+        )
+        .await
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     })
 }
 
@@ -465,200 +538,22 @@ pub fn tts_stream_play_background(
         let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
         let playback_token = playback_token.unwrap_or_else(|| begin_playback_session());
 
-        tokio::spawn(async move {
-            let client = DoubaoStreamClient::new(app_id, access_key, resource_id, speaker);
-            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
-            let started_at = Instant::now();
-            let is_pcm_passthrough = format == "pcm";
-
-            let fetch_handle = tokio::spawn({
-                let text = text.clone();
-                let format = format.clone();
-                async move {
-                    client
-                        .stream_audio_with_ready(
-                            &text,
-                            &format,
-                            sample_rate,
-                            speed,
-                            context_texts,
-                            emotion,
-                            tx,
-                            Some(ready_tx),
-                        )
-                        .await
-                }
-            });
-
-            let mut decoder = StreamingDecoder::new(&format, sample_rate);
-            let mut playback_buffer = PcmPlaybackBuffer::new(sample_rate);
-            let mut accumulated_size: usize = 0;
-            let mut first_audio_chunk_ms: Option<u128> = None;
-            let mut playback_started_ms: Option<u128> = None;
-            let mut total_encoded_bytes: usize = 0;
-            let mut total_pcm_bytes: usize = 0;
-            let mut pcm_sent_bytes: usize = 0;
-            let mut playback_start: Option<Instant> = None;
-
-            ensure_player_started().await;
-
-            while let Some(chunk) = rx.recv().await {
-                if !is_playback_session_active(playback_token) {
-                    fetch_handle.abort();
-                    break;
-                }
-                if first_audio_chunk_ms.is_none() {
-                    first_audio_chunk_ms = Some(started_at.elapsed().as_millis());
-                }
-                total_encoded_bytes += chunk.len();
-
-                if is_pcm_passthrough {
-                    playback_buffer.push(&chunk);
-                    total_pcm_bytes += chunk.len();
-                    for pcm_chunk in playback_buffer.drain_ready_chunks() {
-                        if playback_started_ms.is_none() {
-                            playback_started_ms = Some(started_at.elapsed().as_millis());
-                        }
-                        if playback_start.is_none() {
-                            playback_start = Some(Instant::now());
-                        }
-                        let chunk_len = pcm_chunk.len();
-                        if !send_pcm(pcm_chunk, playback_token).await {
-                            fetch_handle.abort();
-                            break;
-                        }
-                        pcm_sent_bytes += chunk_len;
-                        throttle_if_needed(
-                            pcm_sent_bytes,
-                            sample_rate,
-                            playback_start.unwrap(),
-                            playback_token,
-                        )
-                        .await;
-                        if !is_playback_session_active(playback_token) {
-                            fetch_handle.abort();
-                            break;
-                        }
-                    }
-                    continue;
-                }
-
-                accumulated_size += chunk.len();
-                decoder.feed(&chunk);
-
-                if accumulated_size >= STREAM_BUFFER_THRESHOLD {
-                    match decoder.decode_all() {
-                        Ok(pcm) if !pcm.is_empty() => {
-                            total_pcm_bytes += pcm.len();
-                            playback_buffer.push(&pcm);
-                            for pcm_chunk in playback_buffer.drain_ready_chunks() {
-                                if playback_started_ms.is_none() {
-                                    playback_started_ms = Some(started_at.elapsed().as_millis());
-                                }
-                                if playback_start.is_none() {
-                                    playback_start = Some(Instant::now());
-                                }
-                                let chunk_len = pcm_chunk.len();
-                                if !send_pcm(pcm_chunk, playback_token).await {
-                                    fetch_handle.abort();
-                                    break;
-                                }
-                                pcm_sent_bytes += chunk_len;
-                                throttle_if_needed(
-                                    pcm_sent_bytes,
-                                    sample_rate,
-                                    playback_start.unwrap(),
-                                    playback_token,
-                                )
-                                .await;
-                                if !is_playback_session_active(playback_token) {
-                                    fetch_handle.abort();
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            crate::pylog!("[TTS] Decode error (continuing): {}", e);
-                        }
-                    }
-                    accumulated_size = 0;
-                }
-            }
-
-            match decoder.decode_all() {
-                Ok(pcm) if !pcm.is_empty() => {
-                    if !is_pcm_passthrough {
-                        playback_buffer.push(&pcm);
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    crate::pylog!("[TTS] Final decode error: {}", e);
-                }
-            }
-
-            for pcm_chunk in playback_buffer.drain_remaining() {
-                if playback_started_ms.is_none() {
-                    playback_started_ms = Some(started_at.elapsed().as_millis());
-                }
-                if playback_start.is_none() {
-                    playback_start = Some(Instant::now());
-                }
-                let chunk_len = pcm_chunk.len();
-                if !send_pcm(pcm_chunk, playback_token).await {
-                    fetch_handle.abort();
-                    break;
-                }
-                pcm_sent_bytes += chunk_len;
-                throttle_if_needed(
-                    pcm_sent_bytes,
-                    sample_rate,
-                    playback_start.unwrap(),
-                    playback_token,
-                )
-                .await;
-                if !is_playback_session_active(playback_token) {
-                    fetch_handle.abort();
-                    break;
-                }
-            }
-
-            let fetch_failed = match fetch_handle.await {
-                Ok(Err(e)) => Some(e.to_string()),
-                Err(e) => Some(format!("stream fetch task panicked: {}", e)),
-                _ => None,
-            };
-
-            let total_ms = started_at.elapsed().as_millis();
-            let playback_duration_ms = total_pcm_bytes as u128 * 1000 / (sample_rate as u128 * 2);
-            let remaining_ms = playback_duration_ms.saturating_sub(total_ms);
-
-            crate::pylog!(
-                "[TTS] Stream summary: format={}, first_chunk={} ms, playback_start={} ms, total={} ms, encoded={} bytes, pcm={} bytes, remaining={} ms",
+        tokio::spawn(run_tts_stream_pipeline(
+            TtsStreamParams {
+                text,
+                app_id,
+                access_key,
+                resource_id,
+                speaker,
+                speed,
                 format,
-                first_audio_chunk_ms.unwrap_or(0),
-                playback_started_ms.unwrap_or(0),
-                total_ms,
-                total_encoded_bytes,
-                total_pcm_bytes,
-                remaining_ms,
-            );
-
-            if let Some(err_msg) = fetch_failed {
-                if total_pcm_bytes > 0 {
-                    crate::pylog_error!(
-                        "[TTS] Background stream interrupted after partial audio output: format={}, encoded={} bytes, pcm={} bytes, error={}",
-                        format,
-                        total_encoded_bytes,
-                        total_pcm_bytes,
-                        err_msg
-                    );
-                }
-            }
-
-            sleep_until_playback_finishes(remaining_ms, playback_token).await;
-        });
+                sample_rate,
+                emotion,
+                context_texts,
+            },
+            playback_token,
+            Some(ready_tx),
+        ));
 
         match ready_rx.await {
             Ok(Ok(())) => Ok(()),
@@ -914,7 +809,7 @@ pub fn tts_stream_collect(
             decoder.feed(&chunk);
 
             if accumulated_size >= STREAM_BUFFER_THRESHOLD {
-                match decoder.decode_all() {
+                match decoder.decode_available() {
                     Ok(pcm) if !pcm.is_empty() => {
                         if first_pcm_ms.is_none() {
                             first_pcm_ms = Some(started_at.elapsed().as_millis());
@@ -934,7 +829,7 @@ pub fn tts_stream_collect(
             }
         }
 
-        match decoder.decode_all() {
+        match decoder.finish() {
             Ok(pcm) if !pcm.is_empty() => {
                 if is_pcm_passthrough {
                     return Ok(json!({
