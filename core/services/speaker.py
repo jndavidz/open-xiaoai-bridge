@@ -155,6 +155,7 @@ class SpeakerManager:
         if not synth.ok or not path:
             logger.warning(
                 f"[Speaker] TTS synthesis failed ({synth.error or 'no_path'}), "
+                f"readback={synth.readback}, "
                 "falling back to device script"
             )
             return await self._play_text_via_script(content, timeout_ms)
