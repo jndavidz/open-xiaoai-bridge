@@ -28,7 +28,7 @@ open-xiaoai-bridge/
 │   ├── wakeup_session.py          # 小智唤醒会话状态机
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
-│   ├── tools/                     # Agent 工具层：registry 三函数 + hass/weather/music 只读工具（阶段 1.5）
+│   ├── tools/                     # Agent 工具层：registry 三函数 + 只读工具（hass/weather/music/device_status）+ guardrails 四分级护栏 + ir_send C 级工具（P3）
 │   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
@@ -48,6 +48,7 @@ open-xiaoai-bridge/
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
 │   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
+│   │   ├── led_language.py         # LED 灯语（P3 票 02）：管线态四态可视化，led_language.enabled 默认关
 │   │   ├── tts/router.py           # 统一 TTS provider 路由与播放
 │   │   ├── tts/doubao.py          # 豆包 TTS 客户端（火山引擎）
 │   │   ├── tts/openai.py           # OpenAI-compatible TTS 协议客户端
@@ -363,7 +364,7 @@ ubus 解析失败（`exit 1`）或文本被静默截断。
 
 | 优先级 | 能力 | ubus | 验证状态 | 备注 |
 |---|---|---|---|---|
-| **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验**，🔴 **但 bridge 内零引用**（`grep ir_agent\|ir_tx → 0`），且**跨机不可达是落地真阻塞**（见下） | 全新维度；固件内**无本地码库**，码值需外部提供。<br>⭐ **另有一条更短的路**：`echo "<µs序列>" > /sys/ir_tx_gpio/ir_data`（**不需 daemon、不需 heatshrink**）。<br>内核语义已解出：**偶数索引=载波（`val/26.4` 周期）、奇数索引=静默** ⇒ 任意 IR 协议可直接由规格生成，**无需码值库**。⚠ 发送期间关中断 ⇒ 须串行化、限长、不与播放/TTS 并发。详见 [`../docs/devices/lx06/kernel-surface.md`](../docs/devices/lx06/kernel-surface.md) §4 |
+| **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验**；🟢 **P3 票 04 已收编**（B-27：`ir_send` 能力行 sysfs 直写 + C 级工具；网络前置复验过——NAS→LX06 ssh echo + P0.5 常驻连接 ESTABLISHED，旧「跨机不可达」记录 2026-10-20 已自愈；语音端到端留真机窗口） | 全新维度；固件内**无本地码库**，码值需外部提供（`ir.codes` 配置表）。<br>bridge 走的是 sysfs 直写：`echo "<µs序列>" > /sys/ir_tx_gpio/ir_data`（**不需 daemon、不需 heatshrink**）。<br>内核语义已解出：**偶数索引=载波（`val/26.4` 周期）、奇数索引=静默** ⇒ 任意 IR 协议可直接由规格生成，**无需码值库**。⚠ 发送期间关中断 ⇒ 须串行化、限长、不与播放/TTS 并发（均已落：串行锁 + 512 项/300ms 限长 + speaking 态拒绝）。详见 [`../docs/devices/lx06/kernel-surface.md`](../docs/devices/lx06/kernel-surface.md) §4 |
 | **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md)** |
 | **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop` | ⚠️ 静态解出 | ⚠️ **`code:0` ≠ 播放成功**，需状态回读确认 |
 | **4** | 离线本地指令（断网可用） | `ai_crontab new` | ✅ 真机已验 | ⚠️ ubus 是 **root-only**；`duration` **实测无效** |
@@ -476,7 +477,7 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/status` | GET | 获取设备状态 |
 | `/api/wakeup` | POST | 唤醒设备 |
 | `/api/interrupt` | POST | 中断播放 |
-| `/api/health` | GET | 健康检查：默认返回录音帧龄/策略、播放事件面、注入状态；`?probe=1` 额外采集 mediaplayer 存活/内存/麦态（总超时 3s；会打设备 RPC，配置 `BRIDGE_API_TOKEN` 时须带 Bearer，未配置时 probe 503） |
+| `/api/health` | GET | 健康检查：默认返回录音帧龄/策略、播放事件面、注入状态；`?probe=1` 额外采集 mediaplayer 存活/内存/麦态/固件白名单字段（总超时 4s；会打设备 RPC，配置 `BRIDGE_API_TOKEN` 时须带 Bearer，未配置时 probe 503） |
 | `/api/tts/doubao` | POST | Doubao TTS 合成 |
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 | `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |
@@ -555,15 +556,18 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 
 | 文件 | 职责 |
 |------|------|
-| `registry.py` | 三函数：`get_all_tools()`（聚合工具定义喂 LLM）/ `execute_tool(name, arguments)`（责任链分发）/ system prompt 聚合；新增工具 = 加模块文件，注册表零改动 |
-| `hass.py` | HA 实体状态查询（只读） |
-| `weather.py` | Open-Meteo 天气查询（无需 key，已端到端验证） |
-| `music.py` | LMS 播放状态查询（只读） |
+| `registry.py` | 三函数：`get_all_tools()`（聚合工具定义喂 LLM，D 级对模型隐藏）/ `execute_tool(name, arguments)`（责任链分发，D 级拒绝留证）；**未声明合法 RISK 的模块拒绝注册**（P3 票 03 起为注册闸门） |
+| `guardrails.py` | **写操作护栏框架（P3 票 03）**：RISK 分级 read/a/b/c/d、`execute_guarded` 全路径（A 复述即执行 / B 范围校验+显式应答 / C 二次确认三分支 / D 拒绝）、`ConfirmationManager`（TTL/顶替/惰性过期）、`sanitize_for_speech`（复述文案白名单注入防线）、`match_confirmation`（否认词优先） |
+| `hass.py` | HA 实体状态查询（只读，RISK=read） |
+| `weather.py` | Open-Meteo 天气查询（无需 key，已端到端验证，RISK=read） |
+| `music.py` | LMS 播放状态查询（只读，RISK=read） |
+| `device_status.py` | 音箱自身状态聚合（播放/音量/麦/内存/夜间模式，只读，P3 票 01；miot 周边发现不可达 MIO-6，家庭其他设备走 hass） |
+| `ir_send.py` | 红外发射（**RISK=c**，P3 票 04）：LLM 只传 device/action，码值查 `ir.codes` 配置表（外部提供）；幻觉 pattern 被忽略；speaking 态拒绝 + 串行锁（关中断纪律） |
 
 **接线位置与硬约束** (`core/openai.py`):
 - `tools` 注入仅 **chat_completions 风格**；回环深度 `_max_tool_rounds=3`（配置项 `max_tool_rounds`），总开关 `tool_calls_enabled`（默认开）
 - ⚠ **reasoning_content 条件回传**：thinking 模式带 `tools` 时，后续每轮必须完整回传 assistant 的 `reasoning_content`（缺失直接 400）；仅当响应携带时才回传（非 thinking 模型无此字段，天然无影响）——改消息组装前先读官方 thinking_mode 文档
-- **只读边界**：当前暴露的工具全部只读；写操作工具（HA 控制/关机类）落地时必须带二次确认护栏（见工作区 selection-review §3.1）
+- **写操作分级纪律（P3 票 03 起）**：新增工具必须声明 `RISK`（read/a/b/c/d），否则拒绝注册；B/C 级必须经 `guardrails.execute_guarded` 的显式应答流程；D 级永不开放（模型不可见 + 调用拒绝）；复述文案过 `sanitize_for_speech` 后才能进 TTS/announce
 - **流式响应通道（P1 ticket 03）**：`stream_response_segments`（基类默认 = 非流式「单句序列」退化；OpenAI 子类在 `openai.stream` 配置开 + chat_completions 风格下走 SSE）；**工具轮探测降级**——带 tools 的流式请求首见 tool_calls 增量且未产出句段即转非流式回环（回环路径与改前逐字一致），模型不调工具的终答轮流式到底；已产出句段后到达的 tool_calls 增量丢弃（按纯文本终答，WARNING）；上游异常吞错降级不杀会话（与非流式同口径，仅完整回复入历史）；开关默认关，面板 `openai.stream` 热切换即回退
 
 ### 音频处理链
@@ -825,4 +829,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**556 tests OK (skipped=3)**（2026-10-26，P1 票 04 + P2 票 04 后；537 = P2 票 02 后（+12 = `test_kws_audit.py`），本批 +19 = `test_sentence_tts_pipeline.py` 10 + `test_vad_subscription.py` 9；525 = P2 票 03 后，500 = P1 票 03 后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**605 tests OK (skipped=3)**（2026-10-26，P3 批后；556 = P1/P2 票 04 后，本批 +49 = `test_p3_readonly.py` 15 + `test_led_language.py` 9 + `test_write_guardrails.py` 16 + `test_ir_integration.py` 9）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
