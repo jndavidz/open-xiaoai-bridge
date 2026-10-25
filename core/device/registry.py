@@ -217,6 +217,41 @@ CAPABILITIES: dict[str, CapabilitySpec] = {
         idempotent=True,
         description="读启动分区",
     ),
+    "nightmode_current": CapabilitySpec(
+        name="nightmode_current",
+        method="ubus:nightmode.current",
+        params=(),
+        success=SuccessCriterion.JSON_PARSED,
+        group=CapabilityGroup.READ,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=True,
+        description="夜间模式实时状态（current：此刻是否处于夜间时段）",
+        notes=(
+            "current=实时生效 vs status=配置（两接口语义不同，判定用 current）",
+            "音量护栏只看 volume 字段（total/light 无关）——设备真值见 "
+            "ws: docs/devices/lx06/nightmode-volume-policy.md §2",
+        ),
+    ),
+    "firmware_info": CapabilitySpec(
+        name="firmware_info",
+        method="shell:micocfg_<field> 白名单单字段组合",
+        params=(),
+        success=SuccessCriterion.EXIT_CODE,
+        group=CapabilityGroup.READ,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=True,
+        description="固件健康信息（版本/构建时间/板型/WiFi 芯片/工作模式）",
+        notes=(
+            "micocfg 单字段命令天然满足 PII 边界（无 %-16s 前缀、不误带凭证）——"
+            "事实层 ws: docs/devices/lx06/micocfg-device-info-cli.md §8",
+            "白名单只取无敏感标记的 getter；sn/mac/ssid/bssid/channel_secret 等"
+            "🔴 字段与全部 micocfg_* setter 绝不调用（setter 已入脚本禁区闸门）",
+        ),
+    ),
     # ---- 可回读的写操作 ----
     "mic_set": CapabilitySpec(
         name="mic_set",
@@ -496,6 +531,12 @@ _FORBIDDEN_SCRIPT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bplayer_event\b"), "player_event"),
     (re.compile(r"\bcall\s+notify\b"), "notify 整对象"),
     (re.compile(r"\bcall\s+mediaplayer\s+set_dlna_status\b"), "DLNA 开启"),
+    # micocfg setter 组（任意配置写/配网/改状态）——P3 票 01 起入闸门；
+    # 只读 getter（micocfg_version 等）不受影响（事实层 micocfg §8.2）。
+    (
+        re.compile(r"\bmicocfg_(?:[a-z0-9_]*set|miio_register|miio_wifi_(?:connected|disconnected)|wifi_scan|wifi_p2p|light_show|light_shut)\b"),
+        "micocfg setter/动作组（任意配置写入口，最高危）",
+    ),
 )
 
 

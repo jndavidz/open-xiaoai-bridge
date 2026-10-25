@@ -8,10 +8,10 @@
 
 import json
 
-from . import hass, weather, music
+from . import device_status, hass, music, weather
 
 # 注册顺序即模型可见顺序；只读工具优先（写操作本期未接入，见 runbook T8.4）
-_TOOL_MODULES = [hass, weather, music]
+_TOOL_MODULES = [hass, weather, music, device_status]
 
 _REGISTRY: dict[str, object] = {
     m.NAME: m for m in _TOOL_MODULES if getattr(m, "NAME", None)

@@ -41,6 +41,15 @@ STOP_AUDIO = "killall tts_play.sh miplayer 2>/dev/null; mphelper pause"
 
 SYSTEM_INFO = "ubus call system info"
 DEVICE_INFO = "echo $(micocfg_model) $(micocfg_sn)"
+# 固件健康面（A-4/P3 票 01）：micocfg 白名单单字段组合，一条 shell 全取。
+# 字段来自只读 getter 白名单（micocfg-device-info-cli.md §8.1，无 🔴 敏感标记）；
+# setter 已被脚本禁区闸门拦截，本命令形状不得扩展到白名单之外。
+FIRMWARE_INFO = (
+    "echo version=$(micocfg_version) build_time=$(micocfg_build_time) "
+    "board=$(micocfg_board_name) board_id=$(micocfg_board_id) "
+    "wifi_chip=$(micocfg_wifi_chip) work_mode=$(micocfg_work_mode)"
+)
+NIGHTMODE_CURRENT = "ubus call nightmode current"
 BOOT_GET = "echo $(fw_env -g boot_part)"
 BOOT_SET = "fw_env -s boot_part {partition} >/dev/null 2>&1 && echo $(fw_env -g boot_part)"
 
@@ -369,9 +378,11 @@ class DeviceCapabilities:
         data = _json_obj(res.stdout) or {}
         memory = data.get("memory") if isinstance(data, dict) else None
         ok = res.ok and isinstance(memory, dict) and "free" in memory
+        uptime = data.get("uptime") if isinstance(data, dict) else None
         readback = {
             "total": memory.get("total") if isinstance(memory, dict) else None,
             "free": memory.get("free") if isinstance(memory, dict) else None,
+            "uptime": int(uptime) if isinstance(uptime, (int, float)) else None,
         }
         return replace(
             res,
@@ -379,6 +390,45 @@ class DeviceCapabilities:
             readback=readback,
             readback_ok=ok,
             error=None if ok else (res.error or "memory_missing"),
+        )
+
+    async def nightmode_current(self) -> CapabilityResult:
+        """夜间模式实时状态：readback.volume ∈ {"night", "normal"}。
+
+        判定只看 volume 字段（设备真值：mediaplayer 的 checkNightModeStatus
+        只取 volume；total/light 无关）。
+        """
+
+        spec = resolve_capability("nightmode_current")
+        res = await self._invoke(spec, NIGHTMODE_CURRENT)
+        data = _json_obj(res.stdout) if res.request is not None else None
+        volume_mode = None
+        if isinstance(data, dict) and isinstance(data.get("volume"), str):
+            volume_mode = data["volume"].strip().lower() or None
+        ok = res.ok and volume_mode is not None
+        return replace(
+            res,
+            ok=ok,
+            readback={"volume": volume_mode},
+            readback_ok=volume_mode is not None,
+            error=None if ok else (res.error or "volume_mode_missing"),
+        )
+
+    async def firmware_info(self) -> CapabilityResult:
+        """固件健康信息（A-4 白名单字段）；解析 `key=value` 输出为 readback。"""
+
+        spec = resolve_capability("firmware_info")
+        res = await self._invoke(spec, FIRMWARE_INFO)
+        parsed: dict[str, Any] = {}
+        for part in (res.stdout or "").split():
+            if "=" in part:
+                key, _, value = part.partition("=")
+                if key and value:
+                    parsed[key] = value
+        return replace(
+            res,
+            readback=parsed,
+            readback_ok=res.ok and bool(parsed),
         )
 
     async def device_info(self) -> CapabilityResult:

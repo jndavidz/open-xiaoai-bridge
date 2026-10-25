@@ -688,11 +688,42 @@ class SpeakerManager:
         return ok
 
     async def set_volume(self, level: int) -> bool:
-        """设置音量（百分比 0-100），回读一致才算成功。"""
+        """设置音量（百分比 0-100），回读一致才算成功。
+
+        夜间模式护栏（A-3/P3 票 01）：设备有非对称调容策略——日常时段只允许
+        调大、夜间（22:05–07:05 volume=night）允许调小（设备真值见
+        ws: docs/devices/lx06/nightmode-volume-policy.md §3）。bridge 不拦截
+        请求（continuous_volume 通道是否受该策略纠正未证实），但失败时按
+        语义归因：白天调小被回读拒绝会被点名为夜间模式语义，而非未知 bug。
+        """
+        before = await self.get_volume()
         res = await self.device.volume_set(int(level))
         if not res.ok:
-            logger.warning(f"[Speaker] set_volume({level}) failed: {res.error}")
+            await self._log_volume_failure_with_nightmode(level, before, res.error)
         return bool(res.ok)
+
+    async def _log_volume_failure_with_nightmode(
+        self, level: int, before: int | None, error: str | None
+    ) -> None:
+        """音量写失败时按夜间模式语义归因（诊断增强，不改成败判定）。"""
+        try:
+            night = await self.device.nightmode_current()
+            volume_mode = (night.readback or {}).get("volume") if night.readback else None
+        except Exception:  # noqa: BLE001 - 诊断路径不得引入新失败
+            volume_mode = None
+        if (
+            volume_mode == "normal"
+            and before is not None
+            and before >= 0
+            and int(level) < before
+        ):
+            logger.warning(
+                f"[Speaker] set_volume({level}) rejected (readback mismatch): "
+                f"日常时段（nightmode volume=normal）设备只允许调大音量——"
+                f"夜间模式非对称调容语义，非 bug（当前 {before}）"
+            )
+            return
+        logger.warning(f"[Speaker] set_volume({level}) failed: {error}")
 
     async def get_volume(self) -> int:
         """读取音量（player_get_context 回读，百分比口径）；读不到返回 -1。"""

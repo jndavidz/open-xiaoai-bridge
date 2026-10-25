@@ -1279,8 +1279,8 @@ class APIServer:
         Health check endpoint（保留只读、可无鉴权；不暴露凭证/完整文本）
 
         默认只返回内存态：录音帧龄/策略、播放事件面、注入状态。
-        `?probe=1` 时额外采集设备探针（mediaplayer 存活 / 内存 / 麦态），
-        总超时 3s；探针失败不影响整体健康响应。
+        `?probe=1` 时额外采集设备探针（mediaplayer 存活 / 内存 / 麦态 / 固件
+        白名单字段），总超时 4s；探针失败不影响整体健康响应。
         """
         audio: dict = {}
         try:
@@ -1336,14 +1336,22 @@ class APIServer:
                 probe = {"speaker": False}
             else:
                 async def _collect_probe() -> dict:
+                    firmware = None
+                    try:
+                        firmware = (await speaker.device.firmware_info()).readback or None
+                    except Exception:  # noqa: BLE001 - 单段失败不影响其余探针
+                        logger.debug("[APIServer] firmware probe failed")
                     return {
                         "mediaplayer_alive": await speaker.mediaplayer_alive(),
                         "memory_free": await speaker.memory_free(),
                         "mic": await speaker.get_mic(),
+                        # A-4/P3 票 01：固件健康白名单字段（无 PII），
+                        # 排障不再 SSH；失败时置 None（健康读不整体 500）。
+                        "firmware": firmware,
                     }
 
                 try:
-                    probe = await asyncio.wait_for(_collect_probe(), timeout=3.0)
+                    probe = await asyncio.wait_for(_collect_probe(), timeout=4.0)
                 except asyncio.TimeoutError:
                     probe = {"error": "timeout"}
                 except Exception as e:  # noqa: BLE001
