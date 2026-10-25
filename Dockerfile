@@ -66,9 +66,10 @@ FROM --platform=linux/amd64 python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237a
 
 WORKDIR /app
 
-# 更新源
+# 更新源。openssh-client：native 事件源拉流（event_plane.native_cmd，P0.5 票 01）；
+# 设备 dropbear 仅提供 ssh-rsa 算法，客户端参数见 deploy/config.py event_plane 注释。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libzstd1 ca-certificates \
+    libzstd1 ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv

@@ -37,5 +37,8 @@ services:
       - ./config.py:/app/config.py        # 热重载：改完约 1 秒生效
       - ./models:/app/core/models         # VAD + KWS 模型（xiaoai_asr 模式不需要 ASR 大模型）
       - ./data:/app/data                  # 面板运行时覆盖层（runtime-overrides.json）+ 后端预设库（backend-presets.json）持久化
+      # LX06 私钥只读挂载（P0.5 票 01）：仅 native 事件源拉流用；密钥绝不烤进镜像层。
+      # 目录内 = id_rsa + known_hosts（LX06 行单独成档）；挂了不用（native_cmd 留空）无任何行为变化。
+      - /var/services/homes/zxsadmin/.ssh/lx06-ir:/app/keys/lx06-ir:ro
     stdin_open: true
     tty: true

@@ -243,9 +243,9 @@ APP_CONFIG = {
         "poll_interval_ms": 200,
         # 从未观察到 playing 时，看到空闲后等待多久判「短音频已播完」（ms）
         "start_grace_ms": 1000,
-        # native 源的外部拉流命令（例如未来容器内可用的 ssh ... ubus listen）。
-        # 留空 = 不启动 native 源（默认）：运行时镜像没有 openssh-client，
-        # 且 client 的 run_shell 不能流式输出，本项不引入任何 Docker 依赖。
+        # native 源的外部拉流命令（ssh ... ubus listen；P0.5 起运行时镜像已含 openssh-client）。
+        # 留空 = 不启动 native 源（默认）。启用时需带 dropbear 兼容与 NAT 保活参数，
+        # 现网参考值见 deploy/config.py 同段注释。
         "native_cmd": "",
     },
     "turn_trace": {

@@ -316,7 +316,14 @@ APP_CONFIG = {
         "shadow_sources": ["client"],
         "poll_interval_ms": 200,
         "start_grace_ms": 1000,
-        # native 拉流命令；留空 = 不启动（运行时镜像无 openssh-client，勿加依赖）
+        # native 拉流命令；留空 = 不启动（默认，生产 source 保持 context）。
+        # P0.5 起镜像已含 openssh-client + 密钥只读挂载 /app/keys/lx06-ir（compose）。
+        # 启用参考值（dropbear 兼容 + NAT 保活，一行回滚 = 置空）：
+        # "native_cmd": "ssh -i /app/keys/lx06-ir/id_rsa -o HostKeyAlgorithms=+ssh-rsa "
+        #               "-o PubkeyAcceptedAlgorithms=+ssh-rsa -o ServerAliveInterval=30 "
+        #               "-o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes "
+        #               "-o UserKnownHostsFile=/app/keys/lx06-ir/known_hosts "
+        #               "root@10.10.10.20 ubus listen",
         "native_cmd": "",
     },
     "turn_trace": {
