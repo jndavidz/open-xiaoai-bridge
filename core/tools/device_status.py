@@ -12,6 +12,9 @@ from core.utils.logger import logger
 
 NAME = "device_status"
 
+# P3 票 03：风险分级声明（read=只读无确认；分级语义见 guardrails）
+RISK = "read"
+
 TOOL_SPEC = {
     "type": "function",
     "function": {

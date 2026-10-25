@@ -12,6 +12,9 @@ from core.utils.logger import logger
 
 NAME = "weather_get"
 
+# P3 票 03：风险分级声明（read=只读无确认；分级语义见 guardrails）
+RISK = "read"
+
 # WMO weather code -> 中文（精简，适合 TTS）
 _WMO = {
     0: "晴", 1: "大致晴朗", 2: "局部多云", 3: "阴",
