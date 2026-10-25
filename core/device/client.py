@@ -50,6 +50,11 @@ FIRMWARE_INFO = (
     "wifi_chip=$(micocfg_wifi_chip) work_mode=$(micocfg_work_mode)"
 )
 NIGHTMODE_CURRENT = "ubus call nightmode current"
+
+# LED（A-6/P3 票 02）：sysfs 直写路径与白名单见 registry notes（事实层
+# led-control-api.md：L=8 不生效、≥17 无效果函数）。
+LED_RGB_PATH = "/sys/devices/i2c-0/0-003a/led_rgb"
+LED_EFFECT_WHITELIST = frozenset(range(0, 8)) | frozenset(range(9, 17))
 BOOT_GET = "echo $(fw_env -g boot_part)"
 BOOT_SET = "fw_env -s boot_part {partition} >/dev/null 2>&1 && echo $(fw_env -g boot_part)"
 
@@ -429,6 +434,47 @@ class DeviceCapabilities:
             res,
             readback=parsed,
             readback_ok=res.ok and bool(parsed),
+        )
+
+    # ---- LED（A-6/P3 票 02） ----
+
+    async def led_set_pixel(self, index: int, rgb: str) -> CapabilityResult:
+        """sysfs 单灯直写；index/rgb 在客户端校验（驱动也校验，双保险）。"""
+
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= 17:
+            raise ValueError(f"invalid led index (0-17): {index!r}")
+        normalized = str(rgb or "").strip().lower().removeprefix("0x")
+        if len(normalized) != 6 or any(c not in "0123456789abcdef" for c in normalized):
+            raise ValueError(f"invalid rgb hex (rrggbb): {rgb!r}")
+        spec = resolve_capability("led_set_pixel")
+        script = f"echo {index} 0x{normalized} > {LED_RGB_PATH}"
+        return await self._invoke(spec, script)
+
+    async def led_effect(self, effect: int) -> CapabilityResult:
+        """原厂动画（白名单 0-7/9-16；L=8 不生效、≥17 无效果函数）。"""
+
+        if isinstance(effect, bool) or not isinstance(effect, int):
+            raise ValueError(f"invalid led effect id: {effect!r}")
+        if effect not in LED_EFFECT_WHITELIST:
+            raise ValueError(f"led effect {effect} not in whitelist (0-7/9-16)")
+        spec = resolve_capability("led_effect")
+        script = f"ubus call led show '{_json_payload({'L': effect})}'"
+        return await self._invoke(spec, script)
+
+    async def led_clear_effect(self) -> CapabilityResult:
+        spec = resolve_capability("led_clear_effect")
+        return await self._invoke(spec, "ubus call led shut_all")
+
+    async def led_status(self) -> CapabilityResult:
+        spec = resolve_capability("led_status")
+        res = await self._invoke(spec, "ubus call led status")
+        data = _json_obj(res.stdout) if res.request is not None else None
+        info = (data or {}).get("info") if isinstance(data, dict) else None
+        empty = isinstance(info, str) and not info.strip()
+        return replace(
+            res,
+            readback={"info": info, "night_gated_empty": empty},
+            readback_ok=res.ok,
         )
 
     async def device_info(self) -> CapabilityResult:

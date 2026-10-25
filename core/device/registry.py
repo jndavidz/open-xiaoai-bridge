@@ -252,6 +252,74 @@ CAPABILITIES: dict[str, CapabilitySpec] = {
             "🔴 字段与全部 micocfg_* setter 绝不调用（setter 已入脚本禁区闸门）",
         ),
     ),
+    # ---- LED（A-6/P3 票 02：灯语可视化） ----
+    "led_set_pixel": CapabilitySpec(
+        name="led_set_pixel",
+        method="shell:echo \"<i> 0x<RGB>\" > /sys/devices/i2c-0/0-003a/led_rgb",
+        params=(
+            _p("index", "int", True, "灯位 0-17（AW20054 共 18 灯）"),
+            _p("rgb", "str", True, "24bit RGB 十六进制，如 ff0000"),
+        ),
+        success=SuccessCriterion.EXIT_CODE,
+        group=CapabilityGroup.ACTION,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=True,
+        description="sysfs 单灯直写（任意颜色静态定格）",
+        notes=(
+            "驱动校验生效：格式错会打 dmesg 且非零退出，rc=0 即真成功——"
+            "事实层 ws: docs/devices/lx06/led-control-api.md §1",
+            "与 led show 动画互抢占（共用 ledserver 只写 fd）：同一时段只用一条；"
+            "用完写 0x000000 归位，不要用 shut_all 清 bridge 自己的灯",
+            "任何效果用完必须清除（LED 是用户可见状态）",
+        ),
+    ),
+    "led_effect": CapabilitySpec(
+        name="led_effect",
+        method="ubus:led.show",
+        params=(_p("effect", "int", True, "原厂动画 ID（白名单 0-7/9-16）"),),
+        success=SuccessCriterion.JSON_CODE,
+        group=CapabilityGroup.ACTION,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=False,
+        description="原厂预设动画（16 种，经 ledserver）",
+        notes=(
+            "白名单 0-7/9-16：L=8 是 RGB 入口但实测不生效（停在 start_show），"
+            "≥17 无效果函数——事实层 led-control-api.md §2/§3",
+            "播放自动带动 L=3/L=12（player 自己用）——灯语播放态不干预",
+        ),
+    ),
+    "led_clear_effect": CapabilitySpec(
+        name="led_clear_effect",
+        method="ubus:led.shut_all",
+        params=(),
+        success=SuccessCriterion.JSON_CODE,
+        group=CapabilityGroup.ACTION,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=True,
+        description="停全部原厂动画并全灭（收尾用；会清系统效果，慎用）",
+    ),
+    "led_status": CapabilitySpec(
+        name="led_status",
+        method="ubus:led.status",
+        params=(),
+        success=SuccessCriterion.JSON_PARSED,
+        group=CapabilityGroup.READ,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=True,
+        description="当前效果表（32 项 {type,pos,rgb}）",
+        notes=(
+            "夜间返回空 info（nightmode 门控，仅查询受门控、show 不受）——"
+            "读不到不等于失败，判灭不要依赖本表（led_position 也误导）",
+        ),
+    ),
     # ---- 可回读的写操作 ----
     "mic_set": CapabilitySpec(
         name="mic_set",

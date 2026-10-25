@@ -238,6 +238,11 @@ class MainApp:
                 VAD.start()
                 KWS.start()
                 logger.info("[MainApp] Audio input enabled (VAD/KWS started)")
+                # LED 灯语（A-6/P3 票 02）：订阅管线态做四态可视化；
+                # 开关 led_language.enabled 默认关，真机看灯验收后转正。
+                from core.services.led_language import get_led_language
+
+                get_led_language().attach(self.loop)
             else:
                 logger.info("[MainApp] Audio input disabled (VAD/KWS not started)")
 

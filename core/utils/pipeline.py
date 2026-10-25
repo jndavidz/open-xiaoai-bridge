@@ -120,6 +120,47 @@ _current: PipelineTurn | None = None
 _state = PipelineState.IDLE
 _state_turn_id: int | None = None
 
+# 状态订阅者（P3 票 02：灯语等可视化出口订阅管线态迁移与轮次收尾）。
+# 线程模型：回调在触发线程（事件线程或 asyncio 循环）同步上抛——订阅者
+# 必须快进快出、不得抛异常（通知侧隔离记 WARNING）；跨线程/协程投递由
+# 订阅者自理（schedule / run_coroutine_threadsafe）。
+_STATE_SUB_LOCK = threading.Lock()
+_state_subscribers: list = []
+
+
+def subscribe_state(callback) -> "callable":
+    """订阅管线事件：callback(event, data)。
+
+    event="state_changed"：data={"state": 新态, "turn_id": 轮次号}；
+    event="turn_ended"：data={"outcome": 收尾原因, "turn_id": 轮次号}。
+    返回注销函数（幂等）。
+    """
+    with _STATE_SUB_LOCK:
+        _state_subscribers.append(callback)
+
+    def _unsubscribe():
+        with _STATE_SUB_LOCK:
+            try:
+                _state_subscribers.remove(callback)
+            except ValueError:
+                pass
+
+    return _unsubscribe
+
+
+def _notify_state(event: str, data: dict) -> None:
+    """广播管线事件；单个订阅者异常被隔离记 WARNING，不影响其他人。"""
+    with _STATE_SUB_LOCK:
+        snapshot = list(_state_subscribers)
+    for callback in snapshot:
+        try:
+            callback(event, data)
+        except Exception as exc:
+            logger.warning(
+                f"state subscriber failed: {type(exc).__name__}: {exc}",
+                module=LOG_MODULE,
+            )
+
 
 def begin_turn(source: str = "") -> PipelineTurn:
     """开始新一轮：分配 turn_id、状态迁至 listening；旧轮置 superseded。"""
@@ -140,6 +181,9 @@ def begin_turn(source: str = "") -> PipelineTurn:
     logger.info(
         f"turn={turn.turn_id} state={old_state.value}->{_state.value} src={source}",
         module=LOG_MODULE,
+    )
+    _notify_state(
+        "state_changed", {"state": _state.value, "turn_id": turn.turn_id}
     )
     return turn
 
@@ -204,6 +248,9 @@ def end_turn(outcome: str = "done", *, turn: PipelineTurn | None = None) -> None
         f"turn={current.turn_id} state={old_state.value}->idle outcome={outcome}",
         module=LOG_MODULE,
     )
+    _notify_state(
+        "turn_ended", {"outcome": outcome, "turn_id": current.turn_id}
+    )
 
 
 def set_state(state: PipelineState, note: str = "") -> None:
@@ -224,6 +271,7 @@ def set_state(state: PipelineState, note: str = "") -> None:
         f"state={old_state.value}->{state.value}{suffix}",
         module=LOG_MODULE,
     )
+    _notify_state("state_changed", {"state": state.value, "turn_id": turn_id})
 
 
 def state() -> PipelineState:
@@ -245,10 +293,12 @@ def snapshot() -> dict:
 
 
 def reset_pipeline() -> None:
-    """测试辅助：清空全局轮次与状态（不打日志）。"""
+    """测试辅助：清空全局轮次、状态与订阅表（不打日志）。"""
     global _turn_counter, _current, _state, _state_turn_id
     with _LOCK:
         _turn_counter = 0
         _current = None
         _state = PipelineState.IDLE
         _state_turn_id = None
+    with _STATE_SUB_LOCK:
+        _state_subscribers.clear()
