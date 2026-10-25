@@ -82,8 +82,11 @@
 | **B-14** | **后端公共骨架上提 BackendManagerBase**（run-id 记账、TTS 配置、TurnTrace 六挂点入基类；OpenAI 首迁） | ⭐⭐ 接入新后端 = 加 1 个子类；「埋点只接一个后端」漂移根治 | 中 | 无 | ✅ **已施工（P0 ticket 04，`5756b71`）** |
 | **B-15** | **QwenPaw / OpenClaw 迁基类**（fire-and-forget 语义三后端归一，含 120s 兜底） | ⭐⭐ 三后端只剩传输核/连接生命周期 | 中 | 无 | ✅ **已施工（P0 ticket 05+06，`6438d01`）** |
 | **B-16** | **静态后端注册表**（唤醒会话/主控制器查表化；会话键复位走公开接口，私有直写清零；xiaozhi 保持特殊条目） | ⭐⭐ 新增后端 = 一个子类 + 一条登记；旧方法名薄兼容委托，生产 config 零迁移 | 中 | 无 | ✅ **已施工（P0 ticket 07，`72b84ef`）** |
+| **B-17** | **native 事件源转正**（C6/P0.5：镜像 +openssh-client、LX06 密钥只读挂载、`native_cmd` ssh 拉流、生产 `event_plane.source=native`；超时兜底永久保留，client 影子观察期至 2026-11-09） | ⭐⭐⭐ 播放完成判据从轮询 (~200ms 轮询 + idle 宽限) 换到设备原生广播事件；打断收尾 3008ms→15ms（2026-10-26 实测） | 低 | `source` 一行回 context（热重载）；镜像回滚 tag `rollback-p05` | ✅ **已施工（P0.5 ticket 01+02 切换面，2026-10-26 凌晨；观察期数据见 `ws: .scratch/bridge-p05-native-event-source/`）** |
 
 > **P0 批（B-11…B-16）集成验证（2026-10-26 收口）**：全量测试 429 OK (skipped=3)；静态核验（判据/分支/私有直写三清零）与 config 热重载冒烟已过；真机冒烟已执行——HTTP 三连全过（词表拒绝 400 真机生效）、免唤醒 announce 链路 ✓（HIFI 场景动作面经用户裁决延后）、OpenAI 对话 4 轮 TurnTrace 全绿。生产镜像 `:home` = 本表 B-11…B-16（bridge `6ce615c` 快照），回滚支点 `open-xiaoai-bridge:rollback-pre-p0-20261026`。详情见 `ws: .scratch/bridge-p0-announce-registry/` 票 08 §Answer。
+
+> **P0.5 批（B-17）切换验证（2026-10-26 凌晨）**：影子复验全判据过（20 normals mismatch=0、异常/自愈/重启丢窗不挂起、4 条 mismatch 全可解释）后切 `source=native` 上生产：完成判据 `finished_event` 实测、**打断收尾 3008ms→15ms**、回滚通道（source 一行）实测往返、LX06 内存 +1.9MB 波动内。镜像 `:home` = p05-candidate（含 openssh-client），回滚支点 `rollback-p05`。已知风险面：native 流死透 + 5s 退避窗内播报 `no_observation` 失败（不挂起，诚实上报可重试）——观察期（至 2026-11-09）重点记录其发生率，异常则一行回退。数据与裁决见 `ws: .scratch/bridge-p05-native-event-source/` 票 01 §C / 票 02 §Answer。
 
 > 本轮 baseline 的 ticket 01–10 与逐项落点见 `ws: .scratch/lx06-voice-hub-baseline/`；本表状态与其同步。
 > 2026-10-24 已部署到 NAS：镜像 `open-xiaoai-bridge:04b0709e51`；回滚 tag `open-xiaoai-bridge:rollback-20261024`。
