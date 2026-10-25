@@ -51,6 +51,11 @@ FIRMWARE_INFO = (
 )
 NIGHTMODE_CURRENT = "ubus call nightmode current"
 
+# 红外限长（关中断纪律，见 registry ir_send notes）：NEC 帧 ≈68 项 / 67ms；
+# 空调长码 200+ token。上限取 512 项 / 总时长 300ms，超限即拒绝。
+IR_MAX_ELEMENTS = 512
+IR_MAX_TOTAL_US = 300_000
+
 # LED（A-6/P3 票 02）：sysfs 直写路径与白名单见 registry notes（事实层
 # led-control-api.md：L=8 不生效、≥17 无效果函数）。
 LED_RGB_PATH = "/sys/devices/i2c-0/0-003a/led_rgb"
@@ -476,6 +481,32 @@ class DeviceCapabilities:
             readback={"info": info, "night_gated_empty": empty},
             readback_ok=res.ok,
         )
+
+    # ---- 红外（A-7/P3 票 04） ----
+
+    async def ir_send(self, pattern: str) -> CapabilityResult:
+        """红外发射（µs 序列）；字符集/偶数项/限长校验后拼 sysfs 直写。
+
+        命令注入免疫由校验保证：pattern 只允许数字与逗号，echo 内容无
+        shell 元字符。
+        """
+
+        text = str(pattern or "").strip()
+        if not text or any(ch not in "0123456789," for ch in text):
+            raise ValueError("ir pattern must be comma-separated decimal microseconds")
+        parts = text.split(",")
+        if len(parts) % 2 != 0:
+            raise ValueError(f"ir pattern needs an even element count (carrier/silence pairs), got {len(parts)}")
+        if len(parts) > IR_MAX_ELEMENTS:
+            raise ValueError(f"ir pattern too long: {len(parts)} > {IR_MAX_ELEMENTS}")
+        values = [int(p) for p in parts]
+        if any(v <= 0 for v in values):
+            raise ValueError("ir pattern elements must be positive")
+        if sum(values) > IR_MAX_TOTAL_US:
+            raise ValueError(f"ir pattern total {sum(values)}us exceeds {IR_MAX_TOTAL_US}us")
+        spec = resolve_capability("ir_send")
+        script = f"echo {text} > /sys/ir_tx_gpio/ir_data"
+        return await self._invoke(spec, script)
 
     async def device_info(self) -> CapabilityResult:
         spec = resolve_capability("device_info")

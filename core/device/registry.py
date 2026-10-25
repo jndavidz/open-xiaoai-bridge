@@ -320,6 +320,27 @@ CAPABILITIES: dict[str, CapabilitySpec] = {
             "读不到不等于失败，判灭不要依赖本表（led_position 也误导）",
         ),
     ),
+    # ---- 红外（A-7/P3 票 04：首个写操作工具实战，C 级护栏） ----
+    "ir_send": CapabilitySpec(
+        name="ir_send",
+        method="shell:echo \"<seq>\" > /sys/ir_tx_gpio/ir_data",
+        params=(_p("pattern", "str", True, "逗号分隔十进制 µs 序列（偶数项）"),),
+        success=SuccessCriterion.EXIT_CODE,
+        group=CapabilityGroup.ACTION,
+        readback=None,
+        timeout_ms=6000,
+        blocking=True,
+        idempotent=False,
+        description="红外发射（sysfs 直写，gpio-ir-tx 内核软件 PWM 37.9kHz）",
+        notes=(
+            "时序语义：偶数索引=载波（val/26.4 周期）、奇数索引=静默 µs——"
+            "事实层 ws: docs/devices/lx06/kernel-surface.md §4；",
+            "🔴 发送期间内核关中断（raw_spin_lock_irqsave 忙等）：一条 NEC 帧"
+            "≈67ms 关中断 ⇒ 必须串行 + 限长 + 不与播放/TTS 并发（否则音频 XRUN）",
+            "码值库外部提供（config ir.codes）；learn 录制属设备写、单独授权，不默认",
+            "cat 该节点报 I/O error 是设计（show=NULL），不是故障",
+        ),
+    ),
     # ---- 可回读的写操作 ----
     "mic_set": CapabilitySpec(
         name="mic_set",
