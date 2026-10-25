@@ -304,34 +304,32 @@ class ExternalConversationController:
         # 检查点②（LLM 请求前）+ 管线态 → processing
         self._enter_processing()
 
-        # 4. Send to backend and consume the response as a segment sequence
-        #    (P1 ticket 03): streaming backends yield sentence segments as they
-        #    arrive; non-streaming backends degrade to a single-segment
-        #    sequence via the base class — same consumption path either way.
-        #    「咻」与非流式时序相当：收集任务先行调度，提示音播放让出
-        #    控制权后请求即上路（等价于旧 _send_and_track 的先发后播）。
+        # 4. Send to backend and speak the response as a segment stream
+        #    (P1 ticket 04): streaming backends yield sentence segments as
+        #    they arrive — the first segment starts TTS immediately while the
+        #    LLM keeps generating; non-streaming backends degrade to a
+        #    single-segment sequence via the base class, which collects to
+        #    completion before the one and only playback — behavior identical
+        #    to the pre-streaming path (stream-off rollback).
+        #    「咻」与非流式时序相当：pump 先行调度，提示音播放让出控制权后
+        #    请求即上路（等价于旧 _send_and_track 的先发后播）。
         full_text = text
         if self.backend._rule_prompt:
             full_text = text + "\n" + self.backend._rule_prompt
-        collect = asyncio.ensure_future(self._collect_segments(full_text))
-        await self._play_send_sound()
-        segments = await collect
-        response = "".join(segments) or None
-        if response is None:
+        segments = await self._speak_response_segments(full_text, with_send_sound=True)
+        if not segments:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
             speaker = get_speaker()
             if speaker:
                 await speaker.play(text="抱歉，我没有收到回复")
             return "continue"
 
-        # 5. Stop recording → TTS → Notify → Start recording → Wait for silence
-        #    Mic is off during TTS and notify, so no echo is captured.
+        # 5. Notify → Start recording → Wait for silence (mic was muted by
+        #    _speak_response_segments before the first segment).
         #    _play_notify() blocks for ~740ms (the beep duration),
         #    enough for TTS echo to fade. After starting recording, we wait
         #    for silence to ensure any residual echo or buffered audio clears.
         #    VAD.resume() resets all state, so speech detection starts clean.
-        await self._begin_speaking()
-        await self._play_tts(str(response))
         await self._play_notify()
         await self._start_recording()
         logger.debug("Recording started, waiting for silence...", module=self.LOG_MODULE)
@@ -363,17 +361,13 @@ class ExternalConversationController:
         full_text = text
         if self.backend._rule_prompt:
             full_text = text + "\n" + self.backend._rule_prompt
-        segments = await self._collect_segments(full_text)
-        response = "".join(segments) or None
-        if response is None:
+        segments = await self._speak_response_segments(full_text, with_send_sound=False)
+        if not segments:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
             speaker = get_speaker()
             if speaker:
                 await speaker.play(text="抱歉，我没有收到回复")
             return "continue"
-
-        await self._begin_speaking()
-        await self._play_tts(str(response))
         await self._play_notify()
         await self._start_recording()
         logger.debug("Ready for next XiaoAI native ASR round", module=self.LOG_MODULE)
@@ -387,22 +381,101 @@ class ExternalConversationController:
         if turn is not None:
             turn.checkpoint(name)
 
-    async def _collect_segments(self, text: str) -> list[str]:
-        """消费句段序列（P1 ticket 03 统一消费路径）。
+    async def _speak_response_segments(
+        self, text: str, *, with_send_sound: bool
+    ) -> list[str]:
+        """边生成边播句段（P1 ticket 04 主体，两条 ASR 链路共用）。
 
-        流式后端逐段到达、每个句段过检查点（取消即关流静默退出）；
-        非流式后端经基类退化为单句序列，行为与改前一致。
-        显式 aclose：取消路径下关闭上游 SSE 连接，不依赖 GC。
+        结构：pump 协程立即驱动后端句段流（LLM 请求先上路），句段经
+        队列交给本协程的播放循环——首段到达即断录起播（回声防护仍是
+        物理断录，只是时点从「全部收完」提前到「首段将播」），后续段
+        到达即接力播放。非流式后端退化为单句序列：收集完成 = 首段到达，
+        一次播放，行为与改前一致。
+
+        with_send_sound：本地链路在等首段期间播「咻」提示音（pump 已
+        先行调度，时序与非流式等价）；原生 ASR 链路无提示音。
+
+        取消语义（打断两层机制不变）：段循环每个句段过 stream_segment
+        检查点（取消即不再播剩余段、pump 被 cancel、aclose 关上游 SSE）；
+        播放中的段由打断方 stop_tts_playback(令牌) 定向杀流，杀完后的
+        下一个检查点静默退出本轮——无「打断后冒半句」。
         """
-        segments: list[str] = []
+        queue: asyncio.Queue = asyncio.Queue()
+        done = object()
         generator = self.backend.stream_response_segments(text)
+
+        async def _pump():
+            try:
+                async for segment in generator:
+                    await queue.put(segment)
+            finally:
+                await queue.put(done)
+
+        pump = asyncio.ensure_future(_pump())
+        played: list[str] = []
         try:
-            async for segment in generator:
+            if with_send_sound:
+                await self._play_send_sound()
+            first = True
+            while True:
+                segment = await queue.get()
+                if segment is done:
+                    break
+                # 检查点（流循环内每个句段）：取消即停播剩余段，静默退出。
                 self._checkpoint(CHECKPOINT_STREAM_SEGMENT)
-                segments.append(segment)
+                if first:
+                    # 回声防护时点：首段起播前断录（speaking 态 + 物理闭麦）。
+                    await self._begin_speaking()
+                    # 检查点（播放等待内，起播前）：取消则首段也不起播。
+                    self._checkpoint(CHECKPOINT_PLAYBACK)
+                    self._playback_token = open_xiaoai_server.begin_playback_session()
+                    first = False
+                await self._play_segment_tts(segment)
+                played.append(segment)
+            # 检查点（播放等待内，返回后）：取消则不再播任何后续音频
+            # （notify 音等），本轮静默退出。
+            self._checkpoint(CHECKPOINT_PLAYBACK)
         finally:
-            await generator.aclose()
-        return segments
+            self._playback_token = None
+            if not pump.done():
+                pump.cancel()
+            try:
+                await pump
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                # pump 异常按流中断处理：已播段保留，本轮按已有内容收尾。
+                logger.error(
+                    f"Segment pump failed: {type(exc).__name__}: {exc}",
+                    module=self.LOG_MODULE,
+                )
+            # 显式关流在本协程执行（取消路径下本协程未被 cancel，await
+            # 可执行；pump 被 cancel 时 CancelledError 经 async for 传入
+            # generator、其 async with 已退出，aclose 幂等兜底）。
+            try:
+                await generator.aclose()
+            except Exception:
+                pass
+        return played
+
+    async def _play_segment_tts(self, segment: str):
+        """播放单个句段（令牌与检查点由 _speak_response_segments 管理）。"""
+        try:
+            await self.backend._play_response_with_tts(
+                segment,
+                tts_speaker=self.backend.get_tts_speaker_for_session_key(),
+                playback_token=self._playback_token,
+            )
+        except TurnCancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                f"TTS playback error: {exc}",
+                module=self.LOG_MODULE,
+            )
+            speaker = get_speaker()
+            if speaker:
+                await speaker.play(text=segment)
 
     def _enter_processing(self) -> None:
         """检查点②（LLM 请求前）+ 管线态 → processing（两条 ASR 链路共用）。"""
@@ -420,65 +493,58 @@ class ExternalConversationController:
         """Use VAD to detect speech and collect complete utterance.
 
         Follows the same two-step pattern as the XiaoZhi wakeup session:
-          1. resume("speech") → wait for on_speech (voice detected)
-          2. resume("silence") → keep recording → wait for on_silence (user stopped)
+          1. resume("speech") → wait for speech event (voice detected)
+          2. resume("silence") → keep recording → wait for silence event
 
-        The audio stream is tapped between step 1 and 2 to capture the
-        full utterance that the VAD does not provide by itself.
+        Recording taps the VAD frame stream via the public subscription seam
+        (P2 ws ticket 04) — speech/silence events arrive through
+        subscribe_events, frames through subscribe_frames; both subscriptions
+        are scoped to this wait and released in finally (no monkey-patching
+        of VAD internals or EventManager callback slots).
 
         Returns:
             PCM bytes of captured speech, or None on timeout.
         """
-        from core.wakeup_session import EventManager
-
         self._vad_future = self._loop.create_future()
         recording_frames: list[bytes] = []
         is_recording = False
 
-        original_on_speech = EventManager.on_speech
-        original_on_silence = EventManager.on_silence
+        def _on_vad_event(event: str, payload):
+            """Voice detected → start recording; silence → resolve.
 
-        def _on_speech_hook(speech_buffer: bytes):
-            """Voice detected — save initial buffer, start recording, wait for silence."""
+            在 VAD 检测线程上抛：只做内存操作与线程安全投递。
+            """
             nonlocal is_recording
-            recording_frames.append(speech_buffer)
-            is_recording = True
-            logger.debug(f"VAD speech detected, buffer size: {len(speech_buffer)}", module=self.LOG_MODULE)
-            # Now wait for silence to know user stopped speaking
-            vad.resume("silence")
-
-        def _on_silence_hook():
-            """Silence detected — stop recording and resolve."""
-            nonlocal is_recording
-            is_recording = False
-            # 「说完」时刻（ticket 02）：TurnTrace 的 speech_end 段锚点；
-            # ASR 定稿后由对话循环消费。
-            self._speech_end_at = time.monotonic()
-            logger.debug("VAD detected silence, stop recording", module=self.LOG_MODULE)
-            if self._vad_future and not self._vad_future.done():
-                self._loop.call_soon_threadsafe(
-                    self._vad_future.set_result, b"".join(recording_frames)
+            if event == "speech":
+                recording_frames.append(payload)
+                is_recording = True
+                logger.debug(
+                    f"VAD speech detected, buffer size: {len(payload)}",
+                    module=self.LOG_MODULE,
                 )
+                # Now wait for silence to know user stopped speaking
+                vad.resume("silence")
+            else:
+                is_recording = False
+                # 「说完」时刻（ticket 02）：TurnTrace 的 speech_end 段锚点；
+                # ASR 定稿后由对话循环消费。
+                self._speech_end_at = time.monotonic()
+                logger.debug(
+                    "VAD detected silence, stop recording",
+                    module=self.LOG_MODULE,
+                )
+                if self._vad_future and not self._vad_future.done():
+                    self._loop.call_soon_threadsafe(
+                        self._vad_future.set_result, b"".join(recording_frames)
+                    )
 
-        # Tap into VAD's audio stream to record frames while waiting for silence
-        _orig_handle_speech = vad._handle_speech_frame
-        _orig_handle_silence = vad._handle_silence_frame
-
-        def _recording_speech_frame(frames):
+        def _on_vad_frame(kind: str, frames: bytes):
+            """录音帧 tap：is_recording 期间两类帧都收（speech+silence）。"""
             if is_recording:
                 recording_frames.append(bytes(frames))
-            _orig_handle_speech(frames)
 
-        def _recording_silence_frame(frames):
-            if is_recording:
-                recording_frames.append(bytes(frames))
-            _orig_handle_silence(frames)
-
-        EventManager.on_speech = _on_speech_hook
-        EventManager.on_silence = _on_silence_hook
-        vad._handle_speech_frame = _recording_speech_frame
-        vad._handle_silence_frame = _recording_silence_frame
-
+        unsubscribe_events = vad.subscribe_events(_on_vad_event)
+        unsubscribe_frames = vad.subscribe_frames(_on_vad_frame)
         try:
             vad.resume("speech")
             result = await asyncio.wait_for(self._vad_future, timeout=self.timeout)
@@ -490,10 +556,8 @@ class ExternalConversationController:
             return None
 
         finally:
-            EventManager.on_speech = original_on_speech
-            EventManager.on_silence = original_on_silence
-            vad._handle_speech_frame = _orig_handle_speech
-            vad._handle_silence_frame = _orig_handle_silence
+            unsubscribe_events()
+            unsubscribe_frames()
             self._vad_future = None
 
     def _cancel_vad_future(self):
@@ -630,31 +694,27 @@ class ExternalConversationController:
 
         Uses VAD silence detection to confirm the speaker has stopped playing.
         If speech is detected (e.g. TTS tail), keeps retrying silence detection.
+        Events arrive through the public subscription seam (P2 ws ticket 04) —
+        scoped to this wait, released in finally.
         """
-        from core.wakeup_session import EventManager
-
         future = self._loop.create_future()
-        original_on_silence = EventManager.on_silence
-        original_on_speech = EventManager.on_speech
 
-        def _on_silence():
-            if not future.done():
-                self._loop.call_soon_threadsafe(future.set_result, True)
+        def _on_vad_event(event: str, payload):
+            if event == "silence":
+                if not future.done():
+                    self._loop.call_soon_threadsafe(future.set_result, True)
+            else:
+                # Still hearing sound — switch back to silence detection
+                vad.resume("silence")
 
-        def _on_speech(_speech_buffer: bytes):
-            # Still hearing sound — switch back to silence detection
-            vad.resume("silence")
-
-        EventManager.on_silence = _on_silence
-        EventManager.on_speech = _on_speech
+        unsubscribe = vad.subscribe_events(_on_vad_event)
         try:
             vad.resume("silence")
             await asyncio.wait_for(future, timeout=1)
         except asyncio.TimeoutError:
             vad.pause()
         finally:
-            EventManager.on_speech = original_on_speech
-            EventManager.on_silence = original_on_silence
+            unsubscribe()
 
     # ---- Recording control (physical mute/unmute via remote arecord) ----
 
@@ -677,33 +737,6 @@ class ExternalConversationController:
             logger.debug(f"start_recording error: {exc}", module=self.LOG_MODULE)
 
     # ---- TTS ----
-
-    async def _play_tts(self, text: str):
-        """Play text via Doubao TTS (blocks until playback finishes)."""
-        # 检查点③（播放等待内，起播前）：本轮已取消则不起播（静默退出）。
-        self._checkpoint(CHECKPOINT_PLAYBACK)
-        self._playback_token = open_xiaoai_server.begin_playback_session()
-        try:
-            await self.backend._play_response_with_tts(
-                text,
-                tts_speaker=self.backend.get_tts_speaker_for_session_key(),
-                playback_token=self._playback_token,
-            )
-        except TurnCancelledError:
-            raise
-        except Exception as exc:
-            logger.error(
-                f"TTS playback error: {exc}",
-                module=self.LOG_MODULE,
-            )
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text=text)
-        finally:
-            self._playback_token = None
-        # 检查点③（播放等待内，返回后）：取消则不再播任何后续音频
-        # （notify 音等），本轮静默退出。
-        self._checkpoint(CHECKPOINT_PLAYBACK)
 
     async def _play_notify(self):
         """Play the listening-ready notification sound via PCM buffer."""

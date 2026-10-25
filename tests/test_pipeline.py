@@ -84,9 +84,15 @@ import open_xiaoai_server as native_stub  # noqa: E402
 
 
 class FakeVad:
+    """VAD 替身：实现对话控制器依赖的公开订阅 seam（P2 ws ticket 04 起
+    _wait_for_speech / _wait_for_silence 走 subscribe_events/subscribe_frames，
+    不再猴补丁内部处理器）。"""
+
     def __init__(self):
         self.modes: list[tuple[str, str]] = []
         self.paused = 0
+        self.event_subscribers: list = []
+        self.frame_subscribers: list = []
 
     def resume(self, mode: str):
         self.modes.append(("resume", mode))
@@ -94,11 +100,31 @@ class FakeVad:
     def pause(self):
         self.paused += 1
 
-    def _handle_speech_frame(self, frames):
-        pass
+    def subscribe_events(self, callback):
+        self.event_subscribers.append(callback)
 
-    def _handle_silence_frame(self, frames):
-        pass
+        def _unsubscribe():
+            try:
+                self.event_subscribers.remove(callback)
+            except ValueError:
+                pass
+
+        return _unsubscribe
+
+    def subscribe_frames(self, callback):
+        self.frame_subscribers.append(callback)
+
+        def _unsubscribe():
+            try:
+                self.frame_subscribers.remove(callback)
+            except ValueError:
+                pass
+
+        return _unsubscribe
+
+    def emit_event(self, event: str, payload=None):
+        for callback in list(self.event_subscribers):
+            callback(event, payload)
 
 
 class FakeSpeaker:
@@ -203,12 +229,10 @@ async def _wait_until(predicate, timeout: float = 3.0) -> bool:
     return False
 
 
-def _speech_hook_installed() -> bool:
-    """_wait_for_speech 的语音 hook 是否挂在 EventManager 上。"""
-    hook = EventManager.__dict__.get("on_speech")
-    return hook is not None and "_on_speech_hook" in getattr(
-        hook, "__qualname__", ""
-    )
+def _speech_hook_installed(vad) -> bool:
+    """_wait_for_speech 的语音订阅是否挂在 VAD 订阅表上（ticket 04 起
+    经公开 seam，不再替换 EventManager 回调槽）。"""
+    return len(vad.event_subscribers) > 0
 
 
 # ---- 模块级单测 ----
@@ -362,12 +386,12 @@ class ConversationLoopTestBase(unittest.IsolatedAsyncioTestCase):
     async def _drive_speech(self, speech_round: int = 1, utterance: bytes = b"\x01\x02"):
         """模拟第 speech_round 轮的完整语音（说 → 说完）。"""
         ok = await _wait_until(
-            lambda: _speech_hook_installed()
+            lambda: _speech_hook_installed(self.vad)
             and self.vad.modes.count(("resume", "speech")) >= speech_round
         )
         self.assertTrue(ok, "conversation loop did not start listening")
-        EventManager.on_speech(utterance)
-        EventManager.on_silence()
+        self.vad.emit_event("speech", utterance)
+        self.vad.emit_event("silence")
 
 
 class LocalAsrTurnTest(ConversationLoopTestBase):
@@ -465,9 +489,10 @@ class LocalAsrTurnTest(ConversationLoopTestBase):
 
 
 class XiaoaiAsrTurnTest(ConversationLoopTestBase):
-    async def test_multi_segment_stream_is_joined_for_playback(self):
-        """流式多段消费（ticket 03）：句段逐段过检查点，播放文本 = 段拼接
-        （TTS 逐句起播属 ticket 04；本票行为等价 = 整段播）。"""
+    async def test_multi_segment_stream_plays_per_segment(self):
+        """流式多段消费（ticket 03 收集 + ticket 04 逐段起播）：句段逐段
+        过检查点、逐段独立播放（首句起播不等全文），非流式回退路径由
+        FakeBackend 基线（单句序列 = 单段一次播放）覆盖。"""
 
         class MultiSegmentBackend(FakeBackend):
             async def stream_response_segments(self, text: str):
@@ -490,9 +515,12 @@ class XiaoaiAsrTurnTest(ConversationLoopTestBase):
                     "d1", "讲个故事", True, False
                 )
             )
-            ok = await _wait_until(lambda: len(backend.played) == 1)
+            ok = await _wait_until(lambda: len(backend.played) == 2)
             self.assertTrue(ok)
-            self.assertEqual(("第一句话了。第二句话了。", 7), backend.played[0])
+            self.assertEqual(
+                [("第一句话了。", 7), ("第二句话了。", 7)],
+                backend.played,
+            )
             self.controller.stop()
             with self.assertRaises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=3)

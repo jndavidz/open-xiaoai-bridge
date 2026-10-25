@@ -219,8 +219,15 @@ class TurnTrace:
             self.llm_chars = _int_or_missing(chars)
 
     def note_tts_chars(self, chars: int) -> None:
+        """累计送入 TTS 的字符数（P1 ticket 04 起逐段累加：分段播放时
+        每段各记一次，单段调用与覆盖口径等价；非法值忽略）。"""
         with self._lock:
-            self.tts_chars = _int_or_missing(chars)
+            if isinstance(chars, bool) or not isinstance(chars, (int, float)):
+                return
+            if chars < 0:
+                return
+            value = int(chars)
+            self.tts_chars = value if self.tts_chars < 0 else self.tts_chars + value
 
     def note_tool_rounds(self, rounds: int) -> None:
         with self._lock:
