@@ -19,6 +19,7 @@ from core.services.admin_api import AdminAPI
 from core.services.auth import authorize, classify_route, configured_tokens
 from core.services.caller import resolve_caller_tag, trust_proxy_enabled
 from core.services.health import build_health_payload
+from core.services.speaker import AnnounceRejected
 from core.services.inject_control import (
     INJECT_DISABLED_CODE,
     INJECT_DISABLED_ERROR,
@@ -509,23 +510,6 @@ class APIServer:
             headers=decision.header_dict(),
         )
 
-    def _estimate_gate_seconds(self, text: str) -> float:
-        """估算一段文本的 TTS 时长作为闸门兜底时限（中文约 4.5 字/秒，下限 8s）。
-
-        仅用于非阻塞播放的保守释放/兜底。
-
-        ⚠️ 2026-10-20 更正：本函数注释原写「真实播完时间无法从 ubus 获知（无完成回调）」
-        **已被推翻** —— 设备**有**完成回调：`ubus listen` 收
-        `play_status_broadcast_event`（`{"status":1}` 开始 / `{"status":0}` 播完）。
-        详见 `docs/devices/lx06/ubus-events-play-status.md`。
-
-        注意该回调的三条边界（并发不可用 / `status:0` 也可能是失败 /
-        HTTP 源不可达时只发 `status:1`）⇒ 本估算应**保留为超时兜底上限**，
-        而非被完全替换。
-        """
-        n = len((text or "").strip())
-        return max(8.0, min(120.0, n / 4.5 + 6.0))
-
     @staticmethod
     def _mic_gate_seconds(timeout_ms, extra: float = 5.0) -> float:
         """固件闭麦闸门的持有上限：以调用方 timeout 为界，留 margin，并钳位。
@@ -671,6 +655,10 @@ class APIServer:
                 "blocking": false,        # optional, default false
                 "timeout": 60000          # optional, timeout in ms
             }
+
+        P0 ticket 02：全路径走 `speaker.announce`（双闸门 + 词表安全检查 +
+        完成等待）。文案命中唤醒/指令词表时拒绝播报（blocking 返回 400
+        code=announce_rejected；非阻塞在后台任务中拒绝并记日志）。
         """
         try:
             data = await request.json()
@@ -692,57 +680,45 @@ class APIServer:
                     status=503
                 )
 
-            # Run in background to not block the response
             # incident-kws-self-trigger-loop.md §5: 外部播报（HA/企微/DDNS）经此端点发声，
-            # 必须开 KWS 播放闸门，否则就是潜在的自触发源（本次事故的真正入口）。
+            # 必须走闸门编排，否则就是潜在的自触发源（本次事故的真正入口）。
             # 建议 7：记录调用方，回答“是谁让音箱说话的”。
             logger.info(
                 f"[APIServer] /api/play/text caller={self._caller_tag(request)} "
                 f"blocking={blocking} text={self._redact_text(text)!r}"
             )
-            kws = get_kws()
+
             if blocking:
-                gate_seconds = self._mic_gate_seconds(timeout)
-                # 先取得 mic_gate 串行锁，再开 KWS 闸门：排队期间 timer 不空转。
-                async with speaker.mic_gate(
-                    "api/play/text blocking",
-                    max_seconds=gate_seconds,
-                ):
-                    token = self._gate_kws(
-                        kws, "api/play/text blocking", max_seconds=gate_seconds
-                    )
-                    try:
+                try:
+                    async with speaker.announce(
+                        text=text,
+                        reason="api/play/text blocking",
+                        gate_seconds=self._mic_gate_seconds(timeout),
+                        wait=False,  # 阻塞播放内含等完成，避免双重等待
+                    ):
                         result = await speaker.play(
                             text=text, blocking=True, timeout=timeout
                         )
-                    finally:
-                        self._ungate_kws(kws, token)
+                except AnnounceRejected as e:
+                    return web.json_response(
+                        {"success": False, "error": str(e), "code": "announce_rejected"},
+                        status=400,
+                    )
                 return web.json_response({"success": result})
             else:
-                # 非阻塞：播放命令立即返回，用事件适配器等真正播完（超时兜底）。
-                estimate = self._estimate_gate_seconds(text)
-                budget = estimate + 5.0
-
-                async def _play_and_ungate():
-                    async with speaker.mic_gate(
-                        "api/play/text background",
-                        max_seconds=budget,
+                # 非阻塞：播放命令立即返回；announce 在后台任务里完成
+                # 「双闸门 → 播放 → 等真正播完（超时兜底）→ 双闸门归还」。
+                async def _announce_in_background():
+                    async with speaker.announce(
+                        text=text, reason="api/play/text background"
                     ):
-                        token = self._gate_kws(
-                            kws, "api/play/text background", max_seconds=budget
+                        await speaker.play(
+                            text=text, blocking=False, timeout=timeout
                         )
-                        try:
-                            await speaker.play(
-                                text=text, blocking=False, timeout=timeout
-                            )
-                            # 用播放完成事件/context 回读等真正结束；超时由适配器兜底。
-                            await get_playback_events().wait_for_finish(
-                                budget * 1000.0
-                            )
-                        finally:
-                            self._ungate_kws(kws, token)
 
-                asyncio.create_task(_play_and_ungate())
+                self._create_background_task(
+                    _announce_in_background(), "play/text announce"
+                )
                 return web.json_response({"success": True, "message": "Playing text in background"})
 
         except json.JSONDecodeError:

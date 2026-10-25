@@ -1,7 +1,8 @@
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Any, Literal
 
 import open_xiaoai_server
 
@@ -15,7 +16,13 @@ from core.ref import get_kws, get_xiaoai, set_speaker
 from core.utils.logger import logger
 from core.utils import turn_trace
 
-__all__ = ["CommandResult", "SpeakerManager"]
+__all__ = [
+    "AnnounceRejected",
+    "CommandResult",
+    "SpeakerManager",
+    "estimate_playback_budget_ms",
+    "find_blocked_word",
+]
 
 # ---- 阻塞播报的判据参数 ----
 
@@ -54,6 +61,78 @@ def estimate_playback_budget_ms(text: str, timeout_ms: float | None) -> float:
     if timeout_ms is None:
         return estimate
     return max(1.0, min(float(timeout_ms), estimate))
+
+
+class AnnounceRejected(RuntimeError):
+    """词表安全检查拒绝：播报文案命中唤醒/指令词表（spec C2，默认拒绝）。
+
+    命中的词在 `word` 上（日志与 HTTP 响应只给词本身，不给全文，
+    与 api_server 的 `_redact_text` 同口径）。
+    """
+
+    def __init__(self, word: str):
+        super().__init__(f"播报文案命中唤醒/指令词表：{word!r}，已拒绝播报")
+        self.word = word
+
+
+def _kws_keywords() -> list[str]:
+    """词源 1：KWS 总词表（wakeup.keywords，含面板运行时覆盖层）。
+
+    读活配置（每次检查现取），config 热重载后下一个播报即用新词表。
+    配置不可用时按空处理并告警——检查缺席绝不能变成崩溃，但必须有痕。
+    """
+    try:
+        from core.utils.config import ConfigManager
+
+        words = ConfigManager.instance().get_app_config("wakeup.keywords", [])
+    except Exception as e:  # noqa: BLE001 - 词源缺失降级为不检查
+        logger.warning(f"[Speaker] announce word source unavailable (keywords): {e}")
+        return []
+    return [str(w) for w in (words or []) if w]
+
+
+def _config_command_keys() -> list[str]:
+    """词源 2：免唤醒/截胡指令键（config 模块的 DIRECT/XIAOAI_COMMANDS）。
+
+    与词源 1 各自维护、可能漂移（P2 才做「词表 ⊇ 指令表」启动校验），
+    所以两组都查。config 模块未加载（部分测试环境）时按空处理。
+    """
+    module = sys.modules.get("config")
+    if module is None:
+        logger.debug(
+            "[Speaker] announce word source unavailable (config module not loaded)"
+        )
+        return []
+    keys: list[str] = []
+    for attr in ("DIRECT_COMMANDS", "XIAOAI_COMMANDS"):
+        table = getattr(module, attr, None)
+        if isinstance(table, dict):
+            keys.extend(str(k) for k in table if k)
+    return keys
+
+
+def find_blocked_word(text: str | None) -> str | None:
+    """播报文案与两组词源交叉（子串包含，事故语义即「文案含词表词」）。
+
+    命中返回该词；文案为空或词源全空返回 None。
+    """
+    if not text:
+        return None
+    for word in _kws_keywords() + _config_command_keys():
+        if word and word in text:
+            return word
+    return None
+
+
+class _AnnounceSession:
+    """一次 announce 的观测句柄：等待完成的结局（测试与调用方可读）。"""
+
+    __slots__ = ("wait_finished", "wait_started", "wait_reason")
+
+    def __init__(self) -> None:
+        self.wait_finished: bool | None = None
+        self.wait_started: bool | None = None
+        self.wait_reason: str | None = None
 
 
 class SpeakerManager:
@@ -475,6 +554,112 @@ class SpeakerManager:
                     pass
                 except Exception as e:  # noqa: BLE001 - 看门狗异常不影响退出
                     logger.warning(f"[Speaker] mic gate watchdog failed: {e}")
+
+    # ------------------------------------------------------------------
+    # announce：播报编排深模块（P0 spec C2 / ticket 02）
+    #
+    # 「朝音箱说话」的全套防护只活在这里：固件闭麦（快照恢复 + 串行锁 +
+    # 看门狗）+ KWS 软闸门（引用计数 + 兜底 timer）+ 词表安全检查 +
+    # 完成等待（事件适配 + 文本估算超时兜底），finally 保证双闸门归还。
+    # 事故档案 docs/plan/incident-kws-self-trigger-loop.md §5 建议 1 的
+    # 手工清单在这里转为自动化纪律；新播报入口一律经此接入。
+    # ⚠️ /api/play/url、/api/play/file、_run_steps 仍是旧手工编排，
+    #    按 P0 票 03 迁移后删除其本地副本。
+    # ------------------------------------------------------------------
+
+    def _gate_kws(self, kws: Any, reason: str, max_seconds: float) -> str | None:
+        """开 KWS 播放闸门（失败不阻断播报，返回 None）。"""
+        if not kws:
+            return None
+        try:
+            return kws.gate_on(reason=reason, max_seconds=max_seconds)
+        except Exception as e:  # noqa: BLE001 - 闸门失败只告警
+            logger.warning(f"[Speaker] KWS gate_on failed ({reason}): {e}")
+            return None
+
+    def _ungate_kws(self, kws: Any, token: str | None) -> None:
+        """关 KWS 播放闸门（失败不抛）。"""
+        if not kws:
+            return
+        try:
+            kws.gate_off(token)
+        except Exception as e:  # noqa: BLE001 - finally 里不得抛
+            logger.warning(f"[Speaker] KWS gate_off failed: {e}")
+
+    @asynccontextmanager
+    async def announce(
+        self,
+        text: str | None = None,
+        *,
+        reason: str = "announce",
+        exempt: bool = False,
+        wait: bool = True,
+        gate_seconds: float | None = None,
+        wait_budget_ms: float | None = None,
+    ):
+        """播报编排上下文管理器：进入做防护，退出恢复，finally 双闸门归还。
+
+        进入（次序固定）：
+          1. 取 mic_gate 串行锁（固件闭麦：快照恢复 + 看门狗）——先锁后开
+             KWS 闸门，排队期间 KWS 兜底 timer 不空转，也不会出现「timer
+             先期归还、真正播放时闸门已关」的洞；
+          2. 开 KWS 软闸门（引用计数 + 兜底 timer）；
+          3. 词表安全检查：文案与 KWS 关键词 + 免唤醒指令键交叉，命中默认
+             拒绝（raise AnnounceRejected）并告警；`exempt=True` 显式豁免。
+
+        body：经设备能力层播放（调用方负责，通常 `speaker.play`）。
+
+        退出：`wait=True` 时等播放真正完成（事件适配 + 按文本估算的超时
+        兜底），结局写入 yield 出的 session；无论 body 成败，finally 依次
+        关 KWS 闸门、恢复麦态快照。
+
+        参数：
+            text: 播报文案（词表检查与等待预算的依据；URL/文件播报传 None）
+            reason: 闸门原因标记（日志与 gate_status 可观测）
+            exempt: 跳过词表检查（确知安全的调用方显式豁免）
+            wait: 退出时是否等播放完成——阻塞式播放（play blocking=True）
+                  已内含等完成，传 False 避免双重等待
+            gate_seconds: 双闸门持有上限；缺省按文本估算 + 5s
+            wait_budget_ms: 完成等待预算；缺省按文本估算 + 5s
+        """
+        if gate_seconds is None:
+            gate_seconds = estimate_playback_budget_ms(text or "", None) / 1000.0 + 5.0
+        if wait and wait_budget_ms is None:
+            wait_budget_ms = estimate_playback_budget_ms(text or "", None) + 5_000.0
+        session = _AnnounceSession()
+        kws = get_kws()
+        async with self.mic_gate(reason, max_seconds=gate_seconds):
+            token = self._gate_kws(kws, reason, gate_seconds)
+            try:
+                if not exempt:
+                    word = find_blocked_word(text)
+                    if word is not None:
+                        logger.warning(
+                            f"[Speaker] announce rejected by word-list check "
+                            f"(reason={reason!r}, word={word!r})"
+                        )
+                        raise AnnounceRejected(word)
+                yield session
+                if wait:
+                    finished, started, wait_reason = (
+                        await get_playback_events().wait_for_finish(wait_budget_ms)
+                    )
+                    session.wait_finished = finished
+                    session.wait_started = started
+                    session.wait_reason = wait_reason
+                    if not finished:
+                        logger.warning(
+                            "[Speaker] announce completion unconfirmed "
+                            f"(reason={reason!r}, wait_reason={wait_reason}, "
+                            f"budget={wait_budget_ms:.0f}ms)"
+                        )
+                    elif wait_reason == "timeout":
+                        logger.warning(
+                            "[Speaker] announce completion not observed, "
+                            f"timeout fallback (reason={reason!r})"
+                        )
+            finally:
+                self._ungate_kws(kws, token)
 
     async def reconcile_mic_state(self) -> bool:
         """启动期麦态自愈：清掉 bridge 崩溃遗留的设备级闭麦。
