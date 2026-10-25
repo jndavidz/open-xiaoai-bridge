@@ -397,6 +397,12 @@ class BackendManagerBase:
         """调传输核、落文本、记埋点、唤醒等待者。"""
         # TurnTrace（ticket 11）：只统计轮数与耗时，不记录任何文本。
         stats = {"tool_rounds": 0}
+        # 用量记账维度（P2 ticket 03）：backend/model/session_key 随本轮埋点入台账。
+        turn_trace.note_context(
+            backend=cls.LOG_MODULE,
+            model=cls.usage_model_label(),
+            session_key=cls._session_key,
+        )
         try:
             response_text = await cls._request_completion(text, stats=stats)
             if response_text:
@@ -431,3 +437,8 @@ class BackendManagerBase:
         统一记账。
         """
         raise NotImplementedError("backend transport core must implement _request_completion")
+
+    @classmethod
+    def usage_model_label(cls) -> str:
+        """用量记账的模型标签：上游不暴露模型名的后端返回空串（面板显示 -）。"""
+        return ""

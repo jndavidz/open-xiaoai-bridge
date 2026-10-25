@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -180,6 +181,44 @@ async def test_http():
             assert "openai" in data["backends"]
             assert data["external_services"] == []  # MONITOR_SERVICES 未配置
             ok("overview 结构完整（含外部服务段）")
+
+            # ---- usage 端点（P2 ticket 03：成本记账，只读） ----
+            os.environ["USAGE_LEDGER_DIR"] = str(_TMP / "usage-test")
+            usage_dir = Path(os.environ["USAGE_LEDGER_DIR"])
+            usage_dir.mkdir(parents=True, exist_ok=True)
+            today = time.strftime("%Y-%m-%d")
+            seed_rows = [
+                {"date": today, "backend": "OpenAI", "model": "deepseek-chat",
+                 "session_key": "agent:default:x", "requests": 2,
+                 "prompt_chars": 160, "completion_chars": 80,
+                 "tts_chars": 50, "tool_rounds": 1, "web_calls": 1},
+                {"date": today, "backend": "OpenClaw", "model": "",
+                 "session_key": "agent:main:x", "requests": 1,
+                 "llm_errors": 1},
+            ]
+            with open(usage_dir / f"usage-{today}.jsonl", "w", encoding="utf-8") as fh:
+                for row in seed_rows:
+                    fh.write(json.dumps(row) + "\n")
+
+            r = await s.get(f"{base}/api/admin/usage")
+            assert r.status == 401, r.status
+            ok("usage 缺 token -> 401（沿用面板既有鉴权）")
+
+            r = await s.get(f"{base}/api/admin/usage?days=1", headers=H)
+            assert r.status == 200, r.status
+            udata = (await r.json())["data"]
+            assert udata["days"] == 1
+            assert udata["totals"]["turns"] == 2
+            assert udata["totals"]["requests"] == 3
+            assert udata["totals"]["llm_errors"] == 1
+            assert udata["totals"]["prompt_tokens_est"] == 100  # 160 字符 / 1.6
+            assert {row["backend"] for row in udata["by_backend"]} == {"OpenAI", "OpenClaw"}
+            assert {row["session_key"] for row in udata["by_session"]} == {
+                "agent:default:x", "agent:main:x"}
+            assert "1.6" in udata["estimation_note"]
+            ok("usage 聚合结构完整（按天/模型/后端/会话键 + 估算口径脚注）")
+
+            os.environ.pop("USAGE_LEDGER_DIR", None)
 
             r = await s.get(f"{base}/api/admin/config", headers=H)
             body = await r.json()

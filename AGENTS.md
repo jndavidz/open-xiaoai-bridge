@@ -61,7 +61,8 @@ open-xiaoai-bridge/
 │       ├── runtime_overrides.py   # 运行时配置覆盖层（data/runtime-overrides.json）
 │       ├── config.py              # ConfigManager（嵌套路径查询、热重载、覆盖层合并）
 │       ├── config_loader.py       # config.py 动态导入
-│       ├── turn_trace.py          # 每轮延迟埋点 [TurnTrace]（默认关；纯数值无 PII；P1 ticket 02 起轮次号与 pipeline 同源）
+│       ├── turn_trace.py          # 每轮延迟埋点 [TurnTrace]（默认关；纯数值无 PII；P1 ticket 02 起轮次号与 pipeline 同源；P2 ticket 03 起带用量字段并喂 usage_ledger）
+│       ├── usage_ledger.py        # 用量记账台账（P2 票 03）：每轮一行 JSONL 落盘 data/usage/，只记账零控制；面板「用量」页数据源
 │       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
 │       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段）
 │       ├── base.py                # 基础工具
@@ -819,4 +820,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**500 tests OK (skipped=3)**（2026-10-26，P1 票 03 后；459 = P2 票 01 后，本票 +41 = `test_sentence_split.py` 17 + `test_llm_stream.py` 23 + `test_pipeline.py` 多段消费 1）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**525 tests OK (skipped=3)**（2026-10-26，P2 票 03 后；500 = P1 票 03 后，本票 +25 = `test_usage_ledger.py` 13 + `test_turn_trace_usage.py` 8 + `test_openai_usage_accounting.py` 3 + `test_backend_base.py` 上下文注入 1）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

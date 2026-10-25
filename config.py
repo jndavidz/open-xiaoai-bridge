@@ -255,6 +255,13 @@ APP_CONFIG = {
         # 环境变量 TURN_TRACE_ENABLED 可覆盖本值（1/true/yes/on 开，0/false/no/off 关）。
         "enabled": False,
     },
+    "usage_ledger": {
+        # 用量记账（P2 ticket 03）：每轮一行 JSONL 落盘到 data/usage/，面板
+        # 「用量」页查询。只记账零控制——无限额/断路/切换（2026-10-25 裁决 Q2：
+        # 控制面等 2 个月真实账单后再定阈值）。默认关闭（开发/测试不落盘）；
+        # 生产 deploy/config.py 置 True。环境变量 USAGE_LEDGER_ENABLED 可覆盖。
+        "enabled": False,
+    },
     "asr": {
         # 支持 "sense_voice"（默认）、"paraformer"、"fire_red_asr" 或 "doubao"
         "model": "sense_voice",

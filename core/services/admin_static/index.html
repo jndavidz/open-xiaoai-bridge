@@ -112,6 +112,14 @@
   #benchWrap td.num, #benchWrap th.num { text-align: right; font-variant-numeric: tabular-nums; }
   #benchWrap tr.best td { color: var(--ok); }
   #benchWrap .pv { color: var(--muted); font-size: .74rem; }
+  /* 用量页（P2 ticket 03） */
+  .utable { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .utable th, .utable td { text-align: left; padding: 6px 8px;
+      border-bottom: 1px solid var(--border); }
+  .utable th { color: var(--muted); font-weight: 500; }
+  .utable td.num, .utable th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .utable h3 { margin: 4px 0 6px; font-size: .9rem; }
+  .unote { color: var(--muted); font-size: .78rem; margin-top: 10px; line-height: 1.5; }
   /* 预设编辑弹窗 */
   #presetDlg { min-width: min(460px, 92vw); }
   #presetDlg .dfield { margin-top: 10px; }
@@ -136,6 +144,7 @@
 <nav>
   <button data-tab="overview" class="active">总览</button>
   <button data-tab="logs">日志</button>
+  <button data-tab="usage">用量</button>
   <button data-tab="settings">设置</button>
 </nav>
 
@@ -157,6 +166,26 @@
       <span class="meta" style="margin-left:auto;color:var(--muted);font-size:.78rem" id="logstat"></span>
     </div>
     <div id="logbox"></div>
+  </div>
+
+  <div id="tab-usage" style="display:none">
+    <section class="cfg">
+      <h2>用量记账</h2>
+      <p class="desc">按天 / 按模型 / 按后端 / 按会话键聚合的请求与 token 用量。只记账展示，无任何限额/断路/切换控制。</p>
+      <div class="pbar-head" style="margin-bottom:10px">
+        <label style="font-size:.8rem;color:var(--muted)">时间范围
+          <select id="usageDays" style="background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px;font-size:.8rem">
+            <option value="1">今天</option>
+            <option value="7" selected>近 7 天</option>
+            <option value="14">近 14 天</option>
+            <option value="30">近 30 天</option>
+          </select>
+        </label>
+        <button class="act sec" id="usageRefresh" style="padding:5px 12px">↻ 刷新</button>
+      </div>
+      <div id="usageWrap"><div class="pempty">加载中…</div></div>
+      <div class="unote" id="usageNote"></div>
+    </section>
   </div>
 
   <div id="tab-settings" style="display:none">
@@ -278,8 +307,9 @@ async function api(path, opts = {}) {
 document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
   document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
-  ["overview", "logs", "settings"].forEach(t =>
+  ["overview", "logs", "usage", "settings"].forEach(t =>
     $("#tab-" + t).style.display = t === btn.dataset.tab ? "" : "none");
+  if (btn.dataset.tab === "usage") refreshUsage();
 }));
 
 /* ---------------- token ---------------- */
@@ -410,6 +440,52 @@ $("#logFilter").addEventListener("change", renderLogs);
 
 setInterval(pollLogs, 2000);
 setInterval(() => { if ($("#tab-overview").style.display !== "none") refreshOverview(); }, 5000);
+
+/* ---------------- usage（P2 ticket 03：只记账，零控制） ---------------- */
+const USAGE_COLS = ["turns", "requests", "prompt_tokens_est", "completion_tokens_est",
+  "prompt_tokens", "completion_tokens", "tts_chars", "tool_rounds", "web_calls",
+  "llm_errors", "llm_timeouts"];
+const USAGE_HEADS = { turns: "轮次", requests: "请求", prompt_tokens_est: "输入 tok(估)",
+  completion_tokens_est: "输出 tok(估)", prompt_tokens: "输入 tok(实)",
+  completion_tokens: "输出 tok(实)", tts_chars: "TTS 字符", tool_rounds: "工具轮",
+  web_calls: "联网", llm_errors: "错误", llm_timeouts: "超时" };
+
+const usageRow = (label, r) =>
+  `<tr><td>${esc(label)}</td>` + USAGE_COLS.map(c =>
+    `<td class="num">${r[c] ? r[c] : (c === "turns" || c === "requests" ? 0 : "-")}</td>`).join("") + "</tr>";
+
+const usageTable = (title, keyProp, keyLabel, rows) => {
+  if (!rows || !rows.length) return "";
+  return `<h3>${title}</h3><table class="utable"><thead><tr><th>${keyLabel}</th>` +
+    USAGE_COLS.map(c => `<th class="num">${USAGE_HEADS[c]}</th>`).join("") +
+    "</tr></thead><tbody>" +
+    rows.map(r => usageRow(r[keyProp] ?? "-", r)).join("") + "</tbody></table>";
+};
+
+async function refreshUsage() {
+  const wrap = $("#usageWrap");
+  try {
+    const days = $("#usageDays").value;
+    const d = await api("/api/admin/usage?days=" + days);
+    $("#usageNote").textContent = d.estimation_note || "";
+    const parts = [];
+    if (d.totals && (d.totals.turns || d.totals.requests)) {
+      parts.push(usageTable(`汇总（近 ${d.days} 天）`, "scope", "范围", [{ ...d.totals, scope: "全部" }]));
+      parts.push(usageTable("按天", "date", "日期", d.by_day));
+      parts.push(usageTable("按模型", "model", "模型", d.by_model));
+      parts.push(usageTable("按后端", "backend", "后端", d.by_backend));
+      parts.push(usageTable("按会话键", "session_key", "会话键", d.by_session));
+      wrap.innerHTML = parts.join("");
+    } else {
+      wrap.innerHTML = `<div class="pempty">暂无用量数据（记账开关 usage_ledger.enabled 开启后逐轮累积）</div>`;
+      $("#usageNote").textContent = d.estimation_note || "";
+    }
+  } catch (err) {
+    wrap.innerHTML = `<div class="pempty" style="color:var(--err)">${esc(err.message)}</div>`;
+  }
+}
+$("#usageDays").addEventListener("change", refreshUsage);
+$("#usageRefresh").addEventListener("click", refreshUsage);
 
 /* ---------------- settings ---------------- */
 let cfgSchema = [];

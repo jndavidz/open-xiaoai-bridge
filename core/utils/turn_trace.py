@@ -37,6 +37,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from core.utils import usage_ledger
 from core.utils.logger import logger
 
 ENV_TURN_TRACE_ENABLED = "TURN_TRACE_ENABLED"
@@ -46,6 +47,8 @@ _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 # 输出字段顺序固定，便于日志解析与单测断言。
+# 全数值：backend / model / session_key 三个聚合维度只进 summary 字典
+# （喂 usage_ledger），不进日志行（任意字符串，且与 PII 纪律一致）。
 _FIELDS = (
     "turn",
     "src",
@@ -54,6 +57,11 @@ _FIELDS = (
     "llm_chars",
     "tts_chars",
     "tool_rounds",
+    "llm_requests",
+    "prompt_chars",
+    "web_calls",
+    "prompt_tokens",
+    "completion_tokens",
     "llm_error",
     "llm_timeout",
     "tts_ok",
@@ -159,6 +167,15 @@ class TurnTrace:
         self.llm_chars = -1
         self.tts_chars = -1
         self.tool_rounds = 0
+        # 用量记账（P2 ticket 03）：请求/字符/联网/真实 token 累计。
+        self.backend = ""
+        self.model = ""
+        self.session_key = ""
+        self.prompt_chars = -1
+        self.llm_requests = 0
+        self.web_calls = 0
+        self.prompt_tokens = -1
+        self.completion_tokens = -1
         self.llm_error = False
         self.llm_timeout = False
         self.tts_synth_ok: bool | None = None
@@ -205,6 +222,50 @@ class TurnTrace:
     def note_tool_rounds(self, rounds: int) -> None:
         with self._lock:
             self.tool_rounds = max(self.tool_rounds, _int_or_missing(rounds))
+
+    def note_context(self, backend: str, model: str, session_key: str) -> None:
+        """聚合维度一次注入（首写优先：一轮只属于一个后端请求路径）。"""
+        with self._lock:
+            if not self.backend:
+                self.backend = str(backend or "")
+            if not self.model:
+                self.model = str(model or "")
+            if not self.session_key:
+                self.session_key = str(session_key or "")
+
+    def note_prompt_chars(self, chars: int) -> None:
+        """累计本次请求发送的 prompt 字符数（工具回环每轮重发历史，逐次累加）。"""
+        with self._lock:
+            if isinstance(chars, bool) or not isinstance(chars, (int, float)):
+                return
+            if chars < 0:
+                return
+            value = int(chars)
+            self.prompt_chars = value if self.prompt_chars < 0 else self.prompt_chars + value
+
+    def note_llm_request(self) -> None:
+        with self._lock:
+            self.llm_requests += 1
+
+    def note_web_calls(self, count: int = 1) -> None:
+        """联网工具调用数（出公网的工具，如天气；LAN 工具不计）。"""
+        with self._lock:
+            if count > 0:
+                self.web_calls += int(count)
+
+    def note_usage_tokens(self, prompt: Any = None, completion: Any = None) -> None:
+        """累计上游自报的真实 token（缺失/非法值忽略，保持 -1 = 未观测）。"""
+        with self._lock:
+            for attr, value in (
+                ("prompt_tokens", prompt),
+                ("completion_tokens", completion),
+            ):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                if value < 0:
+                    continue
+                current = getattr(self, attr)
+                setattr(self, attr, int(value) if current < 0 else current + int(value))
 
     def note_llm_error(self) -> None:
         with self._lock:
@@ -267,6 +328,14 @@ class TurnTrace:
             llm_chars = self.llm_chars
             tts_chars = self.tts_chars
             tool_rounds = self.tool_rounds
+            backend = self.backend
+            model = self.model
+            session_key = self.session_key
+            prompt_chars = self.prompt_chars
+            llm_requests = self.llm_requests
+            web_calls = self.web_calls
+            prompt_tokens = self.prompt_tokens
+            completion_tokens = self.completion_tokens
             llm_error = self.llm_error
             llm_timeout = self.llm_timeout
             tts_ok = self.tts_synth_ok
@@ -299,6 +368,14 @@ class TurnTrace:
             "llm_chars": llm_chars,
             "tts_chars": tts_chars,
             "tool_rounds": tool_rounds,
+            "backend": backend,
+            "model": model,
+            "session_key": session_key,
+            "prompt_chars": prompt_chars,
+            "llm_requests": llm_requests,
+            "web_calls": web_calls,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "llm_error": 1 if llm_error else 0,
             "llm_timeout": 1 if llm_timeout else 0,
             "tts_ok": _tri_state(tts_ok),
@@ -353,11 +430,17 @@ def current_trace() -> TurnTrace | None:
         return _current
 
 
-def reset_turn_trace() -> None:
-    """测试辅助：丢弃当前轮（不发日志）。"""
-    global _current
+def reset_turn_trace(reset_counter: bool = False) -> None:
+    """测试辅助：丢弃当前轮（不发日志）。
+
+    reset_counter=True 时连轮次计数器一并清零——供传入了显式 turn_id 的
+    测试恢复进程级干净状态（生产路径永不调用本函数）。
+    """
+    global _current, _turn_counter
     with _LOCK:
         _current = None
+        if reset_counter:
+            _turn_counter = 0
 
 
 def abandon_turn() -> None:
@@ -393,9 +476,19 @@ def _new_trace_locked(
 
 def _emit(trace: TurnTrace, incomplete: bool = False) -> None:
     try:
-        logger.info(format_turn_trace(trace.summary(incomplete=incomplete)))
+        summary = trace.summary(incomplete=incomplete)
+        # 日志行开关独立于台账：trace 关、台账开时只落盘不打日志。
+        if trace_enabled():
+            logger.info(format_turn_trace(summary))
+        if usage_ledger.enabled():
+            usage_ledger.observe(summary)
     except Exception:  # noqa: BLE001 - 埋点不得影响主流程
         pass
+
+
+def _recording() -> bool:
+    """任一记账面开启（[TurnTrace] 日志行或用量台账）都需要轮对象存在。"""
+    return trace_enabled() or usage_ledger.enabled()
 
 
 def begin_turn(
@@ -410,7 +503,7 @@ def begin_turn(
     """
     global _current
     try:
-        if not trace_enabled():
+        if not _recording():
             return None
         with _LOCK:
             previous = _current
@@ -427,7 +520,7 @@ def _update(action: Callable[[TurnTrace], None], *, ensure_source: str | None = 
         with _LOCK:
             trace = _current
             if trace is None:
-                if ensure_source is None or not trace_enabled():
+                if ensure_source is None or not _recording():
                     return
                 trace = _new_trace_locked(ensure_source)
             action(trace)
@@ -449,6 +542,27 @@ def note_reply_chars(chars: int) -> None:
 
 def note_tool_rounds(rounds: int) -> None:
     _update(lambda t: t.note_tool_rounds(rounds))
+
+
+def note_context(backend: str, model: str, session_key: str) -> None:
+    """注入聚合维度（backend/model/session_key，首写优先）。"""
+    _update(lambda t: t.note_context(backend, model, session_key))
+
+
+def note_prompt_chars(chars: int) -> None:
+    _update(lambda t: t.note_prompt_chars(chars))
+
+
+def note_llm_request() -> None:
+    _update(lambda t: t.note_llm_request())
+
+
+def note_web_calls(count: int = 1) -> None:
+    _update(lambda t: t.note_web_calls(count))
+
+
+def note_usage_tokens(prompt: Any = None, completion: Any = None) -> None:
+    _update(lambda t: t.note_usage_tokens(prompt, completion))
 
 
 def note_llm_error() -> None:

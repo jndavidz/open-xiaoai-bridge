@@ -234,6 +234,13 @@ APP_CONFIG = {
         # 环境变量 TURN_TRACE_ENABLED 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
         "enabled": False,
     },
+    "usage_ledger": {
+        # 用量记账（P2 ticket 03）：每轮一行 JSONL 写入 data/usage/（compose 卷内），
+        # 面板「用量」页按天/模型/后端/会话键查询。只记账零控制——无限额/断路/
+        # 切换（2026-10-25 裁决 Q2：控制面等 2 个月真实账单后再定阈值）。
+        # 环境变量 USAGE_LEDGER_ENABLED 可覆盖；目录可经 USAGE_LEDGER_DIR 重定向。
+        "enabled": True,
+    },
     "asr": {
         # input_mode=xiaoai_asr 时不加载本地 ASR 大模型（N3060 跑不动）
         "model": "sense_voice",

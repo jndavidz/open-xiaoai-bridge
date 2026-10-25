@@ -17,6 +17,14 @@ _REGISTRY: dict[str, object] = {
     m.NAME: m for m in _TOOL_MODULES if getattr(m, "NAME", None)
 }
 
+# 出公网的工具（用量记账「联网次数」口径，P2 ticket 03）：hass/music 走
+# 局域网（HA / LMS），不计联网；后续接联网搜索类工具时在此加行。
+EXTERNAL_NETWORK_TOOLS = frozenset({"weather_get"})
+
+
+def is_external_network_tool(name: object) -> bool:
+    return str(name or "") in EXTERNAL_NETWORK_TOOLS
+
 
 def get_all_tools() -> list[dict]:
     """返回聚合后的 OpenAI tools 数组（空数组表示未注册任何工具）。"""

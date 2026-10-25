@@ -81,6 +81,10 @@ class QwenPawManager(BackendManagerBase):
     async def _request_completion(
         cls, text: str, stats: dict[str, int] | None = None
     ) -> str | None:
+        # 用量记账（P2 ticket 03）：一次 agent 提交 = 一次记账请求（轮询不计）。
+        from core.utils import turn_trace
+
+        turn_trace.note_llm_request()
         timeout = aiohttp.ClientTimeout(total=cls._response_timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(

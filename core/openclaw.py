@@ -451,6 +451,13 @@ class OpenClawManager(BackendManagerBase):
             # TurnTrace：WS 后端同样接入延迟埋点（无本地完成任务的模板路径，
             # 起点在此手工挂；终点在 _on_response_finalized / 失败分支）。
             turn_trace.mark_llm_start()
+            # 用量记账维度（P2 ticket 03）：网关不暴露模型名，model 留空（面板显示 -）。
+            turn_trace.note_context(
+                backend=cls.LOG_MODULE, model=cls.usage_model_label(),
+                session_key=cls._session_key,
+            )
+            # 一次 agent 请求 = 一次记账请求（无本地工具回环）
+            turn_trace.note_llm_request()
 
             cls._open_run(idem, cls.get_tts_speaker_for_session_key(cls._session_key))
             logger.debug(f"[OpenClaw] Tracking idem={idem}")

@@ -33,6 +33,7 @@ from core.openai import OpenAIManager
 from core.qwenpaw import QwenPawManager
 from core.ref import get_app, get_kws, get_vad, get_xiaoai
 from core.utils.config import ConfigManager
+from core.utils import usage_ledger
 from core.utils.log_buffer import get_memory_log_handler
 from core.utils.logger import logger
 import core.utils.backend_presets as backend_presets_mod
@@ -345,6 +346,8 @@ class AdminAPI:
         app.router.add_post("/api/admin/config/test", self.handle_test_config)
         app.router.add_get("/api/admin/logs", self.handle_get_logs)
         app.router.add_post("/api/admin/logs/level", self.handle_log_level)
+        # 用量记账（P2 ticket 03）：只读聚合，零控制行为
+        app.router.add_get("/api/admin/usage", self.handle_usage)
         # AI 对话后端预设库（一键切换 / 测速）
         app.router.add_get("/api/admin/presets", self.handle_list_presets)
         app.router.add_post("/api/admin/presets", self.handle_create_preset)
@@ -386,6 +389,17 @@ class AdminAPI:
                 "uptime_s": self._uptime_seconds(),
             },
         }
+        return web.json_response({"success": True, "data": data})
+
+    # ---- usage（P2 ticket 03：成本记账，先记账后控制） ----
+
+    async def handle_usage(self, request: web.Request) -> web.Response:
+        """用量页数据：近 N 天按天/模型/后端/会话键聚合（只读，零控制行为）。"""
+        try:
+            days = int(request.query.get("days", "7"))
+        except (TypeError, ValueError):
+            days = 7
+        data = usage_ledger.query(days=days)
         return web.json_response({"success": True, "data": data})
 
     def _app_status(self) -> dict[str, Any]:

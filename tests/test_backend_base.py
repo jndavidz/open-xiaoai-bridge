@@ -91,6 +91,24 @@ class SendBookkeepingTest(FakeBackendTestBase):
         self.assertEqual({}, FakeBackend._response_events)
         self.assertEqual({}, FakeBackend._response_texts)
 
+    async def test_run_transport_notes_usage_context(self):
+        """P2 ticket 03：_run_transport 注入聚合维度（backend/model/session_key）。"""
+        turn_trace = importlib.import_module("core.utils.turn_trace")
+        FakeBackend._enabled = True
+        FakeBackend._session_key = "agent:default:fake"
+        self.addCleanup(turn_trace.reset_turn_trace)
+
+        with mock.patch.dict(
+            "os.environ", {turn_trace.ENV_TURN_TRACE_ENABLED: "1"}
+        ):
+            await FakeBackend.send("你好", wait_response=True)
+            trace = turn_trace.current_trace()
+            self.assertIsNotNone(trace)
+            self.assertEqual(trace.backend, "Fake")
+            self.assertEqual(trace.model, "")  # 基类默认无模型标签
+            self.assertEqual(trace.session_key, "agent:default:fake")
+            self.assertEqual(trace.llm_requests, 0)  # 请求计数是子类传输核的职责
+
     async def test_send_disabled_returns_none_without_request(self):
         result = await FakeBackend.send("你好", wait_response=True)
 

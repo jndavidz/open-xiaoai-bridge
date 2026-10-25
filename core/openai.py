@@ -21,7 +21,7 @@ from typing import Any
 import aiohttp
 
 from core.backend_base import BackendManagerBase
-from core.tools.registry import get_all_tools, execute_tool
+from core.tools.registry import get_all_tools, execute_tool, is_external_network_tool
 from core.utils import turn_trace
 from core.utils.logger import logger
 from core.utils.sentence_split import SentenceSegmenter
@@ -189,6 +189,22 @@ class OpenAIManager(BackendManagerBase):
         )
 
     @classmethod
+    def usage_model_label(cls) -> str:
+        """用量记账的模型标签：真实上游模型名。"""
+        return cls._model
+
+    @staticmethod
+    def _prompt_chars(messages: list[dict[str, str]]) -> int:
+        """本次请求发送的 prompt 字符总数（system+历史+本轮，估算口径）。"""
+        total = 0
+        for message in messages:
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str):
+                    total += len(content)
+        return total
+
+    @classmethod
     async def _request_completion(
         cls, text: str, stats: dict[str, int] | None = None
     ) -> str | None:
@@ -214,12 +230,26 @@ class OpenAIManager(BackendManagerBase):
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
 
+            # 用量记账（P2 ticket 03）：一次 HTTP 往返 = 一次请求 + 一份 prompt。
+            turn_trace.note_llm_request()
+            turn_trace.note_prompt_chars(cls._prompt_chars(messages))
+
             try:
                 body = await cls._post_llm(url, payload, headers)
             except RuntimeError as exc:
                 cls.last_error = f"{type(exc).__name__}: {exc}"
                 logger.error(f"[OpenAI] Chat completion failed: {cls.last_error}")
                 return None
+
+            # 上游自报 usage 时记真实 token（缺失则台账按字符估算，口径见脚注）
+            usage = body.get("usage") if isinstance(body, dict) else None
+            if isinstance(usage, dict):
+                turn_trace.note_usage_tokens(
+                    prompt=usage.get("prompt_tokens", usage.get("input_tokens")),
+                    completion=usage.get(
+                        "completion_tokens", usage.get("output_tokens")
+                    ),
+                )
 
             choices = body.get("choices") if isinstance(body, dict) else None
             choice = choices[0] if choices else {}
@@ -246,6 +276,9 @@ class OpenAIManager(BackendManagerBase):
                     for tc in tool_calls:
                         fn = tc.get("function", {}) if isinstance(tc, dict) else {}
                         result = await execute_tool(fn.get("name"), fn.get("arguments", "{}"))
+                        if is_external_network_tool(fn.get("name")):
+                            # 联网口径：出公网的工具调用（weather_get）；LAN 工具不计
+                            turn_trace.note_web_calls()
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.get("id"),
@@ -301,6 +334,12 @@ class OpenAIManager(BackendManagerBase):
         tools = get_all_tools() if cls._tools_active() else None
         logger.user_speech(text, module=f"{cls.LOG_MODULE}({cls._session_key})")
         turn_trace.mark_llm_start()
+        # 用量记账维度（P2 ticket 03）：流式路径不经过 _run_transport，在此注入。
+        turn_trace.note_context(
+            backend=cls.LOG_MODULE,
+            model=cls.usage_model_label(),
+            session_key=cls._session_key,
+        )
         try:
             generator = cls._stream_chat_completions_segments(
                 text,
@@ -345,6 +384,10 @@ class OpenAIManager(BackendManagerBase):
         full_parts: list[str] = []
         completed = False
         yielded = False
+        # 用量记账（P2 ticket 03）：一次 SSE POST = 一次请求；探测降级被放弃
+        # 的请求也如实计入（真实成本）。prompt 字符为发起时的完整 messages。
+        turn_trace.note_llm_request()
+        turn_trace.note_prompt_chars(cls._prompt_chars(messages))
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=cls._response_timeout)
@@ -360,6 +403,17 @@ class OpenAIManager(BackendManagerBase):
                             break  # 上游结束标记：迟到的后续行不再消费
                         if event is None:
                             continue  # 空行 / 注释 / 坏 JSON 行：跳过
+                        if isinstance(event.get("usage"), dict):
+                            # 请求了 stream_options.include_usage 的上游会在
+                            # 末帧带 usage；未请求时缺失，台账按字符估算
+                            turn_trace.note_usage_tokens(
+                                prompt=event["usage"].get(
+                                    "prompt_tokens", event["usage"].get("input_tokens")
+                                ),
+                                completion=event["usage"].get(
+                                    "completion_tokens", event["usage"].get("output_tokens")
+                                ),
+                            )
                         if _delta_has_tool_calls(event):
                             if tool_probe and not yielded:
                                 raise _ToolLoopDetected(text)
