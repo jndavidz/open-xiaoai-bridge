@@ -19,7 +19,7 @@ open-xiaoai-bridge/
 │   ├── xiaoai_conversation.py     # 小爱连续对话策略
 │   ├── xiaozhi.py                 # 小智 AI WebSocket 协议客户端
 │   ├── openclaw.py                # OpenClaw 网关客户端（连接、消息、TTS 播放）
-│   ├── external_conversation.py   # 外部后端连续对话循环主体（VAD/原生 ASR → 后端 → TTS；P1 ticket 02 起带管线态与取消检查点）
+│   ├── external_conversation.py   # 外部后端连续对话循环主体（VAD/原生 ASR → 后端 → 逐段流式 TTS；P1 ticket 02 起带管线态与取消检查点，04 起边生成边播）
 │   ├── openclaw_conversation.py   # OpenClaw 对话控制器（薄封装，继承 external_conversation）
 │   ├── openai_conversation.py     # OpenAI 对话控制器（薄封装，同上）
 │   ├── qwenpaw_conversation.py    # QwenPaw 对话控制器（薄封装，同上）
@@ -64,7 +64,7 @@ open-xiaoai-bridge/
 │       ├── turn_trace.py          # 每轮延迟埋点 [TurnTrace]（默认关；纯数值无 PII；P1 ticket 02 起轮次号与 pipeline 同源；P2 ticket 03 起带用量字段并喂 usage_ledger）
 │       ├── usage_ledger.py        # 用量记账台账（P2 票 03）：每轮一行 JSONL 落盘 data/usage/，只记账零控制；面板「用量」页数据源
 │       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
-│       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段）
+│       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段，04 起逐段直喂 TTS）
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
 ├── native/                        # Rust PyO3 扩展（maturin 编译）
@@ -163,15 +163,19 @@ OpenClaw 网关客户端，管理 WebSocket 连接、消息分发、自动重连
 2. 录制完整语音（VAD 帧 hook）
 3. SherpaASR 离线识别
 4. 退出关键词检测
-5. 发送到后端
-6. TTS 播放回复（阻塞等待完成）
-7. 恢复监听
+5. 发送到后端（`_speak_response_segments`，P1 ticket 04：pump 协程驱动句段流，
+   LLM 请求在「咻」提示音期间即上路）
+6. 逐段流式 TTS：首段到达即断录起播，后续段到达即接力播放（每段过
+   stream_segment 检查点；播放令牌整轮一个；非流式后端 = 单句序列 =
+   单段一次播放，行为与流式化之前逐字等价）
+7. 恢复监听（notify → 开录 → 等静音）
 
 **管线态与取消传播（P1 ticket 02，流式化地基）**:
 - 每轮对话经 `core/utils/pipeline.py` 分配轮次号并按管线态迁移
   （idle → listening → processing → speaking → idle），`[Pipeline] turn=N` 日志行
   与 `[TurnTrace] turn=N` 埋点同号；管线态与 MainApp 协议态**分层并存**，互不驱动。
-- 固定异步检查点：**ASR 定稿后 / LLM 请求前 / 播放等待内（起播前+返回后）**；
+- 固定异步检查点：**ASR 定稿后 / LLM 请求前 / 播放等待内（起播前+返回后）/
+  流循环内每个句段（stream_segment，ticket 04 起为逐段播放主检查点）**；
   本轮已取消（`pipeline.cancel_*`，由 `on_interrupt`/`reset_all_sessions` 置位）即抛
   `TurnCancelledError` 静默退出——不发请求、不播后续音频、不打 ERROR。
   事件线程侧（`consume_xiaoai_recognize_result`）用非抛式 `turn.check()` 吞定稿文本。
@@ -567,7 +571,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | 模块 | 文件 | 职责 |
 |------|------|------|
 | GlobalStream | `audio/stream.py` | 多路输入广播（模拟 PyAudio API） |
-| VAD | `audio/vad/silero.py` | Silero ONNX 语音活动检测 |
+| VAD | `audio/vad/`（`__init__.py` + `silero.py`） | Silero ONNX 语音活动检测 + **公开订阅 seam**（P2 票 04：`subscribe_events`/`subscribe_frames` 多消费者、注销幂等、订阅者异常隔离；回调在检测线程同步上抛；第二消费者一行挂上） |
 | KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒（信心度 2.0，阈值 0.2）；`kws/__init__` 含 `listen_disabled` 持久开关 + **播放闸门**（`gate_on`/`gate_off`） |
 | 多声道入口 | `audio/channels.py` | 6ch 帧对齐 + 最强麦（滑窗+迟滞）/等权平均/固定声道降为 1ch；纯 stdlib |
 | 录音看门狗 | `audio/watchdog.py` + `core/xiaoai.py` | 1s 无帧判死 → 先停后启 + 指数退避；`audio_health()` 暴露帧龄/策略/恢复计数 |
@@ -821,4 +825,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**525 tests OK (skipped=3)**（2026-10-26，P2 票 03 后；500 = P1 票 03 后，本票 +25 = `test_usage_ledger.py` 13 + `test_turn_trace_usage.py` 8 + `test_openai_usage_accounting.py` 3 + `test_backend_base.py` 上下文注入 1）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**556 tests OK (skipped=3)**（2026-10-26，P1 票 04 + P2 票 04 后；537 = P2 票 02 后（+12 = `test_kws_audit.py`），本批 +19 = `test_sentence_tts_pipeline.py` 10 + `test_vad_subscription.py` 9；525 = P2 票 03 后，500 = P1 票 03 后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
