@@ -21,7 +21,7 @@ async def run_steps(speaker, steps):
                 text=step,
                 reason="run_steps TTS",
                 wait=False,  # play(text) 阻塞式内含等完成
-                gate_seconds=300,
+                gate_seconds=300,  # 长指令序列兜底：远大于单条 TTS 实测时长，防闸门悬挂
             ):
                 await speaker.play(text=step)
         elif isinstance(step, tuple) and step[0] == "ha":
