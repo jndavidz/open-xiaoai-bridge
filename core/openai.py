@@ -10,33 +10,31 @@ including Hermes Agent API server mode.
 
 内部会话历史统一存 chat 格式（{role, content}），仅在出口按 api_style 转换，
 切换接口规格不影响既有会话记忆。
+
+公共骨架（记账 / 超时 / TTS 委托 / 配置装载 / 埋点）在
+core.backend_base.BackendManagerBase；本模块只保留传输核。
 """
 
-import asyncio
-import uuid
 from typing import Any
 
 import aiohttp
 
-from core.utils.base import get_env
-from core.utils.config import ConfigManager
-from core.utils.logger import logger
-from core.utils import turn_trace
+from core.backend_base import BackendManagerBase
 from core.tools.registry import get_all_tools, execute_tool
+from core.utils.logger import logger
 
 
 # 支持的接口规格（与 admin_api.CONFIG_SCHEMA 的 options 保持一致）
 API_STYLES = ("chat_completions", "openai_responses", "anthropic_messages")
 
 
-class OpenAIManager:
+class OpenAIManager(BackendManagerBase):
     """Manager for OpenAI-compatible chat backends."""
 
-    XIAOAI_TTS_SPEAKER = "xiaoai"
+    CONFIG_PREFIX = "openai"
+    ENABLE_ENV_VARS = ("OPENAI_ENABLE",)
+    LOG_MODULE = "OpenAI"
 
-    _initialized = False
-    _reload_listener_registered = False
-    _enabled = False
     # 上游接口规格：chat_completions | openai_responses | anthropic_messages
     _api_style = "chat_completions"
     _base_url = "http://127.0.0.1:8000/v1"
@@ -53,52 +51,16 @@ class OpenAIManager:
     _session_system_prompts: dict[str, str] = {}
     _temperature: float | None = None
     _max_tokens: int | None = None
-    _timeout = 120
     _history_max_messages = 20
     _extra_body: dict[str, Any] = {}
-    _tts_provider: str | None = None
-    _tts_speaker = None
-    _session_tts_speakers: dict[str, str] = {}
-    _tts_speed = 1.0
-    _rule_prompt = ""
-    _rule_prompt_for_skill = ""
     # 工具层（Agent 1.5 / 阶段 1.5）：function calling 回环开关与轮数上限
     _tool_calls_enabled = True
     _max_tool_rounds = 3
     _sessions: dict[str, list[dict[str, str]]] = {}
-    _response_events: dict[str, asyncio.Future] = {}
-    _response_texts: dict[str, str] = {}
-    _response_tts_speakers: dict[str, str | None] = {}
-    last_error: str | None = None
 
     @classmethod
-    def initialize_from_config(cls, enabled: bool | None = None):
-        logger.info("[OpenAI] Initializing from config...")
-        cls.reload_from_config(enabled=enabled)
-        cls._initialized = True
-
-    @classmethod
-    def reload_from_config(cls, enabled: bool | None = None):
-        """Refresh OpenAI settings from config.py."""
-        config_manager = ConfigManager.instance()
-        if not cls._reload_listener_registered:
-            config_manager.add_reload_listener(
-                lambda _old, _new: cls.reload_from_config()
-            )
-            cls._reload_listener_registered = True
-
-        config = config_manager.get_app_config("openai", {})
-
-        if enabled is not None:
-            cls._enabled = enabled
-        else:
-            env_enabled = get_env("OPENAI_ENABLE")
-            cls._enabled = (
-                env_enabled.lower() in ("1", "true", "yes")
-                if env_enabled is not None
-                else False
-            )
-
+    def _apply_config(cls, config: dict):
+        """装载 OpenAI 传输核专属配置。"""
         cls._base_url = str(config.get("base_url", "http://127.0.0.1:8000/v1")).rstrip("/")
         cls._api_key = str(config.get("api_key", "") or "")
         cls._model = str(config.get("model", "gpt-4o-mini"))
@@ -118,87 +80,21 @@ class OpenAIManager:
             cls._session_system_prompts = {
                 str(k): str(v) for k, v in sp.items() if v
             }
-        cls._timeout = int(config.get("response_timeout", 120))
-        cls._history_max_messages = max(0, int(config.get("history_max_messages", 20)))
         cls._temperature = cls._optional_float(config.get("temperature"))
         cls._max_tokens = cls._optional_int(config.get("max_tokens"))
         cls._extra_body = config.get("extra_body", {})
         if not isinstance(cls._extra_body, dict):
             cls._extra_body = {}
-        configured_provider = config.get("tts_provider")
-        cls._tts_provider = (
-            str(configured_provider).strip().lower()
-            if configured_provider
-            else None
-        )
-        cls._tts_speaker = config.get("tts_speaker", None)
-        cls._session_tts_speakers = (
-            {
-                str(key): str(value)
-                for key, value in config.get("session_tts_speakers", {}).items()
-                if key and value
-            }
-            if isinstance(config.get("session_tts_speakers", {}), dict)
-            else {}
-        )
-        cls._tts_speed = float(config.get("tts_speed", 1.0))
-        cls._rule_prompt = str(config.get("rule_prompt", "") or "")
-        cls._rule_prompt_for_skill = str(config.get("rule_prompt_for_skill", "") or "")
         # 工具层（Agent 1.5）：默认开启；max_tool_rounds 限制 tool_calls 回环深度
         cls._tool_calls_enabled = bool(config.get("tool_calls_enabled", True))
         cls._max_tool_rounds = max(1, int(config.get("max_tool_rounds", 3)))
 
-        if cls._enabled:
-            logger.info(
-                f"[OpenAI] Enabled, base_url={cls._base_url}, model={cls._model}, "
-                f"api_style={cls._api_style}"
-            )
-
     @classmethod
-    def _optional_float(cls, value) -> float | None:
-        if value is None or value == "":
-            return None
-        return float(value)
-
-    @classmethod
-    def _optional_int(cls, value) -> int | None:
-        if value is None or value == "":
-            return None
-        return int(value)
-
-    @classmethod
-    async def connect(cls) -> bool:
-        """No-op connect hook for parity with WebSocket backends."""
-        if not cls._initialized:
-            cls.initialize_from_config()
-        return cls._enabled
-
-    @classmethod
-    async def close(cls):
-        """Cancel pending response waiters."""
-        for waiter in list(cls._response_events.values()):
-            if not waiter.done():
-                waiter.cancel()
-        cls._response_events.clear()
-        cls._response_texts.clear()
-        cls._response_tts_speakers.clear()
-
-    @classmethod
-    def is_connected(cls) -> bool:
-        return cls.is_enabled()
-
-    @classmethod
-    def is_enabled(cls) -> bool:
-        if not cls._initialized:
-            cls.initialize_from_config()
-        return cls._enabled
-
-    @classmethod
-    def set_session_key(cls, session_key: str):
+    def _log_enabled(cls):
         logger.info(
-            f"[OpenAI] Session key updated: {cls._session_key!r} -> {session_key!r}"
+            f"[OpenAI] Enabled, base_url={cls._base_url}, model={cls._model}, "
+            f"api_style={cls._api_style}"
         )
-        cls._session_key = session_key
 
     @classmethod
     def set_session_system_prompt(cls, prompt: str | None):
@@ -220,11 +116,6 @@ class OpenAIManager:
         cls._sessions.pop(session_key or cls._session_key, None)
 
     @classmethod
-    def get_tts_speaker_for_session_key(cls, session_key: str | None = None) -> str | None:
-        target_session_key = session_key or cls._session_key
-        return cls._session_tts_speakers.get(target_session_key) or cls._tts_speaker
-
-    @classmethod
     def _resolve_tts_provider(cls, tts_speaker: str | None) -> str:
         """Resolve an explicit provider while preserving the legacy speaker rule."""
         from core.services.tts.router import TTSRouter
@@ -232,104 +123,10 @@ class OpenAIManager:
         return TTSRouter.resolve_provider(cls._tts_provider, tts_speaker)
 
     @classmethod
-    async def send(cls, text: str, wait_response: bool = False) -> str | None:
-        run_id = await cls._send_and_track(text)
-        if run_id is None:
-            return None
-        if not wait_response:
-            asyncio.create_task(cls._wait_response(run_id))
-            return run_id
-        try:
-            return await cls._wait_response(run_id)
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def send_and_play_reply(cls, text: str, wait_response: bool = False) -> str | None:
-        run_id = await cls._send_and_track(text)
-        if run_id is None:
-            return None
-        if not wait_response:
-            asyncio.create_task(cls._wait_and_play_response(run_id))
-            return run_id
-        try:
-            response_text = await cls._wait_response(run_id)
-            if response_text:
-                await cls._play_response_with_tts(
-                    response_text,
-                    tts_speaker=cls._response_tts_speakers.get(run_id),
-                )
-            return response_text
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def _send_and_track(cls, text: str) -> str | None:
-        if not cls._initialized:
-            cls.initialize_from_config()
-        if not cls._enabled:
-            logger.warning("[OpenAI] send called but backend is disabled")
-            return None
-
-        run_id = str(uuid.uuid4())
-        loop = asyncio.get_running_loop()
-        cls._response_events[run_id] = loop.create_future()
-        cls._response_texts[run_id] = ""
-        cls._response_tts_speakers[run_id] = cls.get_tts_speaker_for_session_key()
-        # TurnTrace（ticket 11）：本地 ASR 链路没有 is_final 事件，在这里惰性建轮；
-        # 原生 ASR 链路此时已有当前轮，只补 LLM 起始时间。
-        turn_trace.mark_llm_start()
-        logger.user_speech(text, module=f"OpenAI({cls._session_key})")
-        asyncio.create_task(cls._run_chat_completion(run_id, text))
-        return run_id
-
-    @classmethod
-    async def _wait_response(cls, run_id: str) -> str | None:
-        event = cls._response_events.get(run_id)
-        if not event:
-            logger.warning(f"[OpenAI] No event found for run {run_id}")
-            return None
-        try:
-            await asyncio.wait_for(event, timeout=cls._timeout)
-            return cls._response_texts.pop(run_id, "") or None
-        except asyncio.TimeoutError:
-            turn_trace.note_llm_timeout()
-            logger.warning(f"[OpenAI] Timeout waiting for response (runId: {run_id})")
-            return None
-        finally:
-            cls._response_events.pop(run_id, None)
-            cls._response_texts.pop(run_id, None)
-
-    @classmethod
-    async def _run_chat_completion(cls, run_id: str, text: str):
-        # TurnTrace（ticket 11）：只统计轮数与耗时，不记录任何文本。
-        stats = {"tool_rounds": 0}
-        try:
-            response_text = await cls._request_chat_completion(text, stats=stats)
-            if response_text:
-                cls._response_texts[run_id] = response_text
-                turn_trace.note_reply_chars(len(response_text))
-                logger.ai_response(response_text, module=f"OpenAI({cls._session_key})")
-            else:
-                turn_trace.note_llm_error()
-        except Exception as exc:
-            cls.last_error = f"{type(exc).__name__}: {exc}"
-            if isinstance(exc, asyncio.TimeoutError):
-                turn_trace.note_llm_timeout()
-            turn_trace.note_llm_error()
-            logger.error(f"[OpenAI] Chat completion failed: {cls.last_error}")
-        finally:
-            turn_trace.note_tool_rounds(stats["tool_rounds"])
-            turn_trace.mark_llm_end()
-            waiter = cls._response_events.get(run_id)
-            if waiter and not waiter.done():
-                waiter.get_loop().call_soon_threadsafe(waiter.set_result, None)
-
-    @classmethod
     async def _post_llm(cls, url: str, payload: dict, headers: dict) -> dict:
         """发送一次 LLM 请求并取回 JSON body（HTTP>=400 抛 RuntimeError）。"""
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=cls._timeout)
+            timeout=aiohttp.ClientTimeout(total=cls._response_timeout)
         ) as session:
             async with session.post(url, json=payload, headers=headers) as response:
                 body = await response.json(content_type=None)
@@ -339,7 +136,7 @@ class OpenAIManager:
                 return body
 
     @classmethod
-    async def _request_chat_completion(
+    async def _request_completion(
         cls, text: str, stats: dict[str, int] | None = None
     ) -> str | None:
         session_key = cls._session_key
@@ -600,55 +397,3 @@ class OpenAIManager:
                 return "".join(parts).strip() or None
         text = first.get("text")
         return text.strip() if isinstance(text, str) else None
-
-    @classmethod
-    async def _wait_and_play_response(cls, run_id: str):
-        try:
-            response_text = await cls._wait_response(run_id)
-            if response_text:
-                await cls._play_response_with_tts(
-                    response_text,
-                    tts_speaker=cls._response_tts_speakers.get(run_id),
-                )
-            else:
-                logger.warning(f"[OpenAI] No response text received for run {run_id}")
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
-
-    @classmethod
-    async def _play_response_with_tts(
-        cls,
-        text: str,
-        tts_speaker: str | None = None,
-        playback_token: int | None = None,
-    ):
-        """Synthesize text and play it through the speaker."""
-        from core.services.tts.router import TTSRouter
-
-        resolved_tts_speaker = tts_speaker or cls.get_tts_speaker_for_session_key()
-        await TTSRouter.play(
-            text,
-            configured_provider=cls._tts_provider,
-            tts_speaker=resolved_tts_speaker,
-            tts_speed=cls._tts_speed,
-            playback_token=playback_token,
-            log_prefix="OpenAI",
-        )
-
-    @classmethod
-    async def _play_openai_compatible_tts(
-        cls,
-        text: str,
-        tts_speaker: str | None = None,
-        provider: str = "openai",
-    ):
-        """Compatibility wrapper for the shared TTS router."""
-        from core.services.tts.router import TTSRouter
-
-        await TTSRouter.play(
-            text,
-            configured_provider=provider,
-            tts_speaker=tts_speaker,
-            tts_speed=cls._tts_speed,
-            log_prefix="OpenAI",
-        )
