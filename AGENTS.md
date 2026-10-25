@@ -779,3 +779,15 @@ Issues are local markdown files under `.scratch/<feature>/`. See `docs/agents/is
 ### Domain docs
 
 Single-context: `GLOSSARY.md` at repo root + `docs/adr/`. See `docs/agents/domain.md`.
+
+## 测试运行口径（2026-10-25 成文）
+
+裸 `python3 -m unittest` 会因缺依赖报 ImportError（aiohttp/websockets 等）。完整口径（WSL 侧）：
+
+```bash
+cd <bridge根目录>
+uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp websockets requests cryptography numpy
+PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
+```
+
+当前基线：**369 tests OK (skipped=3)**（2026-10-25，main a0e56d2）。每次 main 合入后应复跑此基线；onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要。
