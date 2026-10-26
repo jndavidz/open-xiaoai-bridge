@@ -50,6 +50,7 @@ open-xiaoai-bridge/
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
 │   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
+│   │   ├── conversation_memory.py  # 对话记忆 JSONL（B-30 票 04）：按天滚动/过期清理/注入摘要；data/memory/ 本地卷
 │   │   ├── led_language.py         # LED 灯语（P3 票 02）：管线态四态可视化，led_language.enabled 默认关
 │   │   ├── tts/router.py           # 统一 TTS provider 路由与播放
 │   │   ├── tts/doubao.py          # 豆包 TTS 客户端（火山引擎）
@@ -68,6 +69,7 @@ open-xiaoai-bridge/
 │       ├── usage_ledger.py        # 用量记账台账（P2 票 03）：每轮一行 JSONL 落盘 data/usage/，只记账零控制；面板「用量」页数据源
 │       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
 │       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段，04 起逐段直喂 TTS）
+│       ├── new_topic.py           # 「换个话题」暗号识别纯函数（B-30 票 02：exact 整句 + fuzzy ≤8 字 dist≤2；长句永不进模糊通道）
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
 ├── native/                        # Rust PyO3 扩展（maturin 编译）
@@ -832,4 +834,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**647 tests OK (skipped=3)**（2026-10-27，B-29 批后；B-28 批后 626，B-29 三票 +21 = `test_playback_timing.py` 12 + `test_speaking_channel.py` 9）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**689 tests OK (skipped=3)**（2026-10-27，B-30 批后；B-29 批后 647，B-30 四票 +42 = 暗号纯函数 11 + 会话信令头/记忆接线 24 + 接线 7）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
