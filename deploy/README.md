@@ -145,6 +145,8 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   ✅ **已上线 2026-09-24**：新 config.py 同步至 NAS + 新镜像（含播放闸门/命中留证/caller 审计）推送 +
   `docker compose up -d --force-recreate`；启动日志确认 `KWS: [score:3.0, threshold:0.35], VAD:[threshold:0.4]`；
 
+- **2026-10-26 白天实测（用户在场，生产 `p3-20261026`）**：24 个免唤醒词唯一命中 **10/24**；复测 6 句中对照组「停止音乐」亦未命中，VAD 对未命中句全部检出语音（2.4–3.2s）⇒ 当前 `score=3.0/threshold=0.35` 下召回不稳，与 2026-09-24 收紧的误触发取舍直接相关。调参需重启容器（同上）且需先评估 announce KWS 闸门对自触发回环的覆盖——**待裁决**，台账 `ws: docs/plan/pending-followups.md` §4。
+
 ### 音频输入（六麦 / 看门狗）
 
 - `audio_input.channels`：采集声道数，默认 **6**（LX06 六麦）；bridge 自动同步到 native 的

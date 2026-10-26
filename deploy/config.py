@@ -114,6 +114,10 @@ XIAOAI_COMMANDS = {
     "启动Kodi": ["正在打开 Kodi", kodi_launch],
     "打开KODI": ["正在打开 Kodi", kodi_launch],
 }
+# ⚠ 2026-10-26 真机语音实测（6 词仅 1 中）：原生 ASR 对含拉丁字母的键转写不稳——
+#   HiFi模式→「哈哈模式」、Hi-Fi模式→「阿尔法模式」、打开KODI→「打开CODY」；
+#   且「打开Kodi」曾被转成「打开电脑」**误命中执行（WOL 两次）**。修法（中文触发词 /
+#   ASR 别名键 / 匹配归一化）待裁决，见 ws: docs/plan/pending-followups.md §5。
 
 
 async def before_wakeup(speaker, text, source, app):

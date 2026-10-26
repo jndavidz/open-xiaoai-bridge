@@ -2,6 +2,8 @@
 
 Status: ready-for-agent
 
+> 跨批台账：本 spec 尚未拆票，作为「待启动」项登记于 `ws: docs/plan/pending-followups.md`（待启动节）；实现状态以本行为准。
+
 关联 spec：aurora 仓库 `.scratch/upstream-session-reuse/spec.md`（服务端侧；本 spec 是其客户端配套，两者接口契约一致，实现可并行）。
 
 ## Problem Statement
