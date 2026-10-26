@@ -152,6 +152,12 @@ class FakeBackend:
 
     _rule_prompt = ""
 
+    def current_rule_prompt(self):
+        return self._rule_prompt
+
+    def current_session_key(self):
+        return ""
+
     def __init__(self, response: str = "好的"):
         self.response = response
         self.sent: list[str] = []

@@ -456,6 +456,48 @@ class MainApp:
             )
             return None
 
+    # ---- 外部后端发送门面（C1 补完 / B-28 票 03：单入口 + 旧名兼容委托）----
+
+    async def send_to(
+        self,
+        backend: str,
+        text: str,
+        *,
+        wait_response: bool = False,
+        and_play: bool = False,
+    ) -> str | None:
+        """向注册表后端发送消息的单一入口——新增后端不再需要新增门面方法。
+
+        and_play=True 经 TTS 播放回复（自动追加 rule_prompt）；False = 纯发送
+        （追加 rule_prompt_for_skill，Agent 自主播报）。wait_response=True
+        阻塞等回复文本。成功返回 run_id 或回复文本，失败返回 None。
+        """
+        return await self._send_to_backend(backend, text, wait_response, and_play=and_play)
+
+    def set_session_key(self, backend: str, session_key: str):
+        """运行时切换注册表后端的会话键（app.set_<name>_session_key 的泛化）。
+
+        Call this before sending a message or triggering a wakeup to route
+        the conversation to a different session.
+        """
+        from core.backend_registry import backend_registry
+
+        entry = backend_registry.get(backend)
+        if entry is None:
+            logger.error(f"[MainApp] set_session_key: unknown backend {backend!r}")
+            return
+        entry.manager.set_session_key(session_key)
+
+    def set_openai_system_prompt(self, prompt: str | None):
+        """Override the system prompt for the current OpenAI session at runtime.
+
+        Pass None to clear the override and fall back to the global persona.
+        （system_prompt 是 OpenAI 系专属概念，保留按名接口。）
+        """
+        OpenAIManager.set_session_system_prompt(prompt)
+
+    # —— 兼容委托（deprecation 期）：按后端命名的旧门面，调用面迁移完即删 ——
+
     async def send_to_openclaw(self, text: str, wait_response: bool = False) -> str | None:
         """发送消息到 OpenClaw（技能自治播报通道）。"""
         return await self._send_to_backend("openclaw", text, wait_response)
@@ -465,14 +507,7 @@ class MainApp:
         return await self._send_to_backend("openclaw", text, wait_response, and_play=True)
 
     def set_openclaw_session_key(self, session_key: str):
-        """Override the OpenClaw session key at runtime.
-
-        Call this before sending a message or triggering a wakeup to route
-        the conversation to a different session.
-
-        Args:
-            session_key: New session key (e.g. "agent:user123:my-app").
-        """
+        """Override the OpenClaw session key at runtime."""
         OpenClawManager.set_session_key(session_key)
 
     async def send_to_openai(self, text: str, wait_response: bool = False) -> str | None:
@@ -490,13 +525,6 @@ class MainApp:
     def set_openai_session_key(self, session_key: str):
         """Override the OpenAI-compatible service session key at runtime."""
         OpenAIManager.set_session_key(session_key)
-
-    def set_openai_system_prompt(self, prompt: str | None):
-        """Override the system prompt for the current OpenAI session at runtime.
-
-        Pass None to clear the override and fall back to the global persona.
-        """
-        OpenAIManager.set_session_system_prompt(prompt)
 
     async def send_to_qwenpaw(self, text: str, wait_response: bool = False) -> str | None:
         """发送消息到 QwenPaw。"""

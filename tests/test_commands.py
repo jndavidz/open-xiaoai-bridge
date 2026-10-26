@@ -85,13 +85,15 @@ class _AnnounceCtx:
 
 
 class FakeApp:
-    """MainApp 替身：记录人设切换调用。"""
+    """MainApp 替身：记录人设切换调用（B-28 票 03 起 router 走泛化门面）。"""
 
     def __init__(self):
         self.session_keys: list[str] = []
+        self.session_backends: list[str] = []
         self.prompts: list[object] = []
 
-    def set_openai_session_key(self, key):
+    def set_session_key(self, backend, key):
+        self.session_backends.append(backend)
         self.session_keys.append(key)
 
     def set_openai_system_prompt(self, prompt):

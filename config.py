@@ -66,7 +66,7 @@ async def before_wakeup(speaker, text, source, app):
     动态切换 session_key：
         每次进入此函数前，框架会自动将 session_key 重置为配置文件中的默认值。
         如需路由到其他 Agent，在 return 之前调用：
-            app.set_openclaw_session_key("agent:main:xxx")
+            app.set_session_key("openclaw", "agent:main:xxx")
         不调用则自动使用各后端 session_key 的默认值，无需手动重置。
     """
     if source == "kws":
@@ -85,27 +85,29 @@ async def before_wakeup(speaker, text, source, app):
         if text == "召唤小智":
             return "xiaozhi"
 
-        # 一次性指令：前缀命中即清场（压掉原生重叠应答）后转发
+        # 一次性指令：前缀命中即清场（压掉原生重叠应答）后转发。
+        # app.send_to(后端, 文本, and_play=…) 是统一入口：and_play=True 播报回复
+        # （追加 rule_prompt），False = 纯发送（Agent 自主播报，追加 rule_prompt_for_skill）。
         if "让龙虾" in text:
             # One-shot: send to OpenClaw and play the reply via TTS
             await clear_device_audio(speaker)
-            await app.send_to_openclaw_and_play_reply(text.replace("让龙虾", ""))
+            await app.send_to("openclaw", text.replace("让龙虾", ""), and_play=True)
             return None  # No further handling by the framework
 
         if "告诉龙虾" in text:
             # Fire-and-forget: let the Agent decide when/how to reply
             await clear_device_audio(speaker)
-            await app.send_to_openclaw(text.replace("告诉龙虾", ""))
+            await app.send_to("openclaw", text.replace("告诉龙虾", ""))
             return None
 
         if "让小黑" in text:
             await clear_device_audio(speaker)
-            await app.send_to_openai_and_play_reply(text.replace("让小黑", ""))
+            await app.send_to("openai", text.replace("让小黑", ""), and_play=True)
             return None
 
         if "让小爪" in text:
             await clear_device_audio(speaker)
-            await app.send_to_qwenpaw_and_play_reply(text.replace("让小爪", ""))
+            await app.send_to("qwenpaw", text.replace("让小爪", ""), and_play=True)
             return None
 
     return None
@@ -322,7 +324,7 @@ APP_CONFIG = {
         #   agentId: OpenClaw 中配置的 Agent ID（默认为 main）
         #   rest:    会话标识，可自由命名，用于区分不同来源/场景 （默认为 open-xiaoai-bridge)
         # 也可在运行时动态切换（下一条消息即刻生效，无需重连）：
-        #   app.set_openclaw_session_key("agent:assistant:open-xiaoai-bridge")
+        #   app.set_session_key("openclaw", "agent:assistant:open-xiaoai-bridge")
         "session_key": "agent:main:open-xiaoai-bridge",
         "identity_path": "/app/openclaw/identity/device.json",  # 设备身份文件路径；容器部署时建议挂载持久化目录
         "tts_speed": 1.0,  # TTS 语速 (0.5-2.0)，仅豆包 TTS 生效，小爱原生 TTS 不支持调速
@@ -344,11 +346,11 @@ APP_CONFIG = {
         "response_timeout": 120,  # 等待 OpenClaw agent 响应的超时时间（秒）
         "exit_keywords": ["退出", "停止", "再见"],  # 退出连续对话的关键词
         # rule_prompt: 用于「自动播放」和「连续对话」场景
-        #   - send_to_openclaw_and_play_reply() 会自动追加
+        #   - app.send_to("openclaw", text, and_play=True) 会自动追加
         #   - OpenClawConversationController 会自动追加
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         # rule_prompt_for_skill: 用于「Agent 自主播报」场景（方式三）
-        #   - send_to_openclaw() 会自动追加
+        #   - app.send_to("openclaw", text)（纯发送）会自动追加
         #   - 告诉 Agent 需要调用 xiaoai-tts skill 来播报，因为服务端不会自动播放
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字，调用 `xiaoai-tts` skill 播报出来。字数控制在300字以内"
     },

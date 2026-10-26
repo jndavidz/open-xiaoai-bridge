@@ -211,10 +211,7 @@ class ExternalConversationController:
             self._pipeline_turn = turn
             outcome = "played"
             try:
-                if self.uses_xiaoai_asr():
-                    result = await self._run_one_turn_with_xiaoai_asr()
-                else:
-                    result = await self._run_one_turn_with_local_asr()
+                result = await self._run_one_turn()
                 if result in ("exit", "timeout"):
                     outcome = result
                     if self.uses_xiaoai_asr():
@@ -245,66 +242,38 @@ class ExternalConversationController:
                 self._speech_end_at = None
                 conversation_pipeline.end_turn(outcome, turn=turn)
 
-    async def _run_one_turn_with_local_asr(self) -> str:
-        """Execute a single conversation turn.
+    async def _run_one_turn(self) -> str:
+        """单轮固定编排（B-28 票 03 轮模板，收敛自双写的 _run_one_turn_with_*）：
 
-        Returns:
+        取文本 → 取消检查点① → C/B 应答拦截 → exit 关键词 → 检查点②/processing
+        → 句段流播报 → 无回复降级播报 → notify → 开录（→ VAD 链路等静音）。
+
+        输入链路差异只存在于 _acquire_user_text()（策略点）；编排语义改动一律
+        落在本方法单点，不再双写。返回值契约：
             "continue" - turn completed, loop to next
             "exit"     - user said an exit keyword
             "timeout"  - no speech detected within timeout
             "error"    - unrecoverable error
         """
-        vad = get_vad()
-        if not vad:
-            logger.error("VAD not available", module=self.LOG_MODULE)
-            return "error"
+        status, text = await self._acquire_user_text()
+        if status != "ok":
+            return status  # "timeout" / "continue"（本地 ASR 空结果重试）/ "error"
 
-        # 1. Start listening for speech (recording is already active)
-        speech_bytes = await self._wait_for_speech(vad)
-        if speech_bytes is None:
-            return "timeout"
-
-        turn = self._pipeline_turn
-        logger.debug(
-            f"turn={turn.turn_id if turn else '-'} "
-            f"Got speech buffer: {len(speech_bytes)} bytes",
-            module=self.LOG_MODULE,
-        )
-
-        # 2. ASR: convert speech to text
-        from core.services.audio.asr import ASRService
-
-        text = ASRService.asr(speech_bytes, sample_rate=16000)
-        if not text:
-            logger.debug("ASR empty, retrying", module=self.LOG_MODULE)
-            return "continue"
-
-        # 检查点①（ASR 定稿后）：本轮已取消则静默退出（不发 LLM 请求）。
+        # 取消检查点①（ASR 定稿后）：本轮已取消则静默退出（不发 LLM 请求）。
+        # 小爱链路已在 consume 回调（事件线程）非抛式过一次，这里再兜底一次。
         self._checkpoint(CHECKPOINT_ASR_FINAL)
-        # TurnTrace（ticket 02）：本地链路建轮于 ASR 定稿——带上「说完」时刻，
-        # 补齐 speech_end → asr_final 段（轮次号与 pipeline 同源）。
-        trace = turn_trace.begin_turn(
-            "local_asr",
-            asr_chars=len(text),
-            turn_id=turn.turn_id if turn else None,
-        )
-        if trace is not None:
-            if self._speech_end_at is not None:
-                trace.mark("speech_end", self._speech_end_at)
-            trace.mark("asr_final")
 
         # C/B 级写操作应答拦截（P3 票 04）：在 exit 关键词之前——「取消」
         # 也是合法应答，不能先被退出关键词截胡。
         confirm_reply = await self._try_handle_confirmation(text)
         if confirm_reply is not None:
+            # TurnTrace（ticket 11）：拦截应答没有 LLM/TTS 句段，立即收尾为 incomplete。
             turn_trace.abandon_turn()
             await self._begin_speaking()
             speaker = get_speaker()
             if speaker:
                 await speaker.play(text=confirm_reply)
-            await self._play_notify()
-            await self._start_recording()
-            await self._wait_for_silence(vad)
+            await self._notify_and_resume_listening()
             return "continue"
 
         # 3. Check exit keywords
@@ -327,10 +296,10 @@ class ExternalConversationController:
         #    to the pre-streaming path (stream-off rollback).
         #    「咻」与非流式时序相当：pump 先行调度，提示音播放让出控制权后
         #    请求即上路（等价于旧 _send_and_track 的先发后播）。
-        full_text = text
-        if self.backend._rule_prompt:
-            full_text = text + "\n" + self.backend._rule_prompt
-        segments = await self._speak_response_segments(full_text, with_send_sound=True)
+        full_text = self._with_rule_prompt(text)
+        segments = await self._speak_response_segments(
+            full_text, with_send_sound=not self.uses_xiaoai_asr()
+        )
         if not segments:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
             speaker = get_speaker()
@@ -338,67 +307,82 @@ class ExternalConversationController:
                 await speaker.play(text="抱歉，我没有收到回复")
             return "continue"
 
-        # 5. Notify → Start recording → Wait for silence (mic was muted by
-        #    _speak_response_segments before the first segment).
-        #    _play_notify() blocks for ~740ms (the beep duration),
-        #    enough for TTS echo to fade. After starting recording, we wait
-        #    for silence to ensure any residual echo or buffered audio clears.
-        #    VAD.resume() resets all state, so speech detection starts clean.
-        await self._play_notify()
-        await self._start_recording()
-        logger.debug("Recording started, waiting for silence...", module=self.LOG_MODULE)
-        await self._wait_for_silence(vad)
-        logger.debug("Ready to listen", module=self.LOG_MODULE)
-
+        # 5. Notify → Start recording →（VAD 链路再）Wait for silence
+        await self._notify_and_resume_listening()
         return "continue"
 
-    async def _run_one_turn_with_xiaoai_asr(self) -> str:
-        """Execute a single conversation turn using XiaoAI native ASR."""
-        text = await self._wait_for_xiaoai_asr_text()
-        if text is None:
-            logger.debug("XiaoAI native ASR turn timed out", module=self.LOG_MODULE)
-            return "timeout"
+    def _with_rule_prompt(self, text: str) -> str:
+        """拼连续对话轮的输出纪律 prompt（走公开访问器，不直访私有属性）。"""
+        rule_prompt = self.backend.current_rule_prompt()
+        return f"{text}\n{rule_prompt}" if rule_prompt else text
 
-        # 检查点①在 consume 回调（ASR 定稿处，事件线程）以非抛式完成；
-        # 循环侧醒来后再过一次检查点（取消则静默退出，不发 LLM 请求）。
-        self._checkpoint(CHECKPOINT_ASR_FINAL)
-
-        # C/B 级写操作应答拦截（P3 票 04）：在 exit 关键词之前（同本地链路）。
-        confirm_reply = await self._try_handle_confirmation(text)
-        if confirm_reply is not None:
-            turn_trace.abandon_turn()
-            await self._begin_speaking()
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text=confirm_reply)
-            await self._play_notify()
-            await self._start_recording()
-            logger.debug("Ready for next XiaoAI native ASR round", module=self.LOG_MODULE)
-            return "continue"
-
-        for kw in self.exit_keywords:
-            if kw in text:
-                logger.info(f"Exit keyword: {kw}", module=self.LOG_MODULE)
-                # TurnTrace（ticket 11）：退出轮没有 LLM/TTS，立即收尾为 incomplete。
-                turn_trace.abandon_turn()
-                return "exit"
-
-        self._enter_processing()
-
-        full_text = text
-        if self.backend._rule_prompt:
-            full_text = text + "\n" + self.backend._rule_prompt
-        segments = await self._speak_response_segments(full_text, with_send_sound=False)
-        if not segments:
-            logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text="抱歉，我没有收到回复")
-            return "continue"
+    async def _notify_and_resume_listening(self):
+        """提示音 → 开录 →（VAD 链路）等静音。mic 已由 _speak_response_segments
+        在首段前闭掉；_play_notify() 阻塞 ~740ms（提示音时长）足够 TTS 回声衰减；
+        开录后等静音确保残留回声/缓冲清空，VAD.resume() 已重置全部状态，
+        语音检测从干净状态开始。"""
         await self._play_notify()
         await self._start_recording()
-        logger.debug("Ready for next XiaoAI native ASR round", module=self.LOG_MODULE)
-        return "continue"
+        if not self.uses_xiaoai_asr():
+            vad = get_vad()
+            if vad:
+                logger.debug("Recording started, waiting for silence...", module=self.LOG_MODULE)
+                await self._wait_for_silence(vad)
+        logger.debug("Ready for next round", module=self.LOG_MODULE)
+
+    async def _acquire_user_text(self) -> tuple[str, str | None]:
+        """取本轮用户文本——输入链路的唯一策略点（B-28 票 03）。
+
+        返回 (status, text)：
+            ("ok", text)      拿到本轮文本
+            ("timeout", None) 本地链路无语音 / 原生 ASR 超时
+            ("continue", None) 本地 ASR 空结果（重试，不结束会话）
+            ("error", None)   本地链路 VAD 不可用
+        """
+        if self.uses_xiaoai_asr():
+            text = await self._wait_for_xiaoai_asr_text()
+            if text is None:
+                logger.debug("XiaoAI native ASR turn timed out", module=self.LOG_MODULE)
+                return "timeout", None
+            return "ok", text
+
+        vad = get_vad()
+        if not vad:
+            logger.error("VAD not available", module=self.LOG_MODULE)
+            return "error", None
+
+        # 1. Start listening for speech (recording is already active)
+        speech_bytes = await self._wait_for_speech(vad)
+        if speech_bytes is None:
+            return "timeout", None
+
+        turn = self._pipeline_turn
+        logger.debug(
+            f"turn={turn.turn_id if turn else '-'} "
+            f"Got speech buffer: {len(speech_bytes)} bytes",
+            module=self.LOG_MODULE,
+        )
+
+        # 2. ASR: convert speech to text
+        from core.services.audio.asr import ASRService
+
+        text = ASRService.asr(speech_bytes, sample_rate=16000)
+        if not text:
+            logger.debug("ASR empty, retrying", module=self.LOG_MODULE)
+            return "continue", None
+
+        # TurnTrace（ticket 02）：本地链路建轮于 ASR 定稿——带上「说完」时刻，
+        # 补齐 speech_end → asr_final 段（轮次号与 pipeline 同源）。
+        trace = turn_trace.begin_turn(
+            "local_asr",
+            asr_chars=len(text),
+            turn_id=turn.turn_id if turn else None,
+        )
+        if trace is not None:
+            if self._speech_end_at is not None:
+                trace.mark("speech_end", self._speech_end_at)
+            trace.mark("asr_final")
+        return "ok", text
 
     # ---- 管线态与取消传播（ticket 02）----
 
@@ -826,7 +810,7 @@ class ExternalConversationController:
                     await after_wakeup(
                         speaker,
                         source=self.WAKEUP_SOURCE,
-                        session_key=self.backend._session_key,
+                        session_key=self.backend.current_session_key(),
                     )
                 except Exception as exc:
                     import traceback

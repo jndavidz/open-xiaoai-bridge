@@ -76,12 +76,13 @@ async def route_before_wakeup(
         for word, persona in (personas or {}).items():
             if word in key:
                 backend = persona.get("backend", "openai")
-                # session_key/system_prompt 是 OpenAI 系专属会话概念（历史隔离 +
-                # 人设覆盖）；其他后端（openclaw/qwenpaw/xiaozhi）只做人设路由，
-                # 不写 openai 的会话态。B-28 票 01：session_key 缺省 = 纯路由条目。
+                # session_key 走泛化门面（B-28 票 03：不再只认 openai）；
+                # system_prompt 是 OpenAI 系专属会话概念（历史隔离 + 人设覆盖），
+                # 其他后端只做人设路由不写 openai 会话态。session_key 缺省 = 纯路由条目。
                 if persona.get("session_key"):
-                    app.set_openai_session_key(persona["session_key"])
-                    app.set_openai_system_prompt(persona.get("system_prompt"))
+                    app.set_session_key(backend, persona["session_key"])
+                    if backend == "openai":
+                        app.set_openai_system_prompt(persona.get("system_prompt"))
                 intro = persona.get("intro")
                 if intro:
                     # B-28 票 01：intro 经 announce（词表检查默认拒绝）——人设开场白

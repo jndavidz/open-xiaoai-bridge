@@ -221,6 +221,19 @@ class BackendManagerBase:
         return cls._rule_prompt if and_play else cls._rule_prompt_for_skill
 
     @classmethod
+    def current_rule_prompt(cls) -> str:
+        """连续对话轮追加的输出纪律 prompt（rule_prompt 字段，B-28 票 03 公开只读访问器）。
+
+        对话控制器（external_conversation）等消费方经此读取，不直访 _rule_prompt。
+        """
+        return cls._rule_prompt
+
+    @classmethod
+    def current_session_key(cls) -> str:
+        """当前会话键（B-28 票 03 公开只读访问器；写入走 set/reset_session_key）。"""
+        return cls._session_key
+
+    @classmethod
     def get_tts_speaker_for_session_key(cls, session_key: str | None = None) -> str | None:
         target_session_key = session_key or cls._session_key
         return cls._session_tts_speakers.get(target_session_key) or cls._tts_speaker

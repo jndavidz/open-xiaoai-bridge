@@ -93,6 +93,12 @@ class SegmentBackend:
 
     _rule_prompt = ""
 
+    def current_rule_prompt(self):
+        return self._rule_prompt
+
+    def current_session_key(self):
+        return ""
+
     def __init__(self, segments: list[str]):
         self.segments = list(segments)
         self.sent: list[str] = []

@@ -237,6 +237,22 @@ class RegistrySendTest(unittest.IsolatedAsyncioTestCase):
             result = await MainApp._send_to_backend(None, "fake", "你好")
         self.assertIsNone(result)
 
+    async def test_send_to_facade_delegates_with_and_play(self):
+        """B-28 票 03/S2：app.send_to 单入口与旧按名方法同权。"""
+        app = MainApp.__new__(MainApp)  # 跳过 __init__：门面只用注册表，不碰生命周期
+        result = await app.send_to("fake", "你好", and_play=True)
+        self.assertEqual("text-1", result)
+        self.assertEqual([("play", "你好\nRULE_PLAY", False)], FakeManager.calls)
+
+    async def test_set_session_key_facade_routes_to_manager(self):
+        """B-28 票 03/S2：app.set_session_key(后端, 键) 泛化门面。"""
+        MainApp.set_session_key(None, "fake", "agent:fake:custom")
+        self.assertEqual("agent:fake:custom", FakeManager._session_key)
+
+    async def test_set_session_key_unknown_backend_logs_not_raises(self):
+        MainApp.set_session_key(None, "nope", "k")  # 只记日志，不抛
+        self.assertEqual(FakeManager.DEFAULT_SESSION_KEY, FakeManager._session_key)
+
 
 class WakeupRoutingTest(unittest.IsolatedAsyncioTestCase):
     """假后端走通：唤醒路由 → 会话启动 → ASR 消费 → 打断 → 退出。"""
