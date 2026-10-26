@@ -70,6 +70,7 @@ open-xiaoai-bridge/
 │       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
 │       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段，04 起逐段直喂 TTS）
 │       ├── new_topic.py           # 「换个话题」暗号识别纯函数（B-30 票 02：exact 整句 + fuzzy ≤8 字 dist≤2；长句永不进模糊通道）
+│       ├── matching.py            # 指令归一化 + 别名键解析纯函数（B-31：NFKC/去标点/拉丁小写；别名表空=逐字等价；不含模糊匹配）
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
 ├── native/                        # Rust PyO3 扩展（maturin 编译）
@@ -834,4 +835,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**689 tests OK (skipped=3)**（2026-10-27，B-30 批后；B-29 批后 647，B-30 四票 +42 = 暗号纯函数 11 + 会话信令头/记忆接线 24 + 接线 7）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**706 tests OK (skipped=3)**（2026-10-27，B-31/B-32 批后；B-30 批后 689，B-31 +9 = 匹配归一化/别名键，B-32 +4 = TurnTrace 落盘，B-30 review 修复 +2）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

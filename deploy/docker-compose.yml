@@ -12,6 +12,9 @@ services:
       - OPENAI_ENABLE=1           # 仅启用 OpenAI 兼容后端（DeepSeek 等任意兼容服务，面板内可自由更换）
       # 后台面板（http://<nas>:9092/admin）访问令牌，必填；写操作与配置修改全靠它鉴权
       - ADMIN_TOKEN=${ADMIN_TOKEN}
+      # aurora 网关鉴权（A3，可选）：config.py AURORA_API_KEY 的 env 注入；
+      # 未设置时回落 config.py 兜底默认值
+      - AURORA_API_KEY=${AURORA_API_KEY:-}
       # 业务 API 鉴权（必填）：写类端点要求 Authorization: Bearer；留空则写类端点 503 失败关闭
       - BRIDGE_API_TOKEN=${BRIDGE_API_TOKEN}
       # 具名 token 集合（票 12，可选）：label:token 逗号分隔；与上面并存时旧值 = label legacy
