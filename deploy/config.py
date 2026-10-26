@@ -48,6 +48,17 @@ PERSONAS = {
         "intro": "我在",
         "backend": "openai",
     },
+    # 音乐生态点歌触发（V2，纯中文 >=4 字）：免唤醒进 AI 对话报歌名，
+    # 由 song_request 工具走 kwqq-api 播放。纯路由条目（无 session_key，
+    # 与主对话共用会话）；开场白经 announce 词表检查——文案不含任何词表词。
+    "我要点歌": {
+        "intro": "想听什么歌",
+        "backend": "openai",
+    },
+    "帮我点歌": {
+        "intro": "想听什么歌",
+        "backend": "openai",
+    },
 }
 
 
@@ -195,6 +206,8 @@ APP_CONFIG = {
             "切换下一首", "切换上一首",
             "继续放音乐", "开始播放", "暂停播放", "先暂停一下", "停止播放音乐",
             "开启高保真",
+            # --- 音乐生态点歌触发（V2，与 PERSONAS 条目配套；纯中文 >=4 字）---
+            "我要点歌", "帮我点歌",
         ],
         "timeout": 20,
         "before_wakeup": before_wakeup,
