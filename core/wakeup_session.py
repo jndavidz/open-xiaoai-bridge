@@ -1,5 +1,6 @@
 import asyncio
 import time
+import traceback
 
 from core.backend_registry import backend_registry
 from core.ref import (
@@ -9,6 +10,7 @@ from core.ref import (
     get_xiaozhi,
 )
 from core.services.protocols.typing import AbortReason
+from core.services.speaker import AnnounceRejected
 from core.utils import pipeline as conversation_pipeline
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
@@ -192,6 +194,8 @@ class WakeupSessionManager:
         # P0 ticket 03：before_wakeup 里的播报经 announce 后有了确定性异常路径
         # （AnnounceRejected）；resume 必须放 finally，否则 KWS 会话暂停态
         # （内存标志，无看门狗）会保持到重启，音箱再也听不到唤醒词。
+        # B-28 票 01：异常在此收口——此前沿调用链穿透进事件循环后只剩一条
+        # "exception was never retrieved"，用户看到「说了指令没反应」而无解释。
         try:
             should_wakeup = await before_wakeup(
                 get_speaker(),
@@ -199,6 +203,25 @@ class WakeupSessionManager:
                 source,
                 get_app(),
             )
+        except AnnounceRejected as exc:
+            logger.warning(
+                f"[Wakeup] before_wakeup 播报被词表拒绝（命中: {exc}），"
+                f"指令未执行、本次唤醒放弃。文案与 wakeup.keywords / 指令键冲突时："
+                f"改文案，或在调用点用 announce(exempt=True) 显式豁免。"
+                f"text={text!r} source={source}",
+                module="Wakeup",
+            )
+            return
+        except Exception as exc:
+            logger.error(
+                f"[Wakeup] before_wakeup hook failed: {type(exc).__name__}: {exc}",
+                module="Wakeup",
+            )
+            logger.debug(
+                f"[Wakeup] before_wakeup hook traceback:\n{traceback.format_exc()}",
+                module="Wakeup",
+            )
+            return
         finally:
             if kws:
                 kws.resume()

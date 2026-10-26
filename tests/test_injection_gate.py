@@ -54,6 +54,10 @@ class InjectionGateTest(unittest.TestCase):
             instance=lambda: None
         )
         sys.modules["core.services.protocols.typing"].AbortReason = object
+        # B-28 票 01：wakeup_session 现在模块级 import AnnounceRejected
+        sys.modules["core.services.speaker"].AnnounceRejected = type(
+            "AnnounceRejected", (RuntimeError,), {}
+        )
         np = sys.modules.setdefault("numpy", types.ModuleType("numpy"))
         if not hasattr(np, "ndarray"):
             np.ndarray = object
@@ -156,6 +160,8 @@ class InjectionMarkerTest(unittest.TestCase):
         sys.modules["core.services.audio.watchdog"] = watchdog
         sm = types.ModuleType("core.services.speaker")
         sm.SpeakerManager = type("SpeakerManager", (), {})
+        # B-28 票 01：wakeup_session 现在模块级 import AnnounceRejected
+        sm.AnnounceRejected = type("AnnounceRejected", (RuntimeError,), {})
         sys.modules["core.services.speaker"] = sm
         np = sys.modules.setdefault("numpy", types.ModuleType("numpy"))
         if not hasattr(np, "ndarray"):

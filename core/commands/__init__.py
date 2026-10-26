@@ -16,7 +16,7 @@ from core.commands.audit import audit_kws_coverage
 from core.commands.executor import run_steps
 from core.commands.executor import run_steps
 from core.commands.hass import hass_action
-from core.commands.router import route_before_wakeup, stop_listening
+from core.commands.router import clear_device_audio, route_before_wakeup, stop_listening
 
 __all__ = [
     "hass_action",
@@ -25,6 +25,7 @@ __all__ = [
     "kodi_launch",
     "run_steps",
     "route_before_wakeup",
+    "clear_device_audio",
     "stop_listening",
     "audit_kws_coverage",
 ]

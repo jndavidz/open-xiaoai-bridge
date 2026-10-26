@@ -75,13 +75,26 @@ async def route_before_wakeup(
 
         for word, persona in (personas or {}).items():
             if word in key:
-                # 切入专属会话：独立 session_key（历史隔离）+ 独立人设覆盖
-                app.set_openai_session_key(persona["session_key"])
-                app.set_openai_system_prompt(persona.get("system_prompt"))
+                backend = persona.get("backend", "openai")
+                # session_key/system_prompt 是 OpenAI 系专属会话概念（历史隔离 +
+                # 人设覆盖）；其他后端（openclaw/qwenpaw/xiaozhi）只做人设路由，
+                # 不写 openai 的会话态。B-28 票 01：session_key 缺省 = 纯路由条目。
+                if persona.get("session_key"):
+                    app.set_openai_session_key(persona["session_key"])
+                    app.set_openai_system_prompt(persona.get("system_prompt"))
                 intro = persona.get("intro")
                 if intro:
-                    await speaker.play(text=intro)
-                return persona.get("backend", "openai")  # 进入连续对话
+                    # B-28 票 01：intro 经 announce（词表检查默认拒绝）——人设开场白
+                    # 同属"用户配置的 TTS 文案"，命中 KWS 词表就该被拦下并留可见日志，
+                    # 而不是播出去冒自触发风险（incident-kws-self-trigger-loop §5）。
+                    async with speaker.announce(
+                        text=intro,
+                        reason="wakeup persona intro",
+                        wait=False,  # play(text) 阻塞式内含等完成
+                        gate_seconds=30,
+                    ):
+                        await speaker.play(text=intro)
+                return backend  # 进入连续对话
         return None
 
     if source == "xiaoai":

@@ -307,6 +307,39 @@ class RouterContractTest(unittest.TestCase):
         self.assertEqual(result, "openai")
         self.assertEqual(self.app.session_keys, ["agent:tutor:home"])
 
+    def test_persona_without_session_key_routes_other_backend_only(self) -> None:
+        """B-28 票 01：无 session_key 的人设条目 = 纯路由（多后端唤醒词路由），
+        不写 openai 的会话态；intro 仍经 announce 播出。"""
+        self.personas = {
+            "龙虾": {"backend": "openclaw", "intro": "龙虾来了"},
+        }
+        result = self._route("你好龙虾", "kws")
+
+        self.assertEqual(result, "openclaw")
+        self.assertEqual(self.app.session_keys, [], "无 session_key 不写 openai 会话态")
+        self.assertEqual(self.app.prompts, [])
+        self.assertEqual(
+            [c[0] for c in self.speaker.calls],
+            ["announce:open", "play", "announce:close"],
+            "intro 经 announce 双闸门",
+        )
+
+    def test_persona_intro_rejected_by_wordlist_propagates(self) -> None:
+        """B-28 票 01：intro 命中词表 → announce 默认拒绝上抛（由 wakeup 收口为可见日志），
+        不播报、不路由。异常类本地定义即可：FakeSpeaker 抛什么、断言就捕什么。"""
+
+        class AnnounceRejected(RuntimeError):
+            pass
+
+        self.personas = {
+            "龙虾": {"backend": "openclaw", "intro": "高保真模式已开启"},
+        }
+        self.speaker.announce_error = AnnounceRejected("高保真模式")
+
+        with self.assertRaises(AnnounceRejected):
+            self._route("你好龙虾", "kws")
+        self.assertNotIn(("play", "高保真模式已开启"), self.speaker.calls)
+
     def test_unknown_source_returns_none(self) -> None:
         result = self._route("任意文本", "xiaozhi")
         self.assertIsNone(result)
