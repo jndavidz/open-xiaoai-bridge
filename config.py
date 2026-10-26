@@ -162,6 +162,18 @@ APP_CONFIG = {
         # 默认关 = 现状裸 play；真机 A/B（轮间隙比对）后再转正（B-29 步 3）。
         "bypass_play_via_announce": False,
     },
+    "song_request": {
+        # 语音点歌（kw-qq-music-api，票 01）：搜歌 + 320k 直链经 LX06 播放。
+        # enabled 默认关：真机验收窗口由用户打开（面板运行时覆盖层可热生效）。
+        "enabled": False,
+        # NAS 上的 kw-qq-music-api（内网 10.10.10.0/24 免 key）
+        "api_base": "http://10.10.10.2:3003",
+        # 源策略：按序尝试、首源失败回落。排除 bilibili（headers 无通道
+        # 必 403）与 migu（copyrightId 回传链复杂化 spike，需要时在此加）。
+        "sources": ["kuwo", "netease", "qq"],
+        # 消费铁律：播放层只吃 ≤320k mp3（ADR-0002：加密件不进播放层）
+        "quality": "320k",
+    },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）
         "keywords": [

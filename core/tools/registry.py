@@ -17,11 +17,11 @@ import json
 
 from core.utils.logger import logger
 
-from . import device_status, hass, ir_send, music, weather
+from . import device_status, hass, ir_send, music, song_request, weather
 from .guardrails import ConfirmationManager, execute_guarded, module_risk
 
 # 注册顺序即模型可见顺序；只读工具优先，C 级写工具（红外）经护栏注册
-_TOOL_MODULES = [hass, weather, music, device_status, ir_send]
+_TOOL_MODULES = [hass, weather, music, device_status, ir_send, song_request]
 
 # 注册校验（P3 票 03）：未声明合法 RISK 的模块拒绝注册——写工具不声明
 # 分级就无法过闸门，杜绝「无分级写工具」静默上线。
@@ -47,8 +47,8 @@ def confirmation_manager() -> ConfirmationManager:
 
 
 # 出公网的工具（用量记账「联网次数」口径，P2 ticket 03）：hass/music 走
-# 局域网（HA / LMS），不计联网；后续接联网搜索类工具时在此加行。
-EXTERNAL_NETWORK_TOOLS = frozenset({"weather_get"})
+# 局域网（HA / LMS），不计联网；song_request 搜歌走 kw-qq-api（票 01）计入。
+EXTERNAL_NETWORK_TOOLS = frozenset({"weather_get", "song_request"})
 
 
 def is_external_network_tool(name: object) -> bool:
