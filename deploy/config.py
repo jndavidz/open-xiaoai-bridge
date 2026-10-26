@@ -286,5 +286,10 @@ APP_CONFIG = {
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         "rule_prompt_for_skill": "",
         "extra_body": {},
+        # P1-05 灰度转正：流式默认开（2026-10-26 真机窗口验证：首音 ~3s vs 基线 4.8s、
+        # 边生成边播、打断无半句残留）。回退 = runtime-overrides 一行 stream:false 热重载
+        # （非流式 = 单句序列 = 与改前逐字等价，B-22 回退路径）。首音 2.0s SLO 达标依赖
+        # 豆包流式 TTS 凭证（暂缓，见 ws: docs/plan/pending-followups.md）。
+        "stream": True,
     },
 }
