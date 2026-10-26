@@ -387,6 +387,7 @@ class OpenAIManager(BackendManagerBase):
 
         segmenter = SentenceSegmenter()
         full_parts: list[str] = []
+        first_delta_marked = False
         completed = False
         yielded = False
         # 用量记账（P2 ticket 03）：一次 SSE POST = 一次请求；探测降级被放弃
@@ -425,6 +426,12 @@ class OpenAIManager(BackendManagerBase):
                         if not delta_text:
                             continue  # 空 delta / role 帧 / reasoning 帧
                         full_parts.append(delta_text)
+                        if not first_delta_marked:
+                            # 首个非空文本 delta（voice-latency T06）：L1 的
+                            # 桥接侧观测点，补 llm_ms 只记流结束的缺口；
+                            # mark 首次胜出，本地 flag 只省后续轮的锁开销。
+                            first_delta_marked = True
+                            turn_trace.mark_llm_first_token()
                         for segment in segmenter.feed(delta_text):
                             yielded = True
                             yield segment

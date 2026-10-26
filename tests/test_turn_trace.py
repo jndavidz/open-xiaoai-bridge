@@ -107,6 +107,7 @@ class SummaryTest(unittest.TestCase):
     def test_segments_and_flags(self):
         trace = TurnTrace(7, source="xiaoai_asr", asr_chars=8, started_at=1000.0)
         trace.mark("llm_start", 1000.010)
+        trace.mark("llm_first_token", 1000.120)
         trace.mark("llm_end", 1000.310)
         trace.note_reply_chars(42)
         trace.note_tool_rounds(2)
@@ -132,6 +133,7 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summary["tts_chars"], 44)
         self.assertEqual(summary["tool_rounds"], 2)
         self.assertAlmostEqual(summary["asr_to_llm_ms"], 10.0)
+        self.assertAlmostEqual(summary["llm_first_token_ms"], 110.0)
         self.assertAlmostEqual(summary["llm_ms"], 300.0)
         self.assertAlmostEqual(summary["llm_to_tts_ms"], 10.0)
         self.assertAlmostEqual(summary["tts_ms"], 500.0)
@@ -150,6 +152,7 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summary["incomplete"], 1)
         self.assertEqual(summary["asr_chars"], 0)
         self.assertEqual(summary["llm_chars"], -1)
+        self.assertEqual(summary["llm_first_token_ms"], -1.0)
         self.assertEqual(summary["llm_ms"], -1.0)
         self.assertEqual(summary["tts_ms"], -1.0)
         self.assertEqual(summary["playback_ms"], -1.0)

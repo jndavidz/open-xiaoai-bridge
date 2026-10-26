@@ -238,6 +238,9 @@ class StreamingHappyPathTest(OpenAIStreamTestBase):
         summary = trace.summary()
         self.assertEqual(7, summary["llm_chars"])
         self.assertNotEqual(-1.0, summary["llm_ms"])
+        # 首个非空文本 delta（voice-latency T06）：流式路径必有；且不晚于流结束。
+        self.assertNotEqual(-1.0, summary["llm_first_token_ms"])
+        self.assertLessEqual(summary["llm_first_token_ms"], summary["llm_ms"])
 
 
 class StreamingRobustnessTest(OpenAIStreamTestBase):

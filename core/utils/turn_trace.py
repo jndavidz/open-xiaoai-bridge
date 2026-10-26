@@ -20,6 +20,8 @@
     speech_end_to_asr_ms  本地链路「VAD 判定说完 → ASR 返回文本」（ticket 02；
                           原生 ASR 链路无说完信号，恒 -1）
     asr_to_llm_ms   ASR final → LLM 请求开始
+    llm_first_token_ms  LLM 请求开始 → 首个非空文本 delta（voice-latency T06：
+                        流式路径的 L1 桥接侧口径；非流式/无增量恒 -1）
     llm_ms          LLM 请求开始 → 完成（无流式，等价于全量耗时）
     llm_to_tts_ms   LLM 完成 → TTS 合成开始
     tts_ms          TTS 合成开始 → 结束（设备+云端）
@@ -75,6 +77,7 @@ _FIELDS = (
     "playback_timeout",
     "speech_end_to_asr_ms",
     "asr_to_llm_ms",
+    "llm_first_token_ms",
     "llm_ms",
     "llm_to_tts_ms",
     "tts_ms",
@@ -358,6 +361,7 @@ class TurnTrace:
         asr = marks.get("asr_final")
         speech_end = marks.get("speech_end")
         llm_start = marks.get("llm_start")
+        llm_first_token = marks.get("llm_first_token")
         llm_end = marks.get("llm_end")
         tts_start = marks.get("tts_start")
         tts_end = marks.get("tts_end")
@@ -396,6 +400,7 @@ class TurnTrace:
             "playback_timeout": 1 if playback_timeout else 0,
             "speech_end_to_asr_ms": _delta_ms(speech_end, asr),
             "asr_to_llm_ms": _delta_ms(asr, llm_start) if asr is not None else _MISSING_MS,
+            "llm_first_token_ms": _delta_ms(llm_start, llm_first_token),
             "llm_ms": _delta_ms(llm_start, llm_end),
             "llm_to_tts_ms": _delta_ms(llm_end, tts_start),
             "tts_ms": _delta_ms(tts_start, tts_end),
@@ -540,6 +545,11 @@ def _update(action: Callable[[TurnTrace], None], *, ensure_source: str | None = 
 
 def mark_llm_start() -> None:
     _update(lambda t: t.mark("llm_start"), ensure_source="llm")
+
+
+def mark_llm_first_token() -> None:
+    """首个非空文本 delta 到达（voice-latency T06）：重复调用保留第一次。"""
+    _update(lambda t: t.mark("llm_first_token"))
 
 
 def mark_llm_end() -> None:
