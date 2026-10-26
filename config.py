@@ -242,6 +242,10 @@ APP_CONFIG = {
         # timeout 与 fallback 标志），绝不输出原话文本。
         # 环境变量 TURN_TRACE_ENABLED 可覆盖本值（1/true/yes/on 开，0/false/no/off 关）。
         "enabled": False,
+        # 每轮 summary 全量 JSONL 落 data/turntrace/（B-32/A4）：容器重启不丢
+        # 统计口径（≥40 轮 SLO 复核数据源）。只记数值无 PII。环境变量
+        # TURN_TRACE_PERSIST 可覆盖。单开 persist（不开 enabled）也会建轮落盘。
+        "persist": False,
     },
     "usage_ledger": {
         # 用量记账（P2 ticket 03）：每轮一行 JSONL 落盘到 data/usage/，面板

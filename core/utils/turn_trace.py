@@ -37,15 +37,20 @@ turn=N` 日志行可按轮对齐；不传 turn_id 时维持内部自增（测试
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from core.utils import usage_ledger
 from core.utils.logger import logger
 
 ENV_TURN_TRACE_ENABLED = "TURN_TRACE_ENABLED"
+ENV_TURN_TRACE_PERSIST = "TURN_TRACE_PERSIST"
 LOG_PREFIX = "[TurnTrace]"
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -131,6 +136,68 @@ def trace_enabled(config_reader: Callable[[], Any] | None = None) -> bool:
         return bool(reader())
     except Exception:  # noqa: BLE001 - 读配置失败按关闭处理
         return False
+
+
+# ---- 落盘面（B-32/A4：每轮 summary JSONL 持久化，容器重启不再丢统计口径）----
+
+_PERSIST_LOCK = threading.Lock()
+_PERSIST_DIR = Path(__file__).resolve().parents[1] / "data" / "turntrace"
+
+
+def _read_config_persist() -> bool:
+    """读取 config.py 的 `turn_trace.persist`（同 enabled 的无副作用读法）。"""
+    try:
+        from core.utils.config_loader import ensure_config_module_loaded
+
+        module = ensure_config_module_loaded()
+        app_config = getattr(module, "APP_CONFIG", None)
+        if not isinstance(app_config, dict):
+            return False
+        section = app_config.get("turn_trace")
+        if not isinstance(section, dict):
+            return False
+        return _flag(section.get("persist")) is True
+    except Exception:  # noqa: BLE001 - 配置不可读按关闭处理
+        return False
+
+
+def persist_enabled(config_reader: Callable[[], Any] | None = None) -> bool:
+    """落盘开关：env `TURN_TRACE_PERSIST` 覆盖 config，默认 false。"""
+    override = _flag(os.environ.get(ENV_TURN_TRACE_PERSIST))
+    if override is not None:
+        return override
+    reader = config_reader or _read_config_persist
+    try:
+        return bool(reader())
+    except Exception:  # noqa: BLE001 - 读配置失败按关闭处理
+        return False
+
+
+def _append_persist_line(day: str, line: str, base: Path) -> None:
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        with _PERSIST_LOCK:
+            with open(base / f"turntrace-{day}.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception:  # noqa: BLE001 - 落盘失败不影响主流程
+        pass
+
+
+def _persist_summary(summary: dict[str, Any]) -> None:
+    """把一轮 summary 全量 JSONL 落盘（数值 + 时间戳，无 PII——口径同日志行）。"""
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        **summary,
+    }
+    day = record["ts"][:10]
+    line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _append_persist_line(day, line, _PERSIST_DIR)
+        return
+    # 事件循环内：fire-and-forget 卸载到 executor（异常在 _append 内吞掉）
+    loop.run_in_executor(None, _append_persist_line, day, line, _PERSIST_DIR)
 
 
 def _int_or_missing(value: Any) -> int:
@@ -497,13 +564,17 @@ def _emit(trace: TurnTrace, incomplete: bool = False) -> None:
             logger.info(format_turn_trace(summary))
         if usage_ledger.enabled():
             usage_ledger.observe(summary)
+        # B-32/A4：summary 全量 JSONL 落盘（含各段 ms）——容器重启不再丢
+        # 统计口径（≥40 轮 SLO 复核的数据来源）。只记数值，无 PII。
+        if persist_enabled():
+            _persist_summary(summary)
     except Exception:  # noqa: BLE001 - 埋点不得影响主流程
         pass
 
 
 def _recording() -> bool:
-    """任一记账面开启（[TurnTrace] 日志行或用量台账）都需要轮对象存在。"""
-    return trace_enabled() or usage_ledger.enabled()
+    """任一记账面开启（日志行 / 用量台账 / JSONL 落盘）都需要轮对象存在。"""
+    return trace_enabled() or usage_ledger.enabled() or persist_enabled()
 
 
 def begin_turn(

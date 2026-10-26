@@ -237,6 +237,9 @@ APP_CONFIG = {
         # 数值行（各段 ms / 长度 / 标志），不含原话文本。
         # 环境变量 TURN_TRACE_ENABLED 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
         "enabled": False,
+        # summary 全量 JSONL 落 data/turntrace/（B-32/A4）：容器 recreate 不再丢
+        # 轮次数据（≥40 轮 SLO 复核数据源）。TURN_TRACE_PERSIST 可覆盖。
+        "persist": True,
     },
     "usage_ledger": {
         # 用量记账（P2 ticket 03）：每轮一行 JSONL 写入 data/usage/（compose 卷内），
