@@ -236,6 +236,22 @@ class BackendManagerBase:
         cls._response_tts_speakers[run_id] = tts_speaker
 
     @classmethod
+    def _store_response(cls, run_id: str, text: str, *, append: bool = False) -> bool:
+        """记账文本单点写入（B-28 票 02/B1）：仅当 run 仍有等待者才落账。
+
+        等待方超时后 finally 已清掉事件槽；迟到的传输核完成 / 迟到的 run 事件
+        在此被拒绝，_response_texts 不再积累无人消费的孤儿条目。
+        返回是否落账（False = 该 run 已无人等待）。
+        """
+        if run_id not in cls._response_events:
+            return False
+        if append:
+            cls._response_texts[run_id] = cls._response_texts.get(run_id, "") + text
+        else:
+            cls._response_texts[run_id] = text
+        return True
+
+    @classmethod
     def _signal_response_ready(cls, run_id: str):
         """以线程安全方式唤醒响应等待者。"""
         waiter = cls._response_events.get(run_id)
@@ -324,6 +340,10 @@ class BackendManagerBase:
             return cls._response_texts.pop(run_id, "") or None
         except asyncio.TimeoutError:
             turn_trace.note_llm_timeout()
+            # B-28 票 02/B2：超时即收口 llm_end——事件驱动后端（OpenClaw）的
+            # run 结束事件可能永不到达；HTTP 后端的迟到完成也不再能把上一轮的
+            # mark_llm_end 带进下一轮的 trace（mark 首次胜出，迟到调用变 no-op）。
+            turn_trace.mark_llm_end()
             logger.warning(
                 f"[{cls.LOG_MODULE}] Timeout waiting for response (runId: {run_id})"
             )
@@ -334,6 +354,9 @@ class BackendManagerBase:
 
     @classmethod
     async def _wait_and_play_response(cls, run_id: str):
+        """后台任务体：等回复并 TTS 播放。异常只记日志（fire-and-forget 上下文，
+        上抛只会变成 "Task exception was never retrieved"——B-28 票 02/W2 自
+        OpenClaw 覆写收编进基类）。"""
         try:
             response_text = await cls._wait_response(run_id)
             if response_text:
@@ -345,6 +368,11 @@ class BackendManagerBase:
                 logger.warning(
                     f"[{cls.LOG_MODULE}] No response text received for run {run_id}"
                 )
+        except Exception as exc:
+            logger.error(
+                f"[{cls.LOG_MODULE}] wait/play response failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
         finally:
             cls._response_tts_speakers.pop(run_id, None)
 
@@ -406,8 +434,9 @@ class BackendManagerBase:
         try:
             response_text = await cls._request_completion(text, stats=stats)
             if response_text:
-                cls._response_texts[run_id] = response_text
-                turn_trace.note_reply_chars(len(response_text))
+                # B-28 票 02/B1：等待方已超时放弃时拒绝回填（孤儿条目来源）。
+                if cls._store_response(run_id, response_text):
+                    turn_trace.note_reply_chars(len(response_text))
                 logger.ai_response(
                     response_text, module=f"{cls.LOG_MODULE}({cls._session_key})"
                 )

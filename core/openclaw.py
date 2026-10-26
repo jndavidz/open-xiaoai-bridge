@@ -65,6 +65,9 @@ class OpenClawManager(BackendManagerBase):
     _connected = False
     _receiver_task = None
     _pending: dict[str, asyncio.Future] = {}
+    # B-28 票 02/B5：ack 在途的 idempotencyKey 集合——receiver 对「runId 尚未
+    # 记账但有 ack 在途」的 run 事件改挂起等定账，不再静默丢弃。
+    _pending_idems: set[str] = set()
     _connect_nonce_future: asyncio.Future | None = None
 
     # Heartbeat (using OpenClaw tick events + WebSocket built-in ping/pong)
@@ -95,6 +98,7 @@ class OpenClawManager(BackendManagerBase):
         # _agent_tts_speakers 同样是每子类独立的记账表（键为 agentId）。
         cls._agent_tts_speakers = {}
         cls._pending = {}
+        cls._pending_idems = set()
 
     @classmethod
     def _apply_config(cls, config: dict):
@@ -461,6 +465,7 @@ class OpenClawManager(BackendManagerBase):
             turn_trace.note_llm_request()
 
             cls._open_run(idem, cls.get_tts_speaker_for_session_key(cls._session_key))
+            cls._pending_idems.add(idem)
             logger.debug(f"[OpenClaw] Tracking idem={idem}")
 
             request_params = {
@@ -516,6 +521,9 @@ class OpenClawManager(BackendManagerBase):
             turn_trace.note_llm_error()
             turn_trace.mark_llm_end()
             return None
+        finally:
+            # B-28 票 02/B5：ack 定账（成/败/超时）后 idem 即退出在途集
+            cls._pending_idems.discard(idem)
 
     @classmethod
     def _drop_tracked_run(cls, run_id: str):
@@ -604,11 +612,7 @@ class OpenClawManager(BackendManagerBase):
                             logger.debug("[OpenClaw] Tick event received")
                         # Handle agent response events for TTS playback
                         elif event_name in ("run.completed", "run.output", "run.text", "agent"):
-                            run_id = (data.get("payload") or {}).get("runId")
-                            if run_id and run_id in cls._response_events:
-                                logger.debug(f"[OpenClaw] Agent event received: {event_name}, runId={run_id}")
-                                # Do not block receiver loop on event handling; keep processing res frames promptly.
-                                asyncio.create_task(cls._handle_agent_event(data))
+                            cls._receiver_dispatch_agent_event(data)
                         else:
                             logger.debug(f"[OpenClaw] Other event received: {event_name}, data: {data}")
                         # Any event counts as server activity
@@ -655,6 +659,7 @@ class OpenClawManager(BackendManagerBase):
                 if not fut.done():
                     fut.cancel()
             cls._pending.clear()
+            cls._pending_idems.clear()  # 断连后 ack 永不再来，在途集一并清空
             cls._connected = False
             cls._trigger_reconnect()
 
@@ -726,6 +731,45 @@ class OpenClawManager(BackendManagerBase):
             cls._trigger_reconnect()
 
     @classmethod
+    def _receiver_dispatch_agent_event(cls, data: dict):
+        """receiver 侧 run 事件分派：runId 已入账直通处理；ack 在途走早到通道。
+
+        B-28 票 02/B5：早到 = runId 尚未记账（记账还挂在 idem 键）但确有 ack
+        在途——挂起等定账，不再静默丢弃。只分派不等待，不阻塞 res 帧处理。
+        """
+        run_id = (data.get("payload") or {}).get("runId")
+        if run_id and run_id in cls._response_events:
+            logger.debug(f"[OpenClaw] Agent event received: {data.get('event')}, runId={run_id}")
+            # Do not block receiver loop on event handling; keep processing res frames promptly.
+            asyncio.create_task(cls._handle_agent_event(data))
+        elif run_id and cls._pending_idems:
+            asyncio.create_task(cls._handle_early_agent_event(data))
+
+    @classmethod
+    async def _handle_early_agent_event(cls, event_data: dict):
+        """ack 在途期早到的 run 事件（B-28 票 02/B5）：等 ack 定账后重投。
+
+        网关先推 run 事件后回 ack 时，runId 此刻还未记账（记账挂在 idem 键）；
+        旧实现按「runId 不在账」直接丢弃整条事件 = 丢文本。此处最多等
+        ack_timeout + 2s，等不到（ack 失败/超时/事件属于未知 run）再丢弃并留
+        WARNING，行为严格优于静默丢弃。
+        """
+        run_id = (event_data.get("payload") or {}).get("runId")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + cls._ack_timeout + 2.0
+        while loop.time() < deadline:
+            if run_id in cls._response_events or not cls._pending_idems:
+                break
+            await asyncio.sleep(0.05)
+        if run_id in cls._response_events:
+            await cls._handle_agent_event(event_data)
+        else:
+            logger.warning(
+                f"[OpenClaw] early agent event dropped (run never booked): "
+                f"event={event_data.get('event')}, runId={run_id}"
+            )
+
+    @classmethod
     async def _handle_agent_event(cls, event_data: dict):
         """Handle agent events to extract response text for TTS playback."""
         try:
@@ -742,8 +786,8 @@ class OpenClawManager(BackendManagerBase):
 
                 if run_id and response_text:
                     logger.debug(f"[OpenClaw] run.completed runId={run_id}: {response_text[:80]}")
-                    cls._response_texts[run_id] = response_text
-                    cls._signal_response_ready(run_id)
+                    if cls._store_response(run_id, response_text):
+                        cls._signal_response_ready(run_id)
 
             elif event_name == "run.output":
                 # Streaming output
@@ -752,9 +796,8 @@ class OpenClawManager(BackendManagerBase):
 
                 if run_id and chunk_text:
                     logger.debug(f"[OpenClaw] Output chunk for {run_id}: {chunk_text[:50]}...")
-                    # Accumulate text chunks
-                    current_text = cls._response_texts.get(run_id, "")
-                    cls._response_texts[run_id] = current_text + chunk_text
+                    # Accumulate text chunks（孤儿 run 由 _store_response 拒绝）
+                    cls._store_response(run_id, chunk_text, append=True)
 
             elif event_name == "run.text":
                 # Text event
@@ -762,8 +805,8 @@ class OpenClawManager(BackendManagerBase):
 
                 if run_id and text:
                     logger.debug(f"[OpenClaw] run.text runId={run_id}: {text[:80]}")
-                    cls._response_texts[run_id] = text
-                    cls._signal_response_ready(run_id)
+                    if cls._store_response(run_id, text):
+                        cls._signal_response_ready(run_id)
 
             elif event_name == "agent":
                 # Agent event from OpenClaw (stream: lifecycle or assistant)
@@ -781,10 +824,11 @@ class OpenClawManager(BackendManagerBase):
                         )
                         # text 是完整快照；新版协议的后续事件可能只携带 delta。
                         # 同时存在二者时使用快照，避免重复拼接首个增量。
+                        # （孤儿 run 由 _store_response 拒绝——B-28 票 02/B1）
                         if text:
-                            cls._response_texts[run_id] = text
+                            cls._store_response(run_id, text)
                         elif delta:
-                            cls._response_texts[run_id] = cls._response_texts.get(run_id, "") + delta
+                            cls._store_response(run_id, delta, append=True)
                         # 等待生命周期结束后再提交完整回复。
 
                 elif stream == "lifecycle":
@@ -801,21 +845,8 @@ class OpenClawManager(BackendManagerBase):
             logger.error(f"[OpenClaw] Error handling agent event: {e}")
             logger.debug(f"[OpenClaw] Event data: {event_data}")
 
-    @classmethod
-    async def _wait_and_play_response(cls, run_id: str):
-        """Background task: wait for agent response and play via TTS."""
-        try:
-            response_text = await cls._wait_response(run_id)
-            if response_text:
-                logger.debug(f"[OpenClaw] Playing response via TTS: {response_text[:100]}...")
-                tts_speaker = cls._response_tts_speakers.get(run_id)
-                await cls._play_response_with_tts(response_text, tts_speaker=tts_speaker)
-            else:
-                logger.warning(f"[OpenClaw] No response text received for run {run_id}")
-        except Exception as e:
-            logger.error(f"[OpenClaw] Error waiting/playing response: {e}")
-        finally:
-            cls._response_tts_speakers.pop(run_id, None)
+    # _wait_and_play_response 覆写已删除（B-28 票 02/W2）：原覆写与基类逐行等价
+    # （仅多两行日志）；异常守卫已收编进基类。
 
 
 # No auto-initialization - call OpenClawManager.initialize_from_config() explicitly

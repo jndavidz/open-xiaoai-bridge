@@ -176,6 +176,59 @@ class WaitTimeoutTest(FakeBackendTestBase):
         self.assertIsNone(result)
         self.assertEqual({}, FakeBackend._response_events)
 
+    async def test_late_backfill_after_timeout_is_rejected(self):
+        """B-28 票 02/B1：等待方超时后，迟到完成的传输核不得回填文本槽。"""
+        turn_trace = importlib.import_module("core.utils.turn_trace")
+        self.addCleanup(turn_trace.reset_turn_trace)
+        FakeBackend._enabled = True
+        FakeBackend._delay = 0.3
+        FakeBackend._canned_response = "迟到回复"
+        FakeBackend._response_timeout = 0.05
+
+        result = await FakeBackend.send("你好", wait_response=True)
+        self.assertIsNone(result)
+
+        # 给传输核时间自然完成（旧实现在这里回填出孤儿条目）
+        await asyncio.sleep(0.4)
+        self.assertEqual({}, FakeBackend._response_texts, "迟到回复不落账（无孤儿）")
+        self.assertEqual({}, FakeBackend._response_events)
+
+    async def test_wait_response_timeout_closes_llm_end(self):
+        """B-28 票 02/B2：超时路径兜底 mark_llm_end，轮 trace 不悬挂。"""
+        turn_trace = importlib.import_module("core.utils.turn_trace")
+        self.addCleanup(turn_trace.reset_turn_trace)
+        FakeBackend._enabled = True
+        FakeBackend._delay = 0.3
+        FakeBackend._response_timeout = 0.05
+
+        with mock.patch.dict(
+            "os.environ", {turn_trace.ENV_TURN_TRACE_ENABLED: "1"}
+        ):
+            await FakeBackend.send("你好", wait_response=True)
+
+            trace = turn_trace.current_trace()
+            self.assertIsNotNone(trace)
+            self.assertTrue(trace.has_phase("llm_end"), "超时必须收口 llm_end")
+
+
+class StoreResponseTest(FakeBackendTestBase):
+    """_store_response 单点写入的契约（B-28 票 02/W2）。"""
+
+    async def test_store_only_when_waiter_present(self):
+        FakeBackend._open_run("run-a", None)
+        self.assertTrue(FakeBackend._store_response("run-a", "文本"))
+        self.assertEqual("文本", FakeBackend._response_texts["run-a"])
+
+        FakeBackend._response_events.pop("run-a")
+        self.assertFalse(FakeBackend._store_response("run-a", "孤儿"), "无等待者拒绝落账")
+        self.assertEqual("文本", FakeBackend._response_texts["run-a"], "拒绝时不覆盖既有值")
+
+    async def test_store_append_accumulates(self):
+        FakeBackend._open_run("run-b", None)
+        self.assertTrue(FakeBackend._store_response("run-b", "第一段", append=True))
+        self.assertTrue(FakeBackend._store_response("run-b", "第二段", append=True))
+        self.assertEqual("第一段第二段", FakeBackend._response_texts["run-b"])
+
 
 class TTSDelegationTest(FakeBackendTestBase):
     async def test_play_response_with_tts_passes_router_arguments(self):
