@@ -22,6 +22,7 @@ import time
 import open_xiaoai_server
 
 from core.ref import get_speaker, get_vad
+from core.services.audio.playback_timing import sleep_playback_done
 from core.utils.config import ConfigManager
 from core.utils import pipeline as conversation_pipeline
 from core.utils.pipeline import (
@@ -775,9 +776,7 @@ class ExternalConversationController:
         if speaker:
             try:
                 await speaker.play(buffer=_NOTIFY_PCM)
-                # Wait for playback to finish: PCM is int16 at 24000Hz
-                duration = len(_NOTIFY_PCM) / (24000 * 2)
-                await asyncio.sleep(duration)
+                await sleep_playback_done(_NOTIFY_PCM)
             except Exception as exc:
                 logger.debug(f"Notify sound error: {exc}", module=self.LOG_MODULE)
 
@@ -789,9 +788,7 @@ class ExternalConversationController:
         if speaker:
             try:
                 await speaker.play(buffer=_SEND_PCM)
-                # 等待播放完成：PCM 为 int16，24000Hz
-                duration = len(_SEND_PCM) / (24000 * 2)
-                await asyncio.sleep(duration)
+                await sleep_playback_done(_SEND_PCM)
             except Exception as exc:
                 logger.debug(f"Send sound error: {exc}", module=self.LOG_MODULE)
 

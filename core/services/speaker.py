@@ -29,10 +29,6 @@ __all__ = [
 # 轮询间隔与「等播放真正开始」的宽限改由 `event_plane` 配置拥有
 # （默认 200ms / 1000ms），见 core/device/playback_events.py。
 
-# 超时上限按文本估算（中文约 4.5 字/秒 + 6s 余量），与 api_server 的闸门估算同口径。
-_PLAYBACK_MIN_BUDGET_MS = 8_000
-_PLAYBACK_MAX_BUDGET_MS = 120_000
-
 # 合成超时：真机实测 < 1s/段，留足余量但不占用播放预算。
 _TTS_SYNTHESIS_TIMEOUT_MS = 6_000
 
@@ -51,16 +47,15 @@ class _MicGateHold:
 
 
 def estimate_playback_budget_ms(text: str, timeout_ms: float | None) -> float:
-    """按文本估算播放完成等待上限，并以调用方 timeout 为硬上限。"""
+    """按文本估算播放完成等待上限，并以调用方 timeout 为硬上限。
 
-    length = len((text or "").strip())
-    estimate = min(
-        _PLAYBACK_MAX_BUDGET_MS,
-        max(_PLAYBACK_MIN_BUDGET_MS, length / 4.5 * 1000 + 6_000),
-    )
-    if timeout_ms is None:
-        return estimate
-    return max(1.0, min(float(timeout_ms), estimate))
+    B-29 步 1：实现迁至 core/services/audio/playback_timing.py（对话域共用），
+    此处保留 re-export——既有调用方（announce/mic_gate/api_server）与测试
+    （test_judgement_fixes 经模块属性引用）不受影响。
+    """
+    from core.services.audio.playback_timing import estimate_playback_budget_ms as _impl
+
+    return _impl(text, timeout_ms)
 
 
 class AnnounceRejected(RuntimeError):

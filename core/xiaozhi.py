@@ -19,6 +19,7 @@ import threading
 import open_xiaoai_server
 
 from core.ref import get_audio_codec, get_speaker, get_vad, set_speech_frames
+from core.services.audio.playback_timing import sleep_playback_done
 from core.services.protocols.protocol import Protocol
 from core.services.protocols.typing import (
     AbortReason,
@@ -496,8 +497,7 @@ class XiaoZhi:
             return
         try:
             await speaker.play(buffer=_NOTIFY_PCM)
-            duration = len(_NOTIFY_PCM) / (24000 * 2)
-            await asyncio.sleep(duration)
+            await sleep_playback_done(_NOTIFY_PCM)
         except Exception as exc:
             logger.debug(f"Notify sound error: {exc}", module="XiaoZhi")
 
