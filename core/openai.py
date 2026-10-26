@@ -15,6 +15,7 @@ including Hermes Agent API server mode.
 core.backend_base.BackendManagerBase；本模块只保留传输核。
 """
 
+import asyncio
 import json
 import os
 import time
@@ -106,6 +107,8 @@ class OpenAIManager(BackendManagerBase):
     _memory_config: dict[str, Any] = {}
     _memory_dir = Path(__file__).resolve().parents[1] / "data" / "memory"
     _last_response_at: float | None = None
+    # 本轮待注入摘要（_prepare_memory_summary 异步预计算，_build_messages 同步读）
+    _pending_memory_summary: str = ""
     DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     _system_prompt = ""
     # Per-session persona override: session_key -> system prompt.
@@ -248,6 +251,7 @@ class OpenAIManager(BackendManagerBase):
     ) -> str | None:
         session_key = cls._session_key
         history = cls._sessions.setdefault(session_key, [])
+        await cls._prepare_memory_summary()  # 记忆摘要在 executor 预计算（同步构建前）
         messages = cls._build_messages(history, text)
 
         # 工具层（Agent 1.5 / 阶段 1.5）：仅 chat_completions 风格注入 tools。
@@ -405,6 +409,7 @@ class OpenAIManager(BackendManagerBase):
         """
         session_key = cls._session_key
         history = cls._sessions.setdefault(session_key, [])
+        await cls._prepare_memory_summary()  # 记忆摘要在 executor 预计算（同步构建前）
         messages = cls._build_messages(history, text)
         url, payload, headers = cls._build_chat_completions_request(messages)
         payload["stream"] = True  # 覆盖 extra_body 里的显式 stream，以开关为准
@@ -583,17 +588,21 @@ class OpenAIManager(BackendManagerBase):
         # X-Hermes-Session-Key). chat/completions stays stateless — the
         # messages array is still the source of turn history — so this does
         # not duplicate context.
+        # 换话题信令消费：无论 header 门控是否成立都清位（review 修正——
+        # session_header 留空的 plain-OpenAI 配置若永不清位，_maybe_memory_summary
+        # 会因标志恒真而每轮注入记忆）。构建请求头即视为发送。
+        force_new = cls._force_new_session
+        if cls._force_new_session:
+            cls._force_new_session = False
         if style == "chat_completions" and cls._session_header and cls._session_key:
             headers[cls._session_header] = cls._session_key
             # aurora 会话复用信令（spec topic-switch-and-memory 票 01）：叠加
             # X-Session-Key（与 session_header 并存同值——Hermes 配置下两头并存，
-            # aurora 配置下幂等回写）；one-shot X-Session-Action: new 在此消费，
-            # 构建请求头即视为发送。session_header 留空 = 纯净请求（plain OpenAI
-            # 契约不变）；非 aurora 后端忽略未知头，无副作用。
+            # aurora 配置下幂等回写）。session_header 留空 = 纯净请求（plain
+            # OpenAI 契约不变）；非 aurora 后端忽略未知头，无副作用。
             headers.setdefault("X-Session-Key", cls._session_key)
-            if cls._force_new_session:
+            if force_new:
                 headers["X-Session-Action"] = "new"
-                cls._force_new_session = False
         return headers
 
     @classmethod
@@ -623,49 +632,74 @@ class OpenAIManager(BackendManagerBase):
 
     @classmethod
     def _maybe_memory_summary(cls) -> str:
-        """记忆注入判据（spec：TTL/换话题导致的断档才注入，平时零开销路径）。
+        """记忆注入判据（同步版，供 _build_messages 同步构建路径调用）。
 
         触发 = 距上一轮完成超过 memory.gap_minutes **或** _force_new_session
         置位中（换话题清了本地历史，记忆文件是唯一的上下文来源）。
+        文件 IO 已经 async 前置计算（_prepare_memory_summary，结果缓存在
+        _pending_memory_summary），此处只读缓存——绝不在此做同步磁盘 IO。
+        """
+        return cls._pending_memory_summary or ""
+
+    @classmethod
+    async def _prepare_memory_summary(cls) -> None:
+        """异步前置：把本轮要注入的摘要算好（文件 IO 在 executor）。
+
+        调用点在各传输核构建 payload 之前（_build_messages 之前）——构建路径
+        全同步，磁盘 IO 必须提前卸载到 executor（AGENTS.md 异步纪律；
+        usage_ledger 同款模式）。
         """
         cfg = cls._memory_config or {}
         if not cfg.get("enabled"):
-            return ""
+            cls._pending_memory_summary = ""
+            return
         try:
+            loop = asyncio.get_running_loop()
             now = time.time()
             gap_seconds = float(cfg.get("gap_minutes", 30)) * 60
             context_broken = cls._last_response_at is None or (
                 now - cls._last_response_at
             ) > gap_seconds
             if not context_broken and not cls._force_new_session:
-                return ""
-            turns = conversation_memory.recent_turns(
+                cls._pending_memory_summary = ""
+                return
+            turns = await loop.run_in_executor(
+                None,
+                conversation_memory.recent_turns,
                 cls._memory_dir,
                 cls._session_key,
                 int(cfg.get("max_turns", 5)),
                 datetime.now(),
             )
-            return conversation_memory.summary_block(turns)
+            cls._pending_memory_summary = conversation_memory.summary_block(turns)
         except Exception as exc:  # noqa: BLE001 - 记忆注入绝不阻断对话
+            cls._pending_memory_summary = ""
             logger.warning(f"[OpenAI] memory inject skipped: {type(exc).__name__}: {exc}")
-            return ""
 
     @classmethod
-    def _on_response_complete(cls, text: str, response_text: str):
-        """B-30 票 04：一轮完整回复落账成功后写对话记忆 + 惰性清理过期文件。"""
-        super()._on_response_complete(text, response_text)
+    async def _on_response_complete(cls, text: str, response_text: str):
+        """B-30 票 04：一轮完整回复落账成功后写对话记忆 + 惰性清理过期文件。
+
+        文件 IO 卸载到 executor（AGENTS.md 异步纪律）；写入/清理失败只记日志。
+        """
+        await super()._on_response_complete(text, response_text)
         cfg = cls._memory_config or {}
         if not cfg.get("enabled") or not response_text:
             return
         try:
+            loop = asyncio.get_running_loop()
             now = datetime.now()
             cls._last_response_at = time.time()
-            conversation_memory.append_turn(
-                cls._memory_dir, cls._session_key, text, response_text, now
-            )
-            conversation_memory.purge_expired(
-                cls._memory_dir, int(cfg.get("retain_days", 30)), now
-            )
+
+            def _write():
+                conversation_memory.append_turn(
+                    cls._memory_dir, cls._session_key, text, response_text, now
+                )
+                conversation_memory.purge_expired(
+                    cls._memory_dir, int(cfg.get("retain_days", 30)), now
+                )
+
+            await loop.run_in_executor(None, _write)
         except Exception as exc:  # noqa: BLE001 - 记忆写入绝不阻断对话
             logger.warning(f"[OpenAI] memory write failed: {type(exc).__name__}: {exc}")
 

@@ -51,3 +51,6 @@ output/
 config-local.py
 
 **/models
+
+# 对话记忆（B-30 spec：显式排除，语义自文档化）
+data/memory/

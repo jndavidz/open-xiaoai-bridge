@@ -31,3 +31,7 @@ Blocked by: 01（注入触发读 _force_new_session 标志）
 ## Comments
 
 - 2026-10-27 resolved @ 本票 commit。注入位置实测落点：无主 system prompt 时摘要是首条 system（测试断言按「存在含摘要的 system」而非固定下标）；`data/memory/` 由既有 .gitignore 的 `data/` 覆盖，无需新条目。写入钩子挂 `_store_response` 成功分支——迟到回复（等待方已超时）不写记忆，口径与回填一致。
+
+## Comments
+
+- 2026-10-27 code-review 修复（ Standards 硬违规 + Spec 缺口）随本批 review commit：①记忆文件 IO 全部卸载 executor（`_prepare_memory_summary` 异步预计算 + `_on_response_complete` 转 async，AGENTS.md 异步纪律，usage_ledger 同款）；②换话题信令消费点改为**无论 header 门控是否成立都清位**（plain-OpenAI 配置下标志恒真 → 每轮注入的 bug），并补两颗钉子测试（构建不消费标志 / 无 header 也清位）；③`.gitignore` 显式排除 `data/memory/`；④exact 循环重复 strip 合并。已知限制（记录不修）：`_last_response_at`/信令标志为类级共享，多 session_key 并发场景互相影响 gap 判定——bridge 单设备单活跃会话，真实风险低；写入时机窄于 spec 字面（被放弃/迟到的回复不进记忆）——与 `_append_history` 实际口径一致，属 spec 措辞 vs 实现的等价偏移。

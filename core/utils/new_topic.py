@@ -49,7 +49,8 @@ def match_new_topic(text: str, *, exact: list[str], fuzzy: list[str]) -> bool:
         return False
 
     for word in exact or []:
-        if strip_punctuation(word) and normalized == strip_punctuation(word):
+        cleaned = strip_punctuation(word)
+        if cleaned and normalized == cleaned:
             return True
 
     if len(normalized) > FUZZY_MAX_LEN:
