@@ -289,6 +289,12 @@ class ExternalConversationController:
                 turn_trace.abandon_turn()
                 return "exit"
 
+        # 3.5 「换个话题」暗号（spec topic-switch-and-memory 票 03）：exit 之后、
+        # processing 之前——命中则后端原子完成「清历史 + 置信令 + 播过渡语」，
+        # 不发 LLM。基类默认不识别（仅 OpenAI 路径接入，见 openai_conversation）。
+        if await self._maybe_handle_new_topic(text):
+            return "continue"
+
         # 检查点②（LLM 请求前）+ 管线态 → processing
         self._enter_processing()
 
@@ -313,6 +319,10 @@ class ExternalConversationController:
         # 5. Notify → Start recording →（VAD 链路再）Wait for silence
         await self._notify_and_resume_listening()
         return "continue"
+
+    async def _maybe_handle_new_topic(self, text: str) -> bool:
+        """换话题暗号钩子（B-30 票 03）：默认不识别；OpenAI 控制器覆写。"""
+        return False
 
     def _with_rule_prompt(self, text: str) -> str:
         """拼连续对话轮的输出纪律 prompt（走公开访问器，不直访私有属性）。"""

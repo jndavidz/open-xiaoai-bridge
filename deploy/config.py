@@ -295,5 +295,25 @@ APP_CONFIG = {
         # （非流式 = 单句序列 = 与改前逐字等价，B-22 回退路径）。首音 2.0s SLO 达标依赖
         # 豆包流式 TTS 凭证（暂缓，见 ws: docs/plan/pending-followups.md）。
         "stream": True,
+        # 「换个话题」暗号（spec topic-switch-and-memory）：exact=整句精确命中；
+        # fuzzy=≤8 字且编辑距离 ≤2（长句永不进模糊通道——防误拦核心门槛，
+        # 调整词表勿放宽）。命中即清历史 + 下轮带 X-Session-Action: new 信令 +
+        # 直接播过渡语（不发 LLM）。transition 文案须避开词表（命中会被
+        # announce 拒绝并留可见日志——B-30 起过渡语经旁路闸门）。
+        "new_topic": {
+            "enabled": True,
+            "exact": ["我们换个话题"],
+            "fuzzy": ["换个话题", "聊点别的", "换个话题吧"],
+            "transition": "好的，我们聊点别的。想聊什么？",
+        },
+        # 对话记忆（spec topic-switch-and-memory）：每轮 JSONL 落 data/memory/
+        # （NAS 持久卷）；上下文断档（超 gap_minutes / 刚换话题）时注入最近
+        # max_turns 轮摘要。retain_days 到期文件写入时惰性清理。
+        "memory": {
+            "enabled": True,
+            "max_turns": 5,
+            "retain_days": 30,
+            "gap_minutes": 30,
+        },
     },
 }

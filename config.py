@@ -389,6 +389,25 @@ APP_CONFIG = {
         "exit_keywords": ["退出", "停止", "再见"],
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字。字数控制在300字以内",
+        # 「换个话题」暗号（spec topic-switch-and-memory）：exact=整句精确命中；
+        # fuzzy=≤8 字且编辑距离 ≤2（长句永不进模糊通道——防误拦核心门槛，
+        # 调整词表勿放宽）。命中即清历史 + 下轮带 X-Session-Action: new 信令 +
+        # 直接播过渡语（不发 LLM）。
+        "new_topic": {
+            "enabled": True,
+            "exact": ["我们换个话题"],
+            "fuzzy": ["换个话题", "聊点别的", "换个话题吧"],
+            "transition": "好的，我们聊点别的。想聊什么？",
+        },
+        # 对话记忆（spec topic-switch-and-memory）：每轮 JSONL 落 data/memory/
+        # （NAS 本地卷）；上下文断档（超 gap_minutes / 刚换话题）时注入最近
+        # max_turns 轮摘要。retain_days 到期文件写入时惰性清理。
+        "memory": {
+            "enabled": True,
+            "max_turns": 5,
+            "retain_days": 30,
+            "gap_minutes": 30,
+        },
         "extra_body": {},
     },
     # QwenPaw Configuration
