@@ -151,6 +151,12 @@ async def after_wakeup(speaker, source=None, session_key=None):
         await speaker.play(text=text)
 
 APP_CONFIG = {
+    "conversation": {
+        # 对话内旁路文本播报（「抱歉，我没有收到回复」/ C 级确认应答 / TTS
+        # 失败 fallback）是否经 announce 双闸门（mic_gate + KWS 闸门）。
+        # 默认关 = 现状裸 play；真机 A/B（轮间隙比对）后再转正（B-29 步 3）。
+        "bypass_play_via_announce": False,
+    },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）
         "keywords": [

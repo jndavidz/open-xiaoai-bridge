@@ -25,6 +25,7 @@ import open_xiaoai_server
 from core.ref import get_speaker, get_vad
 from core.services.audio.playback_timing import sleep_playback_done
 from core.services.audio.speaking_channel import SpeakingChannel
+from core.services.speaker import AnnounceRejected
 from core.utils.config import ConfigManager
 from core.utils import pipeline as conversation_pipeline
 from core.utils.pipeline import (
@@ -276,9 +277,7 @@ class ExternalConversationController:
             # TurnTrace（ticket 11）：拦截应答没有 LLM/TTS 句段，立即收尾为 incomplete。
             turn_trace.abandon_turn()
             await self._begin_speaking()
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text=confirm_reply)
+            await self._play_bypass_text(confirm_reply, reason="confirmation intercept")
             await self._notify_and_resume_listening()
             return "continue"
 
@@ -308,9 +307,7 @@ class ExternalConversationController:
         )
         if not segments:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text="抱歉，我没有收到回复")
+            await self._play_bypass_text("抱歉，我没有收到回复", reason="no response fallback")
             return "continue"
 
         # 5. Notify → Start recording →（VAD 链路再）Wait for silence
@@ -771,6 +768,33 @@ class ExternalConversationController:
         断录窗口（句段播完后 / start 入口显式断录后），不重复断录 RPC。"""
         async with self.speaking_channel.open(reason="notify sound", stop_recording=False) as session:
             await session.play_pcm(_NOTIFY_PCM, reason="Notify")
+
+    async def _play_bypass_text(self, text: str, *, reason: str) -> None:
+        """对话内旁路文本播报（B-29 步 3，评审 S4 方案 B 步 2 的门控版）。
+
+        默认裸 play（现状口径）；`conversation.bypass_play_via_announce=true`
+        时经 announce（mic_gate + KWS 闸门）——三处旁路（无回复降级 / C 级
+        确认应答 / TTS 失败 fallback）目前绕过全部闸门，其中降级播报发生在
+        录音未停的窗口，mic_gate 是唯一的机械防护。词表拒绝留 WARNING 不播。
+        默认关：真机 A/B（三轮对话轮间隙比对）后再转正。
+        """
+        speaker = get_speaker()
+        if not speaker:
+            return
+        if self.config.get_app_config("conversation.bypass_play_via_announce", False):
+            try:
+                async with speaker.announce(
+                    text=text, reason=reason, wait=False, gate_seconds=30
+                ):
+                    await speaker.play(text=text)
+            except AnnounceRejected as exc:
+                logger.warning(
+                    f"bypass announce rejected: {exc}",
+                    module=self.LOG_MODULE,
+                )
+                return
+            return
+        await speaker.play(text=text)
 
     async def _play_send_sound(self):
         """Play the send notification before waiting for backend response."""

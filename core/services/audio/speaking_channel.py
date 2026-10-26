@@ -76,9 +76,9 @@ class SpeakingSession:
                 f"TTS playback error: {exc}",
                 module=self._controller.LOG_MODULE,
             )
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text=segment)
+            # fallback 文本播报经控制器旁路闸门（B-29 步 3：默认裸 play，
+            # conversation.bypass_play_via_announce=true 时走 announce）
+            await self._controller._play_bypass_text(segment, reason="tts fallback")
 
 
 class SpeakingChannel:
