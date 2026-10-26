@@ -45,6 +45,8 @@ open-xiaoai-bridge/
 │   │   │   ├── codec.py           # 音频编解码
 │   │   │   ├── channels.py        # 六麦帧对齐/选麦/下混（纯 stdlib，ticket 04）
 │   │   │   ├── watchdog.py        # 录音通道无帧看门狗状态机（ticket 04）
+│   │   │   ├── playback_timing.py # 播放时长/完成等待纯函数原语（B-29 步 1：pcm_duration/sleep_playback_done/文本预算估算）
+│   │   │   ├── speaking_channel.py# 对话循环发声接缝（B-29 步 2）：播放 API 只经 open() 产出 session（进门即物理断录）
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
 │   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
@@ -197,6 +199,7 @@ OpenClaw 网关客户端，管理 WebSocket 连接、消息分发、自动重连
 - 使用独立 VAD Future，不与 WakeupSessionManager 冲突
 - TTS 完全阻塞，播放完成后才继续监听
 - 自己持有并管理当前 TTS 的 `playback_token`；停止 OpenClaw 对话时应调用 `stop_tts_playback(token)`，不要在外层直接无 token 全局停止 Rust TTS
+- **对话循环内发声一律经 `self.speaking_channel.open()` 产出的 session**（B-29 步 2）：`play_pcm`/`play_segment_tts` 只在 session 上，open 进门即物理断录——「发声前必须断录」由结构强制；旁路文本播报走 `_play_bypass_text`（`conversation.bypass_play_via_announce` 门控，默认裸 play），新发声点禁止绕过这两条路
 
 ### WakeupSessionManager (core/wakeup_session.py)
 
@@ -829,4 +832,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**626 tests OK (skipped=3)**（2026-10-27，B-28 批后；P3 批后曾为 605，B-28 三票 +21 = `test_wakeup_announce_rejected.py` 3 + 记账/早到事件 8 + 门面与轮模板既有用例扩展 10）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**647 tests OK (skipped=3)**（2026-10-27，B-29 批后；B-28 批后 626，B-29 三票 +21 = `test_playback_timing.py` 12 + `test_speaking_channel.py` 9）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
