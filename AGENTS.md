@@ -90,8 +90,9 @@ open-xiaoai-bridge/
 - `run(enable_api_server)` → 启动各服务
 - `set_device_state(state)` → 管理设备状态（IDLE / LISTENING / SPEAKING / CONNECTING）
 - `send_text(text)` → 发送文本到小智
-- `send_to_openclaw(text, wait_response)` → 发送消息到 OpenClaw（返回 run_id 或回复文本）
-- `send_to_openclaw_and_play_reply(text, wait_response)` → 发送并 TTS 播放回复
+- `send_to(backend, text, *, wait_response, and_play)` → **向注册表后端发送的单一入口（B-28 票 03）**：新后端不再需要新增门面方法；`and_play=True` 播报回复（追加 rule_prompt），False = Agent 自主播报（追加 rule_prompt_for_skill）
+- `set_session_key(backend, session_key)` → 运行时切换任意注册表后端的会话键
+- `send_to_<name>(...)` / `set_<name>_session_key(...)` → 兼容委托（deprecation 期，调用面迁移完即删）
 - `schedule(callback)` → 主线程任务队列
 - `shutdown()` → 优雅关闭
 
@@ -159,17 +160,16 @@ OpenClaw 网关客户端，管理 WebSocket 连接、消息分发、自动重连
 - `stop()` → 退出对话
 - `is_active()` → 状态查询
 
-**对话循环** (`_run_one_turn_with_local_asr` / `_run_one_turn_with_xiaoai_asr`):
-1. VAD 检测语音开始（`_wait_for_speech`）/ 等待原生 ASR 定稿（`_wait_for_xiaoai_asr_text`）
-2. 录制完整语音（VAD 帧 hook）
-3. SherpaASR 离线识别
-4. 退出关键词检测
-5. 发送到后端（`_speak_response_segments`，P1 ticket 04：pump 协程驱动句段流，
+**对话循环** (`_run_one_turn` 轮模板，B-28 票 03 起单点化——旧 `_run_one_turn_with_local_asr` / `_run_one_turn_with_xiaoai_asr` 双写已收敛；输入链路差异只在 `_acquire_user_text()` 策略点):
+1. 取文本：VAD 检测语音开始（`_wait_for_speech`）+ SherpaASR 离线识别 / 等待原生 ASR 定稿（`_wait_for_xiaoai_asr_text`）
+2. 取消检查点①（ASR 定稿后）
+3. C/B 级应答拦截 → 退出关键词检测
+4. 发送到后端（`_speak_response_segments`，P1 ticket 04：pump 协程驱动句段流，
    LLM 请求在「咻」提示音期间即上路）
-6. 逐段流式 TTS：首段到达即断录起播，后续段到达即接力播放（每段过
+5. 逐段流式 TTS：首段到达即断录起播，后续段到达即接力播放（每段过
    stream_segment 检查点；播放令牌整轮一个；非流式后端 = 单句序列 =
    单段一次播放，行为与流式化之前逐字等价）
-7. 恢复监听（notify → 开录 → 等静音）
+6. 恢复监听（notify → 开录 → VAD 链路等静音）
 
 **管线态与取消传播（P1 ticket 02，流式化地基）**:
 - 每轮对话经 `core/utils/pipeline.py` 分配轮次号并按管线态迁移
@@ -829,4 +829,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**605 tests OK (skipped=3)**（2026-10-26，P3 批后；556 = P1/P2 票 04 后，本批 +49 = `test_p3_readonly.py` 15 + `test_led_language.py` 9 + `test_write_guardrails.py` 16 + `test_ir_integration.py` 9）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**626 tests OK (skipped=3)**（2026-10-27，B-28 批后；P3 批后曾为 605，B-28 三票 +21 = `test_wakeup_announce_rejected.py` 3 + 记账/早到事件 8 + 门面与轮模板既有用例扩展 10）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
