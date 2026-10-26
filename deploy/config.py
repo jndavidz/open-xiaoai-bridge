@@ -160,6 +160,18 @@ APP_CONFIG = {
     "xiaozhi": {
         "DEVICE_ID": "aa:bb:cc:dd:ee:ff",
     },
+    "song_request": {
+        # 语音点歌（kw-qq-music-api，票 01）：搜歌 + 320k 直链经 LX06 播放。
+        # enabled 默认关：真机验收窗口由用户打开（面板运行时覆盖层可热生效）。
+        "enabled": False,
+        # NAS 上的 kw-qq-music-api（内网 10.10.10.0/24 免 key）
+        "api_base": "http://10.10.10.2:3003",
+        # 源策略：按序尝试、首源失败回落。排除 bilibili（headers 无通道
+        # 必 403）与 migu（copyrightId 回传链复杂化 spike，需要时在此加）。
+        "sources": ["kuwo", "netease", "qq"],
+        # 消费铁律：播放层只吃 ≤320k mp3（ADR-0002：加密件不进播放层）
+        "quality": "320k",
+    },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
         # 注意：短语 >=4 字更稳；误触发/失灵时优先调 kws/vad 段参数
