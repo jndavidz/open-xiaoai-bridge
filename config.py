@@ -40,6 +40,11 @@ WAKEWORD_ROUTES = {
     "小黑": {"backend": "openai", "intro": "小黑来了"},
     "小爪": {"backend": "qwenpaw", "intro": "小爪来了"},
     "小智": {"backend": "xiaozhi", "intro": "小智来了"},
+    # 音乐生态点歌触发（V2，纯中文 >=4 字）：免唤醒进 AI 对话报歌名，
+    # 由 song_request 工具走 kwqq-api 播放；不放宽 kws 阈值（台账 #4 待裁决）。
+    # 词表无热重载（KeywordSpotter 启动构建），识别生效待重启窗口。
+    "我要点歌": {"backend": "openai", "intro": "想听什么歌"},
+    "帮我点歌": {"backend": "openai", "intro": "想听什么歌"},
 }
 
 
@@ -169,6 +174,9 @@ APP_CONFIG = {
             "小黑你好",
             "你好小爪",
             "小爪你好",
+            # 音乐生态点歌触发（V2）：与 WAKEWORD_ROUTES 条目配套；纯中文 >=4 字
+            "我要点歌",
+            "帮我点歌",
         ],
         # 静音多久后自动退出唤醒（秒）
         "timeout": 20,
