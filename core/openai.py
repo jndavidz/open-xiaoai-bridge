@@ -16,11 +16,16 @@ core.backend_base.BackendManagerBase；本模块只保留传输核。
 """
 
 import json
+import os
+import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 
 from core.backend_base import BackendManagerBase
+from core.services import conversation_memory
 from core.tools.registry import get_all_tools, execute_tool, is_external_network_tool
 from core.utils import turn_trace
 from core.utils.logger import logger
@@ -97,6 +102,10 @@ class OpenAIManager(BackendManagerBase):
     # 换话题暗号的一次性信令标志（spec 票 01；force_new_session() 置位，
     # _headers() 消费即清）
     _force_new_session = False
+    # 对话记忆（spec 票 04）：JSONL 落 data/memory/，注入触发状态
+    _memory_config: dict[str, Any] = {}
+    _memory_dir = Path(__file__).resolve().parents[1] / "data" / "memory"
+    _last_response_at: float | None = None
     DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     _system_prompt = ""
     # Per-session persona override: session_key -> system prompt.
@@ -145,6 +154,12 @@ class OpenAIManager(BackendManagerBase):
         cls._max_tool_rounds = max(1, int(config.get("max_tool_rounds", 3)))
         # 流式开关（P1 ticket 03）：默认关；热重载即生效（灰度回退 = 面板/配置一键关）
         cls._stream_enabled = bool(config.get("stream", False))
+        # 对话记忆（spec 票 04）：memory 段整体读取；目录可经 MEMORY_DIR 覆盖
+        cls._memory_config = dict(config.get("memory", {}) or {})
+        memory_dir = os.environ.get("MEMORY_DIR", "").strip()
+        cls._memory_dir = (
+            Path(memory_dir) if memory_dir else Path(__file__).resolve().parents[1] / "data" / "memory"
+        )
 
     @classmethod
     def _log_enabled(cls):
@@ -596,9 +611,63 @@ class OpenAIManager(BackendManagerBase):
         )
         if system:
             messages.append({"role": "system", "content": system})
+        # 对话记忆注入（spec 票 04）：上下文断档（TTL 过期/容器重启）或刚换
+        # 话题时，把最近 N 轮摘要作为第二条 system 注入——bridge 是上下文唯一
+        # 权威，aurora 不猜。注入失败降级为无摘要，绝不阻断请求。
+        memory_summary = cls._maybe_memory_summary()
+        if memory_summary:
+            messages.append({"role": "system", "content": memory_summary})
         messages.extend(history[-cls._history_max_messages :] if cls._history_max_messages else [])
         messages.append({"role": "user", "content": text})
         return messages
+
+    @classmethod
+    def _maybe_memory_summary(cls) -> str:
+        """记忆注入判据（spec：TTL/换话题导致的断档才注入，平时零开销路径）。
+
+        触发 = 距上一轮完成超过 memory.gap_minutes **或** _force_new_session
+        置位中（换话题清了本地历史，记忆文件是唯一的上下文来源）。
+        """
+        cfg = cls._memory_config or {}
+        if not cfg.get("enabled"):
+            return ""
+        try:
+            now = time.time()
+            gap_seconds = float(cfg.get("gap_minutes", 30)) * 60
+            context_broken = cls._last_response_at is None or (
+                now - cls._last_response_at
+            ) > gap_seconds
+            if not context_broken and not cls._force_new_session:
+                return ""
+            turns = conversation_memory.recent_turns(
+                cls._memory_dir,
+                cls._session_key,
+                int(cfg.get("max_turns", 5)),
+                datetime.now(),
+            )
+            return conversation_memory.summary_block(turns)
+        except Exception as exc:  # noqa: BLE001 - 记忆注入绝不阻断对话
+            logger.warning(f"[OpenAI] memory inject skipped: {type(exc).__name__}: {exc}")
+            return ""
+
+    @classmethod
+    def _on_response_complete(cls, text: str, response_text: str):
+        """B-30 票 04：一轮完整回复落账成功后写对话记忆 + 惰性清理过期文件。"""
+        super()._on_response_complete(text, response_text)
+        cfg = cls._memory_config or {}
+        if not cfg.get("enabled") or not response_text:
+            return
+        try:
+            now = datetime.now()
+            cls._last_response_at = time.time()
+            conversation_memory.append_turn(
+                cls._memory_dir, cls._session_key, text, response_text, now
+            )
+            conversation_memory.purge_expired(
+                cls._memory_dir, int(cfg.get("retain_days", 30)), now
+            )
+        except Exception as exc:  # noqa: BLE001 - 记忆写入绝不阻断对话
+            logger.warning(f"[OpenAI] memory write failed: {type(exc).__name__}: {exc}")
 
     @classmethod
     def _append_history(cls, history: list[dict[str, str]], text: str, response_text: str):

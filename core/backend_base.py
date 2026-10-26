@@ -450,6 +450,7 @@ class BackendManagerBase:
                 # B-28 票 02/B1：等待方已超时放弃时拒绝回填（孤儿条目来源）。
                 if cls._store_response(run_id, response_text):
                     turn_trace.note_reply_chars(len(response_text))
+                    cls._on_response_complete(text, response_text)
                 logger.ai_response(
                     response_text, module=f"{cls.LOG_MODULE}({cls._session_key})"
                 )
@@ -484,3 +485,12 @@ class BackendManagerBase:
     def usage_model_label(cls) -> str:
         """用量记账的模型标签：上游不暴露模型名的后端返回空串（面板显示 -）。"""
         return ""
+
+    @classmethod
+    def _on_response_complete(cls, text: str, response_text: str):
+        """钩子：一轮完整回复落账成功后调用（B-30 票 04，OpenAI 记忆写入点）。
+
+        仅在文本真正进入记账（有等待者）时触发；迟到回复（等待方已超时）
+        不触发——写记忆的口径与回填一致，都属「本轮已被放弃」。
+        基类 no-op。
+        """
