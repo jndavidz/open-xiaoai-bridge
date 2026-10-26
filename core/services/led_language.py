@@ -144,15 +144,18 @@ class LedLanguage:
             self._held_color = None
 
     async def _flash(self, color: str, seconds: float) -> None:
-        """点全环色、停留 seconds、写黑归位（打断红闪/故障定格共用）。"""
+        """点全环色、停留 seconds、写黑归位（打断红闪/故障定格共用）。
+
+        停留期间**持锁**：打断后新监听轮的蓝环在同一循环排队，若锁外
+        sleep，蓝环会在红闪停留期间插队覆盖（真机实测红不可见）。
+        """
         from core.device import get_device
 
         device = get_device()
         async with self._serial:
             await self._write_all(device, color)
             self._held_color = color
-        await asyncio.sleep(seconds)
-        async with self._serial:
+            await asyncio.sleep(seconds)
             await self._write_all(device, COLOR_OFF)
             self._held_color = None
 
