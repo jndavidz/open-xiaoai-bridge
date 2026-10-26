@@ -189,7 +189,6 @@ def _play_env(api, speaker, **cfg):
         "enabled": True,
         "api_base": "http://10.10.10.2:3003",
         "sources": ["kuwo", "netease", "qq"],
-        "quality": "320k",
     }
     merged.update(cfg)
     return (
@@ -449,6 +448,23 @@ class PlayPathTest(unittest.TestCase):
         self.assertIn("音箱", out)
         self.assertFalse([p for p in FakeSpeaker().play_calls])
 
+    def test_confirm_playing_tolerates_transient_readback_error(self):
+        # 单次瞬时回读异常只消耗一轮计数、下一轮重试；恢复后仍 confirmed
+        speaker = FakeSpeaker()
+        calls = {"n": 0}
+
+        async def flaky_get(sync=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient readback failure")
+            return "playing"
+
+        with mock.patch.object(speaker, "get_playing", flaky_get), \
+                mock.patch.object(song_request, "_CONFIRM_INTERVAL_S", 0.0):
+            ok = _run(song_request._confirm_playing(speaker))
+        self.assertTrue(ok)
+        self.assertEqual(2, calls["n"])
+
     def test_readback_not_playing_caveat(self):
         # incident-music-next-silent-drop ③：发起成功 ≠ 出声，超时兜底要留痕
         api = _ApiStub([
@@ -552,7 +568,7 @@ class QueueTest(unittest.TestCase):
             return _run(song_request.run(args))
 
     def test_stop_calls_device_stop_and_clears_state(self):
-        _seed_state(current=_search_item(), index=0)
+        _seed_state(current=_search_item(), index=0, history=[_search_item(sid="9")])
         speaker = FakeSpeaker()
         api = _ApiStub([])
         out = self._act(api, speaker, {"action": "stop"})
@@ -560,6 +576,8 @@ class QueueTest(unittest.TestCase):
         self.assertFalse([p for p in speaker.play_calls if p["url"]])
         self.assertIsNone(song_request._state["current"])
         self.assertEqual([], song_request._state["candidates"])
+        # 文案称「队列已清空」——历史栈也要清，否则 stop 后 prev 仍能恢复播放
+        self.assertEqual([], song_request._state["history"])
         self.assertIn("停止", out)
 
     def test_stop_with_empty_state_still_stops_device(self):
@@ -725,7 +743,8 @@ class ConfigContractTest(unittest.TestCase):
                 self.assertIsInstance(seg, dict, f"{rel} 缺 song_request 段")
                 self.assertFalse(seg.get("enabled", True))  # 默认关（真机验收窗口由用户开）
                 self.assertTrue(str(seg.get("api_base", "")).startswith("http://"))
-                self.assertEqual("320k", seg.get("quality"))  # 消费铁律
+                # 音质固定 320k（铁律）：不暴露为可配项，代码 _QUALITY 硬编码
+                self.assertNotIn("quality", seg)
                 sources = [str(s).lower() for s in seg.get("sources", [])]
                 self.assertNotIn("bilibili", sources)  # headers 无通道，必 403
                 self.assertNotIn("migu", sources)  # 默认不收，留配置可加

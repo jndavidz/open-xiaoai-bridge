@@ -168,11 +168,11 @@ APP_CONFIG = {
         "enabled": False,
         # NAS 上的 kw-qq-music-api（内网 10.10.10.0/24 免 key）
         "api_base": "http://10.10.10.2:3003",
-        # 源策略：按序尝试、首源失败回落。排除 bilibili（headers 无通道
-        # 必 403）与 migu（copyrightId 回传链复杂化 spike，需要时在此加）。
+        # 源策略：按序尝试、首源失败回落（缺省 = 代码 _DEFAULT_SOURCES）。
+        # 排除 bilibili（headers 无通道必 403）与 migu（copyrightId 回传链
+        # 复杂化 spike，需要时在此加）。
         "sources": ["kuwo", "netease", "qq"],
-        # 消费铁律：播放层只吃 ≤320k mp3（ADR-0002：加密件不进播放层）
-        "quality": "320k",
+        # 音质固定 320k（消费铁律 ≤320k mp3，代码常量 _QUALITY 不可配）
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）

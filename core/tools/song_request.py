@@ -147,9 +147,16 @@ async def _api(session: aiohttp.ClientSession, path: str, params: dict):
     """
     base = str(_cfg("api_base", "http://10.10.10.2:3003")).rstrip("/")
     body = await _fetch(session, f"{base}{path}", params)
-    if not isinstance(body, dict) or body.get("code") != 200:
-        logger.error(f"[SongRequest] business failure GET {path}: {body}")
+    if not isinstance(body, dict):
+        if body is not None:
+            # 非预期 envelope shape（HTTP 200 但不是信封）：真意外，保留 error
+            logger.error(f"[SongRequest] unexpected envelope shape GET {path}: {body!r}")
+        return None  # 传输失败（None）：_fetch 已记 error，不重复刷屏
+    if body.get("code") != 200:
+        # 预期内业务失败（搜不到歌 code:404、无直链等）：逐源回落正常路径，降 info
+        logger.info(f"[SongRequest] business failure GET {path}: {body}")
         return None
+    return body.get("data")
     return body.get("data")
 
 
@@ -249,9 +256,9 @@ async def _confirm_playing(speaker) -> bool:
         await asyncio.sleep(_CONFIRM_INTERVAL_S)
         try:
             state = await speaker.get_playing(sync=True)
-        except Exception as exc:  # noqa: BLE001 - 回读失败只降级
+        except Exception as exc:  # noqa: BLE001 - 单次回读失败消耗一轮计数，下一轮重试
             logger.warning(f"[SongRequest] playback readback failed: {exc}")
-            return False
+            continue
         if state == "playing":
             if attempt:
                 logger.info(f"[SongRequest] playing confirmed after {attempt + 1} polls")
@@ -335,7 +342,7 @@ async def _do_stop() -> str:
     if speaker is None:
         return "音箱服务还没就绪"
     await speaker.stop_device_audio()
-    _state.update({"current": None, "candidates": [], "index": -1})
+    _state.update({"current": None, "candidates": [], "index": -1, "history": []})
     logger.info("[SongRequest] stopped and queue cleared")
     return "已停止播放，队列已清空"
 

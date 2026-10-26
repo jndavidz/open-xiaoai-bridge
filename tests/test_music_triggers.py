@@ -74,6 +74,15 @@ class MusicTriggerWordsTest(unittest.TestCase):
                 others = [w for w in words if w != trigger]
                 embedded = [w for w in others if trigger in w or w in trigger]
                 self.assertEqual(embedded, [], f"{trigger} 与词表词嵌套: {embedded}")
+        # 指令表维度（deploy 双表，KWS 词表编译口径的一部分）：触发词与
+        # 既有指令键互不为子串，否则免唤醒路由先吞、命中歧义
+        for table_name in ("DIRECT_COMMANDS", "XIAOAI_COMMANDS"):
+            table = getattr(self.deploy_cfg, table_name, None)
+            if not isinstance(table, dict):
+                continue
+            for trigger in TRIGGER_WORDS:
+                hits = [k for k in table if trigger in k or k in trigger]
+                self.assertEqual(hits, [], f"{trigger} 与 {table_name} 键嵌套: {hits}")
 
     def test_route_intro_free_of_kws_words(self):
         intros = [
