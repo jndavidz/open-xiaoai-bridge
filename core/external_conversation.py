@@ -17,12 +17,14 @@ Key design decisions:
 
 import asyncio
 import os
+import sys
 import time
 
 import open_xiaoai_server
 
 from core.ref import get_speaker, get_vad
 from core.services.audio.playback_timing import sleep_playback_done
+from core.services.audio.speaking_channel import SpeakingChannel
 from core.utils.config import ConfigManager
 from core.utils import pipeline as conversation_pipeline
 from core.utils.pipeline import (
@@ -102,6 +104,9 @@ class ExternalConversationController:
         self._pipeline_turn = None
         # 本地链路「说完」时刻（VAD silence hook 写入，ASR 定稿后消费）
         self._speech_end_at: float | None = None
+        # 发声接缝（B-29 步 2）：播放 API 只经 open() 产出的 session 暴露，
+        # 「发声前必须物理断录」由结构强制而非注释纪律
+        self.speaking_channel = SpeakingChannel(self)
 
     # ---- config helpers ----
 
@@ -191,13 +196,13 @@ class ExternalConversationController:
         """Run VAD -> ASR -> backend -> TTS turns until exit."""
 
         # Mute mic → play notify → unmute.
-        # _play_notify() blocks for ~740ms (the beep duration), during which
+        # _notify_sound() blocks for ~740ms (the beep duration), during which
         # the mic is off and before_wakeup TTS echo naturally fades.
         # VAD.resume() resets all state (speech_frames, input_bytes),
         # so speech detection starts clean when listening begins.
         await self._stop_recording()
         logger.debug("Recording stopped", module=self.LOG_MODULE)
-        await self._play_notify()
+        await self._notify_sound()
         await self._start_recording()
         logger.debug("Ready to listen", module=self.LOG_MODULE)
 
@@ -319,10 +324,10 @@ class ExternalConversationController:
 
     async def _notify_and_resume_listening(self):
         """提示音 → 开录 →（VAD 链路）等静音。mic 已由 _speak_response_segments
-        在首段前闭掉；_play_notify() 阻塞 ~740ms（提示音时长）足够 TTS 回声衰减；
+        在首段前闭掉；notify 阻塞 ~740ms（提示音时长）足够 TTS 回声衰减；
         开录后等静音确保残留回声/缓冲清空，VAD.resume() 已重置全部状态，
         语音检测从干净状态开始。"""
-        await self._play_notify()
+        await self._notify_sound()
         await self._start_recording()
         if not self.uses_xiaoai_asr():
             vad = get_vad()
@@ -443,10 +448,13 @@ class ExternalConversationController:
 
         pump = asyncio.ensure_future(_pump())
         played: list[str] = []
+        channel_ctx = None
         try:
             if with_send_sound:
+                # 「咻」在断录前播（既有设计）：保 LLM 等待期 KWS/打断可用。
                 await self._play_send_sound()
             first = True
+            session = None
             while True:
                 segment = await queue.get()
                 if segment is done:
@@ -455,17 +463,23 @@ class ExternalConversationController:
                 self._checkpoint(CHECKPOINT_STREAM_SEGMENT)
                 if first:
                     # 回声防护时点：首段起播前断录（speaking 态 + 物理闭麦）。
-                    await self._begin_speaking()
+                    # B-29 步 2：open() 进门即断录，播放 API 只在 session 上；
+                    # open 惰性发生在此（非循环前）——LLM 等待期录音不停，可打断。
+                    channel_ctx = self.speaking_channel.open(reason="response segments")
+                    session = await channel_ctx.__aenter__()
+                    conversation_pipeline.set_state(PipelineState.SPEAKING)
                     # 检查点（播放等待内，起播前）：取消则首段也不起播。
                     self._checkpoint(CHECKPOINT_PLAYBACK)
                     self._playback_token = open_xiaoai_server.begin_playback_session()
                     first = False
-                await self._play_segment_tts(segment)
+                await session.play_segment_tts(segment)
                 played.append(segment)
             # 检查点（播放等待内，返回后）：取消则不再播任何后续音频
             # （notify 音等），本轮静默退出。
             self._checkpoint(CHECKPOINT_PLAYBACK)
         finally:
+            if channel_ctx is not None:
+                await channel_ctx.__aexit__(*sys.exc_info())
             self._playback_token = None
             if not pump.done():
                 pump.cancel()
@@ -488,24 +502,8 @@ class ExternalConversationController:
                 pass
         return played
 
-    async def _play_segment_tts(self, segment: str):
-        """播放单个句段（令牌与检查点由 _speak_response_segments 管理）。"""
-        try:
-            await self.backend._play_response_with_tts(
-                segment,
-                tts_speaker=self.backend.get_tts_speaker_for_session_key(),
-                playback_token=self._playback_token,
-            )
-        except TurnCancelledError:
-            raise
-        except Exception as exc:
-            logger.error(
-                f"TTS playback error: {exc}",
-                module=self.LOG_MODULE,
-            )
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text=segment)
+    # _play_segment_tts 已迁入 SpeakingSession.play_segment_tts（B-29 步 2：
+    # 播放 API 只经 speaking_channel.open() 产出的 session 暴露）。
 
     def _enter_processing(self) -> None:
         """检查点②（LLM 请求前）+ 管线态 → processing（两条 ASR 链路共用）。"""
@@ -768,17 +766,11 @@ class ExternalConversationController:
 
     # ---- TTS ----
 
-    async def _play_notify(self):
-        """Play the listening-ready notification sound via PCM buffer."""
-        if not _NOTIFY_PCM:
-            return
-        speaker = get_speaker()
-        if speaker:
-            try:
-                await speaker.play(buffer=_NOTIFY_PCM)
-                await sleep_playback_done(_NOTIFY_PCM)
-            except Exception as exc:
-                logger.debug(f"Notify sound error: {exc}", module=self.LOG_MODULE)
+    async def _notify_sound(self):
+        """notify 提示音（B-29 步 2 经 SpeakingChannel）：复用调用方已完成的
+        断录窗口（句段播完后 / start 入口显式断录后），不重复断录 RPC。"""
+        async with self.speaking_channel.open(reason="notify sound", stop_recording=False) as session:
+            await session.play_pcm(_NOTIFY_PCM, reason="Notify")
 
     async def _play_send_sound(self):
         """Play the send notification before waiting for backend response."""
