@@ -119,6 +119,14 @@ XIAOAI_COMMANDS = {
 #   且「打开Kodi」曾被转成「打开电脑」**误命中执行（WOL 两次）**。修法（中文触发词 /
 #   ASR 别名键 / 匹配归一化）待裁决，见 ws: docs/plan/pending-followups.md §5。
 
+# ---------- 指令别名表（B-31，可选）----------
+# {别名: 正式键}——正式键必须存在于上面两张表之一；匹配经归一化
+# （core/commands/matching.py：全角→半角、去标点空白、拉丁小写）。
+# 表空 = 现状逐字等价。填充须用户裁决（宁可少截不可错吞）：
+# 候选样例（转写抖动实测）：{"打开CODY": "打开Kodi", "阿尔法模式": "HiFi模式"}
+# ⚠ 拼音级模糊容错不在本表机制内——那属匹配策略裁决（W4），未拍板前不加。
+COMMAND_ALIASES: dict = {}
+
 
 async def before_wakeup(speaker, text, source, app):
     """唤醒边界路由钩子：纯数据绑定，分发与执行逻辑在 core/commands/router.py。
@@ -134,6 +142,7 @@ async def before_wakeup(speaker, text, source, app):
         direct_table=DIRECT_COMMANDS,
         xiaoai_table=XIAOAI_COMMANDS,
         personas=PERSONAS,
+        aliases=COMMAND_ALIASES,
     )
 
 

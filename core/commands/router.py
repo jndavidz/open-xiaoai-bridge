@@ -12,6 +12,7 @@ config 保留路由钩子（before_wakeup）并把两张指令表 + 人设表作
 """
 
 from core.commands.executor import run_steps
+from core.commands.matching import normalize_command_text, resolve_command_key
 from core.ref import get_kws
 from core.utils.logger import logger
 
@@ -56,21 +57,25 @@ async def route_before_wakeup(
     direct_table=None,
     xiaoai_table=None,
     personas=None,
+    aliases=None,
 ):
     """默认唤醒边界路由。表/人设由 config 钩子以数据传入（热重载即生效）。
 
     personas：{命中子串: {"session_key", "system_prompt", "intro", "backend"}}，
     按声明顺序做子串匹配，先命中先路由；system_prompt=None 表示显式复位人设覆盖。
+    aliases：{别名: 正式键}（B-31，可选）——指令表键的归一化 + 别名解析
+    （core/commands/matching.py）；表空/参数缺省 = 现状逐字等价。
     """
     key = (text or "").strip()
 
     if source == "kws":
-        steps = (direct_table or {}).get(key)
+        steps_key = resolve_command_key(text, direct_table or {}, aliases)
+        steps = (direct_table or {}).get(steps_key) if steps_key else None
         if steps is not None:
             await run_steps(speaker, steps)
             return None  # 执行完毕，不进入 AI 连续对话
 
-        if key == STOP_LISTENING_KEYWORD:
+        if normalize_command_text(key) == normalize_command_text(STOP_LISTENING_KEYWORD):
             return await stop_listening(speaker)
 
         for word, persona in (personas or {}).items():
@@ -99,7 +104,8 @@ async def route_before_wakeup(
         return None
 
     if source == "xiaoai":
-        steps = (xiaoai_table or {}).get(key)
+        steps_key = resolve_command_key(text, xiaoai_table or {}, aliases)
+        steps = (xiaoai_table or {}).get(steps_key) if steps_key else None
         if steps is not None:
             await clear_device_audio(speaker)
             await run_steps(speaker, steps)
