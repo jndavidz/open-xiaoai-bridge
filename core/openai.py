@@ -94,6 +94,9 @@ class OpenAIManager(BackendManagerBase):
     # "X-Hermes-Session-Key" for long-term memory scoping). Standard OpenAI /
     # Ollama / LM Studio ignore the unknown header; set empty to disable.
     _session_header = "X-Hermes-Session-Key"
+    # 换话题暗号的一次性信令标志（spec 票 01；force_new_session() 置位，
+    # _headers() 消费即清）
+    _force_new_session = False
     DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     _system_prompt = ""
     # Per-session persona override: session_key -> system prompt.
@@ -168,6 +171,15 @@ class OpenAIManager(BackendManagerBase):
     @classmethod
     def reset_session(cls, session_key: str | None = None):
         cls._sessions.pop(session_key or cls._session_key, None)
+
+    @classmethod
+    def force_new_session(cls):
+        """换话题暗号置位（spec 票 01）：下一次请求带 X-Session-Action: new。
+
+        one-shot 语义：标志在 _headers() 构造请求头时消费并立即清位——
+        「下轮请求带信令」不因多次构建而重复发送。
+        """
+        cls._force_new_session = True
 
     @classmethod
     def _resolve_tts_provider(cls, tts_speaker: str | None) -> str:
@@ -558,6 +570,15 @@ class OpenAIManager(BackendManagerBase):
         # not duplicate context.
         if style == "chat_completions" and cls._session_header and cls._session_key:
             headers[cls._session_header] = cls._session_key
+            # aurora 会话复用信令（spec topic-switch-and-memory 票 01）：叠加
+            # X-Session-Key（与 session_header 并存同值——Hermes 配置下两头并存，
+            # aurora 配置下幂等回写）；one-shot X-Session-Action: new 在此消费，
+            # 构建请求头即视为发送。session_header 留空 = 纯净请求（plain OpenAI
+            # 契约不变）；非 aurora 后端忽略未知头，无副作用。
+            headers.setdefault("X-Session-Key", cls._session_key)
+            if cls._force_new_session:
+                headers["X-Session-Action"] = "new"
+                cls._force_new_session = False
         return headers
 
     @classmethod
