@@ -333,10 +333,11 @@ APP_CONFIG = {
                       "root@10.10.10.20 ubus listen",
     },
     "turn_trace": {
-        # 每轮延迟埋点（ticket 11）：默认关闭；开启后每轮一条 [TurnTrace] INFO
+        # 每轮延迟埋点（ticket 11）：开启后每轮一条 [TurnTrace] INFO
         # 数值行（各段 ms / 长度 / 标志），不含原话文本。
         # 环境变量 TURN_TRACE_ENABLED 可覆盖（1/true/yes/on 开，0/false/no/off 关）。
-        "enabled": False,
+        # enabled=True：2026-10-28 与现网同步开启（此前部署遗漏致 SLO 3a 零数据）。
+        "enabled": True,
         # summary 全量 JSONL 落 data/turntrace/（B-32/A4）：容器 recreate 不再丢
         # 轮次数据（≥40 轮 SLO 复核数据源）。TURN_TRACE_PERSIST 可覆盖。
         "persist": True,

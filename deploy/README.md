@@ -1,7 +1,7 @@
 # 家庭部署手册（deploy/）
 
 > 目标：群晖 DS416play 上运行 open-xiaoai-bridge，小爱 Pro(LX06) 经 client 连接，
-> 实现：免唤醒/截胡双指令表场景控制 + 「你好贾维斯」OpenAI 兼容大模型连续对话（当前 DeepSeek，可经 admin 面板热切换）+ 「你好老师」
+> 实现：免唤醒/截胡双指令表场景控制 + 「你好小塔」OpenAI 兼容大模型连续对话（当前 DeepSeek，可经 admin 面板热切换）+ 「你好助教」
 > 学科辅导（独立人设）+ Agent 工具层（weather/hass/music 只读工具）+ 「停止聆听」隐私开关
 > + HA↔音箱双向 TTS + 后台管理面板。
 > 对应总方案：`../../docs/plan/home-theater-automation-plan.md` Phase C/D；构建与镜像边界见 [REBUILD.md](REBUILD.md)。
@@ -97,9 +97,9 @@ reboot
 2. 浏览器打开 **http://10.10.10.2:9092/admin** → 输入 `.env` 里的 `ADMIN_TOKEN` → 总览页各卡片正常、`MONITOR_SERVICES` 配置的外部服务显示在线
 3. `docker logs -f open-xiaoai-bridge` → 出现音箱连接 + `get_version` 日志
 4. 音箱喊 **「测试模式」** → 播报「桥接正常，家庭中枢在线」
-5. 音箱喊 **「你好贾维斯」** → 播「我在」→ 问一句天气 → OpenAI 兼容大模型回答（当前 DeepSeek，可热切换；多轮追问验证上下文；喊「小爱同学」验证可打断）
-6. 音箱喊 **「你好老师」** → 进入辅导人设（四年级导师，苏格拉底式引导、不直接报答案）；喊「你好贾维斯」切回后确认人格无串台
-7. 音箱先喊 **「你好贾维斯」** 进对话（听到"我在"），再说 **「现在上海天气怎么样」** → 回答来自 weather 工具而非纯生成；bridge 日志见 `tool round: ['weather_get']` 回环。**注意：连说"贾维斯，…"无效**（唤醒词是完整「你好贾维斯」，KWS 词表无单独「贾维斯」）
+5. 音箱喊 **「你好小塔」** → 播「我在」→ 问一句天气 → OpenAI 兼容大模型回答（当前 DeepSeek，可热切换；多轮追问验证上下文；喊「小爱同学」验证可打断）
+6. 音箱喊 **「你好助教」** → 进入辅导人设（四年级导师，苏格拉底式引导、不直接报答案）；喊「你好小塔」切回后确认人格无串台
+7. 音箱先喊 **「你好小塔」** 进对话（听到"我在"），再说 **「现在上海天气怎么样」** → 回答来自 weather 工具而非纯生成；bridge 日志见 `tool round: ['weather_get']` 回环。**注意：连说"小塔，…"无效**（唤醒词是完整「你好小塔」，KWS 词表无单独「小塔」）
 8. HA 侧建一个临时脚本调 `POST http://10.10.10.2:9092/api/play/text`（body `{"text":"来自HA的播报"}`）→ 音箱说话
 9. 音箱喊 **「停止聆听」** → 麦克风静音 + KWS 停止分析 + TTS「已停止聆听」（隐私开关，语音通道自关）；`curl -X POST -H "Authorization: Bearer $BRIDGE_API_TOKEN" http://10.10.10.2:9092/api/audio_input`（唯一恢复路径；配置了 `BRIDGE_API_TOKEN` 时必须带 Bearer，否则 401/503）→ mic 恢复 on + KWS 恢复分析，返回 `{"success":true,"mic":"on","listening":true}`
 

@@ -107,7 +107,7 @@ cd bridge/deploy && docker compose up -d --force-recreate
 容器启动即重跑 CMD → 重新编译 `keywords.txt`（含新增唤醒词）+ 以 fork 代码运行 `main.py`。
 
 > ⚠️ **部署遗漏重灾**（2026-08-26 实踩）：只推镜像（路径 A）而**不同步 config.py** → 新唤醒词全部失效
-> （「你好贾维斯」可唤醒、「你好老师」无反应——因为词表在 **bind-mount 的 config.py**，不随镜像走）。
+> （「你好小塔」可唤醒、「你好助教」无反应——因为词表在 **bind-mount 的 config.py**，不随镜像走）。
 > 完整部署 = **① 推镜像 + ② 同步 `deploy/config.py`（及 compose/.env，若变更）+ ③ recreate** 三步缺一不可；
 > 这是 `upgrade-image.sh` 的三步流程，勿跳。仅改 config.py 时：推文件 + `docker compose restart` 即可热更。
 
@@ -117,7 +117,7 @@ cd bridge/deploy && docker compose up -d --force-recreate
 |---|------|------|------|
 | 1 | 容器健康 | `docker compose ps` / 日志 `docker compose logs -f` | 无启动报错；见 `关键词文件生成完成` |
 | 2 | T7.3 WOL | **须说"小爱同学，打开电脑"**（xiaoai 截胡）；直接说"打开电脑"无效 | NUC 唤醒（HA `switch.nuc_hifi_wol` turn_on）→ 实测 `HA switch.turn_on OK` ✓ |
-| 3 | T8 工具闭环 | **先喊"你好贾维斯"进对话再问**；连说"贾维斯，北京天气怎么样"无效（唤醒词是"你好贾维斯"） | OpenAI 兼容后端调度 Open-Meteo → 实测 `tool round: ['weather_get']` ✓ |
+| 3 | T8 工具闭环 | **先喊"你好小塔"进对话再问**；连说"小塔，北京天气怎么样"无效（唤醒词是"你好小塔"） | OpenAI 兼容后端调度 Open-Meteo → 实测 `tool round: ['weather_get']` ✓ |
 | 4 | T7.6 关 | 喊「停止聆听」 | 麦克风停 + TTS「已停止聆听」；日志见 `set_mic(False)` / `disable_listening()` |
 | 5 | T7.6 开（唯一恢复路径） | `curl -X POST http://<nas>:9092/api/audio_input` | `{"success":true,"mic":"on","listening":true}` |
 | 6 | T7.6 静默回退 | 停止聆听后再喊任意词 | 无响应（语音通道已关，符合设计） |
@@ -141,8 +141,8 @@ cd bridge/deploy && docker compose up -d --force-recreate
 ### 5.2 截胡边界与唤醒词（T7.3 / T8）
 - 「打开电脑」=`XIAOAI_COMMANDS`（xiaoai 分支）→ HA `switch.nuc_hifi_wol` WOL。
   **须"小爱同学，打开电脑"**（小爱唤醒才把指令转发 bridge 截胡）；直接说"打开电脑"无小爱前缀→不进 bridge→不唤醒。
-- AI 对话唤醒词 = **「你好贾维斯」**（默认 agent:javis）/ **「你好老师」**（导师）。
-  **连说"贾维斯，北京天气怎么样"无效**——KWS 词表仅「你好贾维斯」整词，无单独「贾维斯」。须分两步：喊「你好贾维斯」听到"我在"→再说问题。
+- AI 对话唤醒词 = **「你好小塔」**（2026-10-27 起定稿；session_key 沿用 agent:javis）/ **「你好助教」**（辅导，agent:tutor）。旧词「你好贾维斯 / 你好老师」已退役。
+  **连说"小塔，北京天气怎么样"无效**——KWS 词表仅「你好小塔」整词，无单独「小塔」。须分两步：喊「你好小塔」听到"我在"→再说问题。
 - 文档已修正：`README` 第75行错误样例"贾维斯，现在上海天气怎么样"（连说无效）已改为「你好贾维斯」进对话再问；「贾维斯」短唤醒词**保持现状不加**（用户 08-29 决定）。
 
 ### 5.3 本轮验收结果（全绿）
