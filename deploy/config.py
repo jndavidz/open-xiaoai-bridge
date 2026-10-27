@@ -20,6 +20,12 @@ from core.commands import (
 
 # ---------- 环境变量 ----------
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+AURORA_API_KEY = os.environ.get("AURORA_API_KEY", "david")  # aurora 网关鉴权
+# ⚠ 2026-10-28 config 合流：本文件已与现网（NAS 395 行版）逐段对齐——
+#   song_request.enabled=True / rule_prompt 工具纪律版 / system_prompt 70 字版 /
+#   max_tokens=180 / history_max_messages=10 / exit_keywords 全量 / AURORA 行
+#   均为 2026-10-27 真机验收窗口在生产调定后回移植。今后改动须双侧同步，
+#   勿再单侧演进（台账 #8 的教训：单侧漂移 → 按仓库重部署静默关功能）。
 
 
 # ---------- 会话人设（专属会话表，按声明顺序做子串匹配） ----------
@@ -231,8 +237,8 @@ APP_CONFIG = {
     },
     "song_request": {
         # 语音点歌（kw-qq-music-api，票 01）：搜歌 + 320k 直链经 LX06 播放。
-        # enabled 默认关：真机验收窗口由用户打开（面板运行时覆盖层可热生效）。
-        "enabled": False,
+        # enabled=True：V1 真机验收通过（2026-10-27），与现网一致；回退改 false。
+        "enabled": True,
         # NAS 上的 kw-qq-music-api（内网 10.10.10.0/24 免 key）
         "api_base": "http://10.10.10.2:3003",
         # 源策略：按序尝试、首源失败回落（缺省 = 代码 _DEFAULT_SOURCES）。
@@ -368,23 +374,24 @@ APP_CONFIG = {
         "input_mode": "xiaoai_asr",
         "session_key": "agent:javis:home",
         "session_header": "",  # DeepSeek 不需要，留空关闭
+        # 2026-10-27 真机语音调优版（现网口径）：短答优先，禁 markdown/表情
         "system_prompt": (
-            "你是家庭智能助手小塔，运行在客厅音箱上。回答必须口语化、简洁，"
-            "控制在100字以内，不要使用任何 markdown 格式、列表符号和表情。"
+            "你是家庭助手小塔。口语化、70字内、先给结论，不用 markdown。"
         ),
         "temperature": 0.7,
-        "max_tokens": 300,
-        "history_max_messages": 20,
+        "max_tokens": 180,
+        "history_max_messages": 10,
         "response_timeout": 120,
         "tts_speed": 1.0,
         "tts_speaker": "xiaoai",  # 小爱原生 TTS，零配置
         "session_tts_speakers": {},
-        "exit_keywords": ["退出", "停止", "再见"],
+        "exit_keywords": ["退出", "停止", "再见", "退下", "下去吧"],
         # 工具层（Agent 1.5 / 阶段 1.5）：function calling 回环。默认开启；
         # 仅 chat_completions 风格（DeepSeek）注入 tools。只读工具见 core/tools/。
         "tool_calls_enabled": True,
         "max_tool_rounds": 3,
-        "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
+        # 2026-10-27 V1 联调定稿（现网口径）：设备动作必须走工具，禁止口头答应
+        "rule_prompt": "简短口语，不用 markdown。播放/暂停/停止/切歌等设备动作必须调用工具执行，禁止只口头答应。在线点歌一律用 song_request；music_* 只用于家庭音乐服务器状态查询。",
         "rule_prompt_for_skill": "",
         "extra_body": {},
         # P1-05 灰度转正：流式默认开（2026-10-26 真机窗口验证：首音 ~3s vs 基线 4.8s、

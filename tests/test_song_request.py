@@ -870,7 +870,13 @@ class ConfigContractTest(unittest.TestCase):
     deploy 生产配置改错文件是踩过的坑——这里守门双份一致的关键缺省。
     """
 
-    _CASES = (("config.py", "config_for_song_request"), ("deploy/config.py", "deploy_config_for_song_request"))
+    # 2026-10-28 config 合流（台账 #8 收口）：根 config = 本地开发基线保持关，
+    # deploy/config.py = 生产镜像口径保持开（V1 真机验收 2026-10-27 通过后与
+    # 现网对齐）——按仓库重部署不再静默关掉点歌。
+    _CASES = (
+        ("config.py", "config_for_song_request", False),
+        ("deploy/config.py", "deploy_config_for_song_request", True),
+    )
 
     def _load(self, rel: str, name: str):
         import importlib.util
@@ -881,11 +887,12 @@ class ConfigContractTest(unittest.TestCase):
         return module
 
     def test_both_configs_declare_song_request(self):
-        for rel, name in self._CASES:
+        for rel, name, expected_enabled in self._CASES:
             with self.subTest(config=rel):
                 seg = self._load(rel, name).APP_CONFIG.get("song_request")
                 self.assertIsInstance(seg, dict, f"{rel} 缺 song_request 段")
-                self.assertFalse(seg.get("enabled", True))  # 默认关（真机验收窗口由用户开）
+                # enabled 口径分侧守门：dev 基线关 / deploy 生产口径开（见 _CASES 注）
+                self.assertIs(seg.get("enabled"), expected_enabled)
                 self.assertTrue(str(seg.get("api_base", "")).startswith("http://"))
                 # 音质固定 320k（铁律）：不暴露为可配项，代码 _QUALITY 硬编码
                 self.assertNotIn("quality", seg)
