@@ -86,10 +86,34 @@ class WakeupSessionManager:
             if task and not task.done():
                 loop.call_soon_threadsafe(task.cancel)
 
-        asyncio.run_coroutine_threadsafe(self._stop_device_playback(), loop)
+        asyncio.run_coroutine_threadsafe(self._interrupt_device_playback(), loop)
 
         from core.xiaoai import XiaoAI
         XiaoAI.stop_conversation()
+
+    async def _interrupt_device_playback(self):
+        """唤醒打断：在线点歌在播时**暂停**（可续播），其余场景保持既有停播。
+
+        真机 2026-10-27：原策略一律 stop_device_audio，导致播放中调音量等
+        命令必须先牺牲当前曲目；暂停 + 空闲后自动续播（song_request 侧）解决。
+        """
+        try:
+            from core.tools import song_request
+
+            if song_request.is_paused_for_wakeup():
+                # 已是唤醒暂停态（原生唤醒先到）：不再 stop，只恢复录音
+                from core.xiaoai import XiaoAI
+
+                await XiaoAI.start_recording()
+                return
+            if await song_request.pause_for_wakeup():
+                from core.xiaoai import XiaoAI
+
+                await XiaoAI.start_recording()
+                return
+        except Exception as exc:  # noqa: BLE001 - 接管失败回落停播，不阻断唤醒
+            logger.warning(f"[Wakeup] pause-for-wakeup failed, fallback to stop: {exc}")
+        await self._stop_device_playback()
 
     def on_wakeup(self):
         logger.info("[Wakeup] Wakeup session started")
@@ -227,6 +251,10 @@ class WakeupSessionManager:
                 kws.resume()
         logger.info(f"[Wakeup] before_wakeup returned: {should_wakeup}")
         if should_wakeup is not None:
+            # 要进连续对话：撤掉「空闲即续播」的自动任务，改由会话结束时续播
+            from core.tools import song_request
+
+            song_request.cancel_pending_resume()
             await self.reset_all_sessions()
 
         if should_wakeup == "xiaozhi":
@@ -265,6 +293,13 @@ class WakeupSessionManager:
         finally:
             self._controllers.pop(name, None)
             self._tasks.pop(name, None)
+            # 会话结束：若点歌在播但被唤醒暂停，恢复播放（新曲已起播时幂等）
+            try:
+                from core.tools import song_request
+
+                await song_request.resume_after_wakeup("conversation_end")
+            except Exception as exc:  # noqa: BLE001 - 续播失败不影响会话收尾
+                logger.warning(f"[Wakeup] resume after conversation failed: {exc}")
             if kws:
                 kws.resume()
 
@@ -296,8 +331,9 @@ class WakeupSessionManager:
             if controller.is_active():
                 controller.stop()
 
-        # Stop all audio playback on the device
-        await self._stop_device_playback()
+        # Stop all audio playback on the device（在线点歌在播时改暂停，见
+        # _interrupt_device_playback；KWS 唤醒同样受益）
+        await self._interrupt_device_playback()
 
         logger.debug("[Wakeup] All sessions reset")
 

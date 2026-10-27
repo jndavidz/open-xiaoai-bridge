@@ -219,10 +219,14 @@ class ExternalConversationController:
             outcome = "played"
             try:
                 result = await self._run_one_turn()
-                if result in ("exit", "timeout"):
+                if result in ("exit", "timeout", "exit_keep_audio"):
                     outcome = result
                     if self.uses_xiaoai_asr():
-                        await self._stop_xiaoai_native_listening()
+                        if result == "exit_keep_audio":
+                            # 点歌等工具已接管音频：只结束聆听会话，不停设备播放
+                            await self._leave_xiaoai_listening_keep_audio()
+                        else:
+                            await self._stop_xiaoai_native_listening()
                     await self._call_after_wakeup()
                     break
                 elif result == "error":
@@ -296,6 +300,11 @@ class ExternalConversationController:
             return "continue"
 
         # 检查点②（LLM 请求前）+ 管线态 → processing
+        # 每轮复位「工具接管音频」标记：song_request 起播成功会置位，
+        # 本轮收尾 TTS 跳过（否则同设备 TTS 会打断刚起播的音乐）。
+        from core.tools.registry import reset_reply_suppression
+
+        reset_reply_suppression()
         self._enter_processing()
 
         # 4. Send to backend and speak the response as a segment stream
@@ -312,11 +321,23 @@ class ExternalConversationController:
             full_text, with_send_sound=not self.uses_xiaoai_asr()
         )
         if not segments:
+            from core.tools.registry import reply_suppressed
+
+            if reply_suppressed():
+                # 工具已自行播报并起播（音频已交给工具）：不播降级语，退出会话保音频
+                return "exit_keep_audio"
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
             await self._play_bypass_text("抱歉，我没有收到回复", reason="no response fallback")
             return "continue"
 
         # 5. Notify → Start recording →（VAD 链路再）Wait for silence
+        from core.tools.registry import reply_suppressed
+
+        if reply_suppressed():
+            # 工具已接管音频（音乐在播）：退出连续对话、保留设备播放。
+            # 真机 2026-10-27：会话态下设备原生助手会把流式播放抢回并停掉
+            # （采样显示起播 ~10s 后 stat=1→2，随后设备自报网络异常）。
+            return "exit_keep_audio"
         await self._notify_and_resume_listening()
         return "continue"
 
@@ -446,6 +467,12 @@ class ExternalConversationController:
         done = object()
         generator = self.backend.stream_response_segments(text)
 
+        # 入口复位（与 _run_one_turn 的轮首复位双保险）：工具置位发生在本
+        # 方法内部（pump 驱动 LLM 期间），此处清的是上一轮可能的残留。
+        from core.tools.registry import reset_reply_suppression
+
+        reset_reply_suppression()
+
         async def _pump():
             try:
                 async for segment in generator:
@@ -462,12 +489,27 @@ class ExternalConversationController:
                 await self._play_send_sound()
             first = True
             session = None
+            muted = False
             while True:
                 segment = await queue.get()
                 if segment is done:
                     break
                 # 检查点（流循环内每个句段）：取消即停播剩余段，静默退出。
                 self._checkpoint(CHECKPOINT_STREAM_SEGMENT)
+                if first and not muted:
+                    from core.tools.registry import reply_suppressed
+
+                    if reply_suppressed():
+                        # 工具本轮已自行播报并起播（song_request）：收尾文本只消费
+                        # 不发声，避免同设备 TTS 把刚开始的音乐顶掉。
+                        muted = True
+                        logger.info(
+                            "reply TTS suppressed: tool took over audio this turn",
+                            module=self.LOG_MODULE,
+                        )
+                if muted:
+                    played.append(segment)
+                    continue
                 if first:
                     # 回声防护时点：首段起播前断录（speaking 态 + 物理闭麦）。
                     # B-29 步 2：open() 进门即断录，播放 API 只在 session 上；
@@ -721,6 +763,24 @@ class ExternalConversationController:
         except Exception as exc:
             logger.debug(
                 f"Failed to stop XiaoAI native listening: {exc}",
+                module=self.LOG_MODULE,
+            )
+
+    async def _leave_xiaoai_listening_keep_audio(self):
+        """结束原生聆听会话但不停设备播放（点歌接管音频的退出路径）。
+
+        与 _stop_xiaoai_native_listening 的唯一差别：不发 stop_device_audio。
+        会话太久会让设备原生助手抢回流式播放并停掉（真机 2026-10-27）。
+        """
+        speaker = get_speaker()
+        if not speaker:
+            return
+        try:
+            await speaker.wake_up(awake=False)
+            await asyncio.sleep(0.15)
+        except Exception as exc:
+            logger.debug(
+                f"Failed to leave XiaoAI listening (keep audio): {exc}",
                 module=self.LOG_MODULE,
             )
 

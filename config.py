@@ -48,6 +48,61 @@ WAKEWORD_ROUTES = {
 }
 
 
+# ---------- 在线点歌队列的原生唤醒控制 ----------
+# 点歌播放期间用户说「小爱同学，下一首 / 上一首」：原生小爱没有 bridge 的
+# 播放队列，这里直接驱动 song_request（有队列才接管，无队列放行原生）。
+_SONG_PREV_WORDS = ("上一首", "上一曲", "换回")
+_SONG_NEXT_WORDS = ("下一首", "下一曲", "换一首", "换首歌", "换一个")
+
+
+async def _speak_queue_failure(speaker, message: str) -> None:
+    """切歌失败时把原因播出来（此时没有音乐在放，播报不会打断任何东西）。"""
+    try:
+        async with speaker.announce(
+            text=message,
+            reason="song queue failure",
+            wait=False,
+            gate_seconds=30,
+        ):
+            await speaker.play(text=message)
+    except Exception:  # noqa: BLE001 - 词表拒绝/设备异常都不许冒泡
+        try:
+            await speaker.play(text=message)
+        except Exception:
+            pass
+
+
+async def _song_queue_from_wakeup(speaker, text: str) -> bool:
+    """原生唤醒文本命中队列控制词时执行切歌；返回是否已接管。"""
+    try:
+        from core.tools import registry, song_request
+
+        if not song_request.has_queue():
+            return False
+        utterance = text or ""
+        if any(word in utterance for word in _SONG_PREV_WORDS):
+            action = "prev"
+        elif any(word in utterance for word in _SONG_NEXT_WORDS):
+            action = "next"
+        else:
+            return False
+        registry.reset_reply_suppression()
+        result = await song_request.run({"action": action})
+        from core.utils.logger import logger
+
+        logger.info(
+            f"[config] song queue action from native wake: {utterance!r} -> {result!r}"
+        )
+        if not registry.reply_suppressed() and result:
+            await _speak_queue_failure(speaker, result)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 路由钩子绝不杀唤醒链路
+        from core.utils.logger import logger
+
+        logger.warning(f"[config] song queue wakeup route failed: {exc}")
+        return False
+
+
 async def before_wakeup(speaker, text, source, app):
     """
     处理收到的用户消息，并决定是否唤醒 AI。
@@ -74,6 +129,9 @@ async def before_wakeup(speaker, text, source, app):
             app.set_session_key("openclaw", "agent:main:xxx")
         不调用则自动使用各后端 session_key 的默认值，无需手动重置。
     """
+    if source == "xiaoai" and await _song_queue_from_wakeup(speaker, text):
+        return None
+
     if source == "kws":
         # 唤醒词路由走 core.commands 默认分发（人设/开场白/停止聆听都在那里）
         return await route_before_wakeup(speaker, text, source, app, personas=WAKEWORD_ROUTES)

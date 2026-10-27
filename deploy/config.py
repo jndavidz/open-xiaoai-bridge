@@ -23,10 +23,10 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 
 # ---------- 会话人设（专属会话表，按声明顺序做子串匹配） ----------
-# 学科辅导导师人设（「你好老师」专属会话）：四年级 MVP，苏格拉底式引导，
-# 语音友好，场景限定。system_prompt=None 表示显式复位人设覆盖（贾维斯行用）。
+# 学科辅导导师人设（「你好助教」专属会话）：四年级 MVP，苏格拉底式引导，
+# 语音友好，场景限定。system_prompt=None 表示显式复位人设覆盖（小塔行用）。
 TUTOR_SYSTEM_PROMPT = (
-    "你是'老师'，一位耐心的小学四年级学科辅导老师，通过音箱与学生语音对话。"
+    "你是'助教'，一位耐心的小学四年级学科辅导助教，通过音箱与学生语音对话。"
     "学生是9-10岁的孩子。规则："
     "1.苏格拉底式引导——先问学生已经知道什么，一步步引导他自己得出答案，绝不直接报答案；"
     "2.每次回复不超过3句话，口语化、简短、适合语音播报，不用任何markdown、列表符号和表情；"
@@ -36,15 +36,16 @@ TUTOR_SYSTEM_PROMPT = (
 )
 
 PERSONAS = {
-    "你好老师": {
+    "你好助教": {
         "session_key": "agent:tutor:home",
         "system_prompt": TUTOR_SYSTEM_PROMPT,
-        "intro": "老师在，请讲",
+        "intro": "助教在，请讲",
         "backend": "openai",
     },
-    "贾维斯": {
+    # 主助手人设（2026-10-27 起身份名统一为「小塔」，唤醒词「你好小塔」）
+    "小塔": {
         "session_key": "agent:javis:home",
-        "system_prompt": None,  # 切回贾维斯：显式复位导师人设覆盖
+        "system_prompt": None,  # 切回小塔：显式复位导师人设覆盖
         "intro": "我在",
         "backend": "openai",
     },
@@ -139,6 +140,61 @@ XIAOAI_COMMANDS = {
 COMMAND_ALIASES: dict = {}
 
 
+# ---------- 在线点歌队列的原生唤醒控制 ----------
+# 点歌播放期间用户说「小爱同学，下一首 / 上一首」：原生小爱没有 bridge 的
+# 播放队列，这里直接驱动 song_request（有队列才接管，无队列放行原生）。
+_SONG_PREV_WORDS = ("上一首", "上一曲", "换回")
+_SONG_NEXT_WORDS = ("下一首", "下一曲", "换一首", "换首歌", "换一个")
+
+
+async def _speak_queue_failure(speaker, message: str) -> None:
+    """切歌失败时把原因播出来（此时没有音乐在放，播报不会打断任何东西）。"""
+    try:
+        async with speaker.announce(
+            text=message,
+            reason="song queue failure",
+            wait=False,
+            gate_seconds=30,
+        ):
+            await speaker.play(text=message)
+    except Exception:  # noqa: BLE001 - 词表拒绝/设备异常都不许冒泡
+        try:
+            await speaker.play(text=message)
+        except Exception:
+            pass
+
+
+async def _song_queue_from_wakeup(speaker, text: str) -> bool:
+    """原生唤醒文本命中队列控制词时执行切歌；返回是否已接管。"""
+    try:
+        from core.tools import registry, song_request
+
+        if not song_request.has_queue():
+            return False
+        utterance = text or ""
+        if any(word in utterance for word in _SONG_PREV_WORDS):
+            action = "prev"
+        elif any(word in utterance for word in _SONG_NEXT_WORDS):
+            action = "next"
+        else:
+            return False
+        registry.reset_reply_suppression()
+        result = await song_request.run({"action": action})
+        from core.utils.logger import logger
+
+        logger.info(
+            f"[config] song queue action from native wake: {utterance!r} -> {result!r}"
+        )
+        if not registry.reply_suppressed() and result:
+            await _speak_queue_failure(speaker, result)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 路由钩子绝不杀唤醒链路
+        from core.utils.logger import logger
+
+        logger.warning(f"[config] song queue wakeup route failed: {exc}")
+        return False
+
+
 async def before_wakeup(speaker, text, source, app):
     """唤醒边界路由钩子：纯数据绑定，分发与执行逻辑在 core/commands/router.py。
 
@@ -148,6 +204,8 @@ async def before_wakeup(speaker, text, source, app):
       - source == "xiaoai"：命中 XIAOAI_COMMANDS（原生小爱做不到的跨系统编排）
                             则先清场再截胡执行；未命中放行原生小爱全权处理
     """
+    if source == "xiaoai" and await _song_queue_from_wakeup(speaker, text):
+        return None
     return await route_before_wakeup(
         speaker, text, source, app,
         direct_table=DIRECT_COMMANDS,
@@ -187,8 +245,9 @@ APP_CONFIG = {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
         # 注意：短语 >=4 字更稳；误触发/失灵时优先调 kws/vad 段参数
         "keywords": [
-            "你好贾维斯",
-            "你好老师",
+            # 主唤醒词（2026-10-27 A/B 真机 5/5；3 字生僻词实测仅 1/5，不采用）
+            "你好小塔",
+            "你好助教",
             "音乐模式",
             "高保真模式",
             "停止音乐",
@@ -216,11 +275,12 @@ APP_CONFIG = {
     "kws": {
         # 唤醒词置信度加成（越高越难误触发）
         # 2026-09-24 收紧：2.0 -> 3.0（incident §5 建议 3）
-        # 依据：2026-09-17 自触发回环事故中环境音误命中（score 阈值过松）
-        "keywords_score": 3.0,
+        # 2026-10-27 A/B 放宽：3.0 -> 2.5（真机 9/10 命中；announce 词表闸门兜底）
+        "keywords_score": 2.5,
         # 检测阈值（越低越灵敏）
         # 2026-09-24 收紧：0.2 -> 0.35（incident §5 建议 3，建议区间 0.35~0.4 取下沿）
-        "keywords_threshold": 0.35,
+        # 2026-10-27 A/B 放宽：0.35 -> 0.30（观察期误触发即回退）
+        "keywords_threshold": 0.30,
         # 判定说完的最小静默时长（ms）
         "min_silence_duration": 480,
     },
@@ -309,7 +369,7 @@ APP_CONFIG = {
         "session_key": "agent:javis:home",
         "session_header": "",  # DeepSeek 不需要，留空关闭
         "system_prompt": (
-            "你是家庭智能助手贾维斯，运行在客厅音箱上。回答必须口语化、简洁，"
+            "你是家庭智能助手小塔，运行在客厅音箱上。回答必须口语化、简洁，"
             "控制在100字以内，不要使用任何 markdown 格式、列表符号和表情。"
         ),
         "temperature": 0.7,

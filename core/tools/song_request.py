@@ -19,6 +19,7 @@ stop 走 speaker.stop_device_audio()（bridge 无原生队列，spec 裁决 3）
 from __future__ import annotations
 
 import asyncio
+import re
 
 import aiohttp
 
@@ -57,7 +58,8 @@ TOOL_SPEC = {
     "function": {
         "name": NAME,
         "description": (
-            "按歌名/歌手在线搜歌并马上在音箱播放（320k 音质）。"
+            "按歌名/歌手/专辑名在线搜歌并马上在音箱播放（320k 音质）。"
+            "query 可以是歌曲名、歌手名或专辑名（按关键词检索，专辑名会返回该专辑曲目）；"
             "action=play 播放 query 指定的歌；action=next/prev 切上一首下一首；"
             "action=stop 停止。仅 action=play 需要 query。"
         ),
@@ -128,7 +130,7 @@ async def _fetch(session: aiohttp.ClientSession, url: str, params: dict):
     """传输层：GET 并解析 JSON body；HTTP 非 200 / 网络 / 解码失败返回 None。"""
     try:
         async with session.get(
-            url, params=params, timeout=aiohttp.ClientTimeout(total=8)
+            url, params=params, timeout=aiohttp.ClientTimeout(total=15)
         ) as resp:
             if resp.status != 200:
                 logger.error(f"[SongRequest] HTTP {resp.status} GET {url}")
@@ -164,6 +166,10 @@ async def _search(session, source: str, query: str) -> list[dict]:
     data = await _api(
         session, f"/{source}/search", {"keywords": query, "limit": _SEARCH_LIMIT}
     )
+    # 实测（2026-10-27 真机）：search 的 data 是 {keywords,page,total,items}，
+    # 不是裸列表；对旧形状保留兼容（契约文档未写明 data 外形）。
+    if isinstance(data, dict):
+        data = data.get("items")
     if not isinstance(data, list):
         return []
     return [item for item in data if isinstance(item, dict)]
@@ -266,6 +272,109 @@ async def _confirm_playing(speaker) -> bool:
     return False
 
 
+# ---- 候选去重（同一首的不同版本不占队列位） ----
+
+# 版本标记：命中即从标题里剥掉，避免「晴天 / 晴天(Live) / 晴天(深情版)」占多个队列位
+_VARIANT_MARKERS = ("live", "伴奏", "remix", "cover", "翻自", "翻唱", "demo")
+# 标题/歌手归一化：去括号备注（全角/半角）与标点空白
+_BRACKET_RE = re.compile(r"[\(（\[【].*?[\)）\]】]")
+_PUNCT_RE = re.compile(r"[\s\-_·.,，。!！?？'\"、]+")
+
+
+def _norm_title(name) -> str:
+    text = _BRACKET_RE.sub("", str(name or "").strip().lower())
+    for marker in _VARIANT_MARKERS:
+        text = text.replace(marker, "")
+    return _PUNCT_RE.sub("", text)
+
+
+def _norm_singer(singer) -> str:
+    return _PUNCT_RE.sub("", str(singer or "").strip().lower())
+
+
+def _item_key(item: dict) -> tuple[str, str]:
+    # 队列位按「归一化歌名」去重：同一首的不同版本/翻唱都算一首
+    # （真机 2026-10-27：按歌名+歌手去重后「下一首」仍在放同一首歌的别的版本）
+    return (_norm_title(item.get("name")), "")
+
+
+def _dedupe_items(items: list[dict]) -> list[dict]:
+    """按归一化歌名去重：保留首现顺序（同曲多版本只留一条）。"""
+    seen: set[tuple[str, str]] = set()
+    kept: list[dict] = []
+    for item in items:
+        key = _item_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(item)
+    return kept
+
+
+def _drop_query_variants(items: list[dict], query: str) -> list[dict]:
+    """把「检索词 + 额外内容」的长标题当作同曲变体丢掉（保留首个最佳匹配）。
+
+    只在按歌名点播时生效（query 归一化后作为前缀）：真机 2026-10-27 出现过
+    「晴天+告白气球 (Live)」这类拼歌/衍生标题占队列位。
+    按歌手/专辑检索时标题不以 query 开头，不受影响。
+    """
+    key = _norm_title(query)
+    if not key:
+        return items
+    kept: list[dict] = []
+    for index, item in enumerate(items):
+        title = _norm_title(item.get("name"))
+        if index and title != key and title.startswith(key):
+            continue
+        kept.append(item)
+    return kept
+
+
+def _queue_for(current: dict, candidates: list[dict]) -> list[dict]:
+    """以「实际播放曲」为基准构建队列：当前曲的衍生/拼接标题不进队列。
+
+    只看检索词不够——LLM 可能传「周杰伦 晴天」，而拼接曲「晴天+告白气球」
+    不以该检索词开头（真机 2026-10-27：下一首仍播同曲拼接版）。
+    """
+    key = _norm_title(current.get("name"))
+    queue = [current]
+    seen = {key}
+    for item in candidates:
+        title = _norm_title(item.get("name"))
+        if not title or title in seen:
+            continue
+        if key and title.startswith(key):
+            continue
+        seen.add(title)
+        queue.append(item)
+    return queue
+
+
+async def _extend_with_singer(session, source: str, items: list[dict]) -> list[dict]:
+    """候选只有同一首歌时，用歌手再搜一轮补出「别的歌」（队列才有意义）。"""
+    singer = str(items[0].get("singer") or "").strip() if items else ""
+    if not singer:
+        return items
+    current_key = _norm_title(items[0].get("name")) if items else ""
+    extra = _dedupe_items(await _search(session, source, singer))
+    if not extra:
+        return items
+    seen = {_item_key(i) for i in items}
+    merged = list(items)
+    for item in extra:
+        # 歌手检索结果里仍可能带当前曲的拼歌/衍生标题（如「晴天+告白气球 (Live)」），
+        # 按当前曲名再过滤一次（真机 2026-10-27：下一首又播同一首的拼接版）
+        title = _norm_title(item.get("name"))
+        if current_key and title != current_key and title.startswith(current_key):
+            continue
+        key = _item_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
 # ---- play 主路径 ----
 
 
@@ -283,20 +392,31 @@ async def _do_play(query: str, requested_source) -> str:
 
     async with aiohttp.ClientSession() as session:
         for source in sources:
-            items = await _search(session, source, query)
+            raw_items = _drop_query_variants(await _search(session, source, query), query)
+            items = _dedupe_items(raw_items)
             if not items:
                 continue
-            for item in items:
+            # 尝试用原始候选（同曲其他版本可作为取链失败的兜底），队列用去重结果
+            for item in raw_items:
                 ok, confirmed = await _start_item(
                     speaker, session, item, _announce_text(item)
                 )
                 if not ok:
                     continue  # 无直链/加密件/设备拒收：候选内继续，不行再落下一源
-                _note_played(item, items)
+                queue = _queue_for(item, items)
+                if len(queue) < 2:
+                    # 队列只剩同一首：按歌手补别的歌后再按当前曲过滤
+                    extra = await _extend_with_singer(session, source, items)
+                    queue = _queue_for(item, list(items) + extra)
+                _note_played(item, queue)
                 logger.info(
                     f"[SongRequest] playing {item.get('name')!r} via {source} "
                     f"(confirmed={confirmed})"
                 )
+                # 工具已自行播报并起播：本轮收尾 TTS 会打断音乐，置免播
+                from core.tools.registry import suppress_reply
+
+                suppress_reply()
                 suffix = (
                     "，已确认出声" if confirmed
                     else "，未确认出声（音源可能不可达，可让我停止）"
@@ -308,18 +428,20 @@ async def _do_play(query: str, requested_source) -> str:
 
 
 def _note_played(item: dict, candidates: list[dict]) -> None:
-    """落队列状态：当前曲 + 历史 + 候选集与下标（内存态，不做持久化）。"""
+    """落队列状态：当前曲 + 历史 + 候选集（同一首只占一个队列位）。"""
+    global _generation, _paused_for_wakeup
+    _generation += 1
+    _paused_for_wakeup = False
+    cancel_pending_resume()  # 新曲已起播：旧的自动续播作废
     state = _state
     if state["current"] is not None:
         state["history"].append(state["current"])
         del state["history"][:-16]  # 防涨：prev 只回看最近若干首
+    key = _norm_title(item.get("name"))
+    queue = [item] + [c for c in candidates if _norm_title(c.get("name")) != key]
     state["current"] = item
-    state["candidates"] = list(candidates)
-    try:
-        state["index"] = state["candidates"].index(item)
-    except ValueError:
-        state["candidates"] = [item]
-        state["index"] = 0
+    state["candidates"] = queue
+    state["index"] = 0
 
 
 # ---- 队列动作（要点 5：内存队列，next/prev 就地切 URL，stop 走设备停播） ----
@@ -336,12 +458,120 @@ def _switch_text(item: dict, direction: str) -> str:
     return text
 
 
+def has_queue() -> bool:
+    """是否有在线点歌队列（原生唤醒的队列控制词路由用，见 config before_wakeup）。"""
+    return _state.get("current") is not None
+
+
+# ---- 唤醒中断：暂停而不是停播（有队列时），处理完自动续播 ----
+# 真机 2026-10-27：原生「小爱同学」唤醒走 wakeup_session.on_interrupt，原策略
+# 是 stop_device_audio（停），导致「调低音量」这类命令必须牺牲当前曲目。
+# 这里改为 pause + 空闲后 auto-resume；新点歌（_note_played）会让旧续播任务作废。
+_RESUME_POLL_S = 1.0
+_RESUME_IDLE_STREAK = 2  # 连续空闲 2 秒才续播，避开自己的 TTS 尾巴
+_RESUME_MAX_S = 30.0
+
+_resume_task = None
+_generation = 0
+_paused_for_wakeup = False
+
+
+def is_paused_for_wakeup() -> bool:
+    """当前暂停是否由唤醒打断引起（用于避免重复 stop 把暂停变成停播）。"""
+    return _paused_for_wakeup
+
+
+def cancel_pending_resume() -> None:
+    """作废待续播任务（新曲已起播 / 会话重置时调用）。"""
+    global _resume_task
+    if _resume_task is not None and not _resume_task.done():
+        _resume_task.cancel()
+    _resume_task = None
+
+
+async def pause_for_wakeup() -> bool:
+    """唤醒打断：在线点歌在播时暂停并排 program 自动续播；返回是否已接管。"""
+    global _resume_task, _paused_for_wakeup
+    if not has_queue():
+        return False
+    if _paused_for_wakeup:
+        return True  # 已是唤醒暂停态：幂等，避免被后续 stop 覆盖
+    speaker = get_speaker()
+    if speaker is None:
+        return False
+    try:
+        if await speaker.get_playing(sync=True) != "playing":
+            return False
+        if not await speaker.set_playing(False):
+            return False
+    except Exception as exc:  # noqa: BLE001 - 接管失败由调用方回落停播
+        logger.warning(f"[SongRequest] pause for wakeup failed: {exc}")
+        return False
+    _paused_for_wakeup = True
+    generation = _generation
+    cancel_pending_resume()
+    _resume_task = asyncio.ensure_future(_auto_resume(generation))
+    logger.info("[SongRequest] paused for wakeup; auto-resume armed")
+    return True
+
+
+async def resume_after_wakeup(reason: str = "command") -> bool:
+    """续播（若仍持有同一首）。幂等：已在播则直接 True。"""
+    global _paused_for_wakeup
+    cancel_pending_resume()
+    if not has_queue():
+        return False
+    speaker = get_speaker()
+    if speaker is None:
+        return False
+    try:
+        if await speaker.get_playing(sync=True) == "playing":
+            _paused_for_wakeup = False
+            return True
+        ok = bool(await speaker.set_playing(True))
+        if ok:
+            _paused_for_wakeup = False
+        logger.info(f"[SongRequest] resumed after wakeup (reason={reason}, ok={ok})")
+        return ok
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[SongRequest] resume after wakeup failed: {exc}")
+        return False
+
+
+async def _auto_resume(generation: int) -> None:
+    """等待设备回到空闲（原生 TTS 播完）后自动续播；有新曲则作废。"""
+    speaker = get_speaker()
+    if speaker is None:
+        return
+    waited = 0.0
+    idle_streak = 0
+    while waited < _RESUME_MAX_S:
+        await asyncio.sleep(_RESUME_POLL_S)
+        waited += _RESUME_POLL_S
+        if generation != _generation:
+            return
+        try:
+            state = await speaker.get_playing(sync=True)
+        except Exception:
+            continue
+        if state == "playing":
+            idle_streak = 0
+            continue
+        idle_streak += 1
+        if idle_streak >= _RESUME_IDLE_STREAK:
+            await resume_after_wakeup("auto")
+            return
+
+
 async def _do_stop() -> str:
     """停止播放：设备侧全链路停 + 清队列（设备可能还在放其它来源，也要能停）。"""
     speaker = get_speaker()
     if speaker is None:
         return "音箱服务还没就绪"
     await speaker.stop_device_audio()
+    cancel_pending_resume()
+    global _paused_for_wakeup
+    _paused_for_wakeup = False
     _state.update({"current": None, "candidates": [], "index": -1, "history": []})
     logger.info("[SongRequest] stopped and queue cleared")
     return "已停止播放，队列已清空"
@@ -406,6 +636,10 @@ async def _do_switch(delta: int) -> str:
         f"[SongRequest] switched {direction} to {item.get('name')!r} "
         f"(confirmed={confirmed})"
     )
+    # 同 play：切歌播报已由工具完成，跳过本轮收尾播报以免打断新曲
+    from core.tools.registry import suppress_reply
+
+    suppress_reply()
     label = "下一首" if direction == "next" else "上一首"
     suffix = "，已确认出声" if confirmed else "，未确认出声（音源可能不可达）"
     return f"已切到{label}《{item.get('name')}》-{item.get('singer')}{suffix}"

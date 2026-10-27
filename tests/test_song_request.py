@@ -85,6 +85,10 @@ class FakeSpeaker:
     async def get_playing(self, sync=False):
         return self.playing_states[-1]
 
+    async def set_playing(self, playing=True):
+        self.playing_states.append("playing" if playing else "paused")
+        return True
+
 
 def _envelope(code: int, data, msg: str = "ok") -> dict:
     return {"code": code, "msg": msg, "data": data, "timestamp": 0}
@@ -295,6 +299,38 @@ class PlayPathTest(unittest.TestCase):
 
     def setUp(self):
         _reset_state()
+        from core.tools.registry import reset_reply_suppression
+
+        reset_reply_suppression()
+
+    def test_play_suppresses_turn_reply(self):
+        # 工具已播报并起播：置「本轮免播」，避免收尾 TTS 顶掉音乐
+        from core.tools.registry import reply_suppressed
+
+        api = _ApiStub([
+            ("search", "kuwo", _envelope(200, [_search_item()])),
+            ("song/url", "kuwo", _envelope(200, {"url": "http://cdn/1.mp3", "ext": "mp3"})),
+        ])
+        speaker = FakeSpeaker()
+        patches = _play_env(api, speaker)
+        with patches[0], patches[1], patches[2], patches[3]:
+            _run(song_request.run({"action": "play", "query": "晴天"}))
+        self.assertTrue(reply_suppressed())
+
+    def test_failed_play_keeps_turn_reply(self):
+        # 未起播就不许吞掉本轮播报（失败原因要让用户听到）
+        from core.tools.registry import reply_suppressed
+
+        api = _ApiStub([
+            ("search", "kuwo", _envelope(200, [])),
+            ("search", "netease", _envelope(200, [])),
+            ("search", "qq", _envelope(200, [])),
+        ])
+        speaker = FakeSpeaker()
+        patches = _play_env(api, speaker)
+        with patches[0], patches[1], patches[2], patches[3]:
+            _run(song_request.run({"action": "play", "query": "乱写的词"}))
+        self.assertFalse(reply_suppressed())
 
     def test_play_happy_path(self):
         api = _ApiStub([
@@ -349,6 +385,106 @@ class PlayPathTest(unittest.TestCase):
             out = _run(song_request.run({"action": "play", "query": "乱写的词"}))
         self.assertIn("没有找到", out)
 
+    def test_search_items_envelope(self):
+        # 真机形状（2026-10-27）：data = {keywords,page,total,items:[...]}，
+        # 不是裸列表——曾因只认 list 导致三源全部「搜不到」
+        page = {"keywords": "晴天", "page": 1, "total": 1, "items": [_search_item()]}
+        api = _ApiStub([
+            ("search", "kuwo", _envelope(200, page)),
+            ("song/url", "kuwo", _envelope(200, {"url": "http://cdn/1.mp3", "ext": "mp3"})),
+        ])
+        speaker = FakeSpeaker()
+        patches = _play_env(api, speaker)
+        with patches[0], patches[1], patches[2], patches[3]:
+            out = _run(song_request.run({"action": "play", "query": "晴天"}))
+
+        self.assertIn("kuwo", out)
+        self.assertIn("已确认出声", out)
+        self.assertEqual(["http://cdn/1.mp3"], [p["url"] for p in speaker.play_calls if p["url"]])
+
+    def test_search_dict_without_items_is_empty(self):
+        api = _ApiStub([
+            ("search", "kuwo", _envelope(200, {"keywords": "x", "total": 0})),
+            ("search", "netease", _envelope(200, {"keywords": "x", "total": 0})),
+            ("search", "qq", _envelope(200, {"keywords": "x", "total": 0})),
+        ])
+        speaker = FakeSpeaker()
+        patches = _play_env(api, speaker)
+        with patches[0], patches[1], patches[2], patches[3]:
+            out = _run(song_request.run({"action": "play", "query": "晴天"}))
+        self.assertIn("没有找到", out)
+        self.assertFalse([p for p in speaker.play_calls if p["url"]])
+
+    def test_versions_collapse_in_queue(self):
+        # 同一首歌的多个版本不得占多个队列位（真机 2026-10-27：下一首播同一首）
+        items = [
+            _search_item(),
+            _search_item(name="晴天 (Live)", sid="2"),
+            _search_item(name="晴天(深情版)", singer="Lucky小爱", sid="3"),
+            _search_item(name="晴天+告白气球 (Live)", sid="4"),
+        ]
+
+        def _by_query(url, params):
+            if params.get("keywords") == "晴天":
+                return _envelope(200, {"keywords": "晴天", "total": 3, "items": items})
+            return _envelope(200, {"keywords": "周杰伦", "total": 1,
+                                   "items": [_search_item(name="七里香", sid="7")]})
+
+        api = _ApiStub([
+            ("search", "kuwo", _by_query),
+            ("song/url", "kuwo", _envelope(200, {"url": "http://cdn/1.mp3", "ext": "mp3"})),
+        ])
+        speaker = FakeSpeaker()
+        patches = _play_env(api, speaker)
+        with patches[0], patches[1], patches[2], patches[3]:
+            _run(song_request.run({"action": "play", "query": "晴天"}))
+
+        # 三个版本合并为一首，再按歌手补出别的歌
+        self.assertEqual(
+            ["晴天", "七里香"],
+            [c["name"] for c in song_request._state["candidates"]],
+        )
+
+    def test_queue_excludes_variants_under_multiword_query(self):
+        # LLM 常传「周杰伦 晴天」：拼接曲不以该检索词开头，仍须按当前曲名剔除
+        items = [_search_item(), _search_item(name="晴天+告白气球 (Live)", sid="2")]
+        api = _ApiStub([
+            ("search", "kuwo", _envelope(200, {"keywords": "x", "items": items})),
+            ("song/url", "kuwo", _envelope(200, {"url": "http://cdn/1.mp3", "ext": "mp3"})),
+        ])
+        speaker = FakeSpeaker()
+        patches = _play_env(api, speaker)
+        with patches[0], patches[1], patches[2], patches[3]:
+            _run(song_request.run({"action": "play", "query": "周杰伦 晴天"}))
+
+        names = [c["name"] for c in song_request._state["candidates"]]
+        self.assertEqual(["晴天"], names)
+
+    def test_single_track_extends_by_singer(self):
+        # 候选只剩同一首时，用歌手再搜一轮补别的歌，队列才有意义
+        def _by_query(url, params):
+            if params.get("keywords") == "晴天":
+                return _envelope(200, {"keywords": "晴天", "total": 1,
+                                       "items": [_search_item()]})
+            return _envelope(200, {"keywords": "周杰伦", "total": 2,
+                                   "items": [
+                                       _search_item(name="七里香", sid="7"),
+                                       # 歌手检索里混进来的拼接版必须再被过滤
+                                       _search_item(name="晴天+告白气球 (Live)", sid="8"),
+                                   ]})
+
+        api = _ApiStub([
+            ("search", "kuwo", _by_query),
+            ("song/url", "kuwo", _envelope(200, {"url": "http://cdn/1.mp3", "ext": "mp3"})),
+        ])
+        speaker = FakeSpeaker()
+        patches = _play_env(api, speaker)
+        with patches[0], patches[1], patches[2], patches[3]:
+            _run(song_request.run({"action": "play", "query": "晴天"}))
+
+        names = [c["name"] for c in song_request._state["candidates"]]
+        self.assertEqual(["晴天", "七里香"], names)
+
     def test_first_source_failure_falls_back(self):
         # kuwo 传输层失败（_api 返回 None）→ netease 接管
         api = _ApiStub([
@@ -362,10 +498,12 @@ class PlayPathTest(unittest.TestCase):
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("netease", out)
         self.assertIn("已确认出声", out)
-        # 回落即停：kuwo 失败一跳 + netease 成功一跳，qq 不再空转
+        # 回落即停：kuwo 失败一跳 + netease 成功（另有一次同源按歌手补歌，见
+        # _extend_with_singer），qq 不得再空转
         search_urls = [u for u, _ in api.calls_for("search")]
-        self.assertEqual(2, len(search_urls))
         self.assertFalse([u for u in search_urls if "qq" in u])
+        self.assertEqual("kuwo", search_urls[0].split("/")[3])
+        self.assertTrue(all("netease" in u for u in search_urls[1:]))
 
     def test_ekey_item_ignored(self):
         # ADR-0002：ekey 加密件不进播放层——视为该源无可用直链
@@ -567,6 +705,12 @@ class QueueTest(unittest.TestCase):
         with patches[0], patches[1], patches[2], patches[3]:
             return _run(song_request.run(args))
 
+    def test_has_queue_reflects_state(self):
+        # 原生唤醒的队列控制词路由依赖该判定（无队列必须放行原生）
+        self.assertFalse(song_request.has_queue())
+        _seed_state(current=_search_item(), candidates=[_search_item()], index=0)
+        self.assertTrue(song_request.has_queue())
+
     def test_stop_calls_device_stop_and_clears_state(self):
         _seed_state(current=_search_item(), index=0, history=[_search_item(sid="9")])
         speaker = FakeSpeaker()
@@ -748,6 +892,52 @@ class ConfigContractTest(unittest.TestCase):
                 sources = [str(s).lower() for s in seg.get("sources", [])]
                 self.assertNotIn("bilibili", sources)  # headers 无通道，必 403
                 self.assertNotIn("migu", sources)  # 默认不收，留配置可加
+
+
+class WakeupPauseTest(unittest.TestCase):
+    """唤醒打断：在线点歌在播时暂停（不停止），空闲后自动续播。"""
+
+    def setUp(self):
+        _reset_state()
+        song_request.cancel_pending_resume()
+        song_request._paused_for_wakeup = False
+
+    def tearDown(self):
+        song_request.cancel_pending_resume()
+        song_request._paused_for_wakeup = False
+
+    def test_pause_without_queue_is_noop(self):
+        speaker = FakeSpeaker(playing="playing")
+        with mock.patch.object(song_request, "get_speaker", return_value=speaker):
+            self.assertFalse(_run(song_request.pause_for_wakeup()))
+        self.assertEqual(["playing"], speaker.playing_states)
+
+    def test_pause_then_resume(self):
+        _seed_state(current=_search_item(), candidates=[_search_item()], index=0)
+        speaker = FakeSpeaker(playing="playing")
+        with mock.patch.object(song_request, "get_speaker", return_value=speaker):
+            self.assertTrue(_run(song_request.pause_for_wakeup()))
+            self.assertEqual("paused", speaker.playing_states[-1])
+            self.assertTrue(_run(song_request.resume_after_wakeup("test")))
+        self.assertEqual("playing", speaker.playing_states[-1])
+
+    def test_pause_is_idempotent_after_wakeup(self):
+        # 原生唤醒已暂停后，KWS/会话重置路径不得再 stop 一次
+        _seed_state(current=_search_item(), candidates=[_search_item()], index=0)
+        speaker = FakeSpeaker(playing="playing")
+        with mock.patch.object(song_request, "get_speaker", return_value=speaker):
+            self.assertTrue(_run(song_request.pause_for_wakeup()))
+            self.assertTrue(_run(song_request.pause_for_wakeup()))
+        self.assertEqual(["playing", "paused"], speaker.playing_states)
+
+    def test_new_play_cancels_pending_resume(self):
+        _seed_state(current=_search_item(), candidates=[_search_item()], index=0)
+        speaker = FakeSpeaker(playing="playing")
+        with mock.patch.object(song_request, "get_speaker", return_value=speaker):
+            _run(song_request.pause_for_wakeup())
+            self.assertIsNotNone(song_request._resume_task)
+            song_request._note_played(_search_item(sid="2"), [_search_item(sid="2")])
+            self.assertIsNone(song_request._resume_task)
 
 
 if __name__ == "__main__":

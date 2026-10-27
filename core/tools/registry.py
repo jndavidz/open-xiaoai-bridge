@@ -55,6 +55,27 @@ def is_external_network_tool(name: object) -> bool:
     return str(name or "") in EXTERNAL_NETWORK_TOOLS
 
 
+# —— 本轮免播（tool takeover of audio）——
+# 工具已自行播报并起播音频（song_request 选曲播报 + 起播）时置位：对话
+# 控制器的收尾 TTS 会打断同一设备上刚开始的音乐，故本轮跳过收尾播报。
+# 单会话串行，模块级布尔足够；每轮开头由对话控制器复位。
+_REPLY_SUPPRESSED = False
+
+
+def suppress_reply() -> None:
+    global _REPLY_SUPPRESSED
+    _REPLY_SUPPRESSED = True
+
+
+def reply_suppressed() -> bool:
+    return _REPLY_SUPPRESSED
+
+
+def reset_reply_suppression() -> None:
+    global _REPLY_SUPPRESSED
+    _REPLY_SUPPRESSED = False
+
+
 def get_all_tools() -> list[dict]:
     """返回聚合后的 OpenAI tools 数组（空数组表示未注册任何工具）。
 
