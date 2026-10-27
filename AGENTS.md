@@ -29,7 +29,7 @@ open-xiaoai-bridge/
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + 只读工具（hass/weather/music/device_status）+ guardrails 四分级护栏 + ir_send C 级工具（P3）
-│   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）
+│   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）+ 文本归一化/别名键 matching（B-31）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
@@ -70,7 +70,6 @@ open-xiaoai-bridge/
 │       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
 │       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段，04 起逐段直喂 TTS）
 │       ├── new_topic.py           # 「换个话题」暗号识别纯函数（B-30 票 02：exact 整句 + fuzzy ≤8 字 dist≤2；长句永不进模糊通道）
-│       ├── matching.py            # 指令归一化 + 别名键解析纯函数（B-31：NFKC/去标点/拉丁小写；别名表空=逐字等价；不含模糊匹配）
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
 ├── native/                        # Rust PyO3 扩展（maturin 编译）
