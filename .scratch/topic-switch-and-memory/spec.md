@@ -1,6 +1,6 @@
 # Spec: bridge 话题切换信令 + 对话记忆文件（对接 aurora 会话复用）
 
-Status: ready-for-agent
+Status: completed（票 01–04 resolved @ bridge 592bc6a/095ea38/f25df6d/2a79ca2 + review 7af0040；2026-10-27 真机语音验收：换话题精确/模糊通道、长句不误拦、记忆注入全部通过。**遗留 follow-up 见 `issues/05-streaming-memory-writeback.md`（流式轮不落记忆，未开工）**；aurora 侧 `X-Session-Action` 服务端效果待 aurora 工具改造落地后补验）
 
 > 跨批台账：本 spec 尚未拆票，作为「待启动」项登记于 `ws: docs/plan/pending-followups.md`（待启动节）；实现状态以本行为准。
 

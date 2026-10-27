@@ -1,5 +1,7 @@
 # Spec: bridge B-31 —— 指令匹配归一化 + 别名键底座（A2 / 评审 W4 机制层）
 
+Status: completed（机制已落地 @ bridge 27ae7fe，随夜间镜像部署。⚠ 两点遗留：`COMMAND_ALIASES` 表仍为空待用户裁决填值；**现网 config.py 没有该表与 `aliases=` 接线**，即数据面未上生产——对账见 `ws: docs/plan/pending-followups.md` §现网/仓库配置漂移）
+
 ## Problem
 
 指令表精确字符串匹配对原生 ASR 转写抖动零防御：「HiFi模式→哈哈模式」、

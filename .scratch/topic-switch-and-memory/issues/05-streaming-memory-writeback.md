@@ -1,0 +1,52 @@
+# 05: 流式路径不落对话记忆 + 断档时间戳不更新（B-30 真机验收暴露）
+
+Type: task
+Status: ready-for-agent
+Blocked by: —（B-30 票 01–04 已 resolved）
+
+## Problem
+
+现网 `openai.stream=true`，纯文本语音回答走 `OpenAIManager.stream_response_segments`，
+其收口（`core/openai.py` finally 块）只调用 `_append_history`，**没有调用
+`_on_response_complete`** —— 而 B-30 票 04 的记忆写入与断档时间戳更新都挂在这个钩子上
+（非流式路径经 `backend_base._run_transport` 才会触发）。
+
+两个后果：
+
+1. **记忆几乎不落盘**：生产配置下只有被降级为非流式的轮次（如带工具轮）才写 JSONL，
+   普通闲聊/问答轮全部丢失 → B-30 的「隔天记得聊过什么」实际不成立。
+2. **断档判定长期为真**：`_last_response_at` 同样只在 `_on_response_complete` 里更新，
+   流式轮不更新 ⇒ 「距上一轮 > gap_minutes」几乎每轮成立 ⇒ 每轮都注入摘要，
+   白烧 token 且可能把旧话题带进新话题。
+
+## Evidence（2026-10-27 真机）
+
+- 10:25–10:27 一段对话：turn=4/7/8 三条流式回复均有完整播报，`data/memory/` 当日文件
+  **只多出 1 行**（10:26:25 的 `weather_get` 工具轮——该轮因探测到 tool_calls 被降级为非流式）。
+- 10:30:55 turn=11 探针句「我今天让你放过什么歌」答出《晴天》/切了两次下一首/《恒星不忘》，
+  这些内容只存在于记忆文件、不在本轮进程历史里 ⇒ **注入路径本身工作正常**，
+  坏的只是写入路径（该轮同样未落新行，行数保持 31）。
+
+## Fix
+
+流式收口对齐非流式口径：完整回复入历史的同时，走同一个 `_on_response_complete`
+（记忆写入 + `_last_response_at` 更新 + 既有用量/埋点口径不变）。要求：
+
+- 只在 `completed and full_text` 分支触发，异常中断的半截回答仍不写（与 `_append_history` 同判据）。
+- 不重复写：非流式路径仍只有 `_run_transport` 一个触发点。
+- 记忆写入继续走 executor（AGENTS.md 异步纪律），失败只记日志不阻断。
+
+## Acceptance
+
+- 新增契约测试（prior art：`tests/test_conversation_memory.py`、`tests/test_llm_stream.py`）：
+  流式轮完成后记忆文件新增一行且 `user` 为原始文本、断档时间戳被刷新；
+  半截中断轮不落盘；非流式轮不重复落盘。
+- 全量基线不回归。
+- 真机复验：`stream=true` 下连说三轮普通问答，`data/memory/` 行数 +3。
+
+## Comments
+
+- 2026-10-27 由 REBUILD §3 / B-30 语音验收窗口发现并立票；与「记忆 `user` 字段含
+  `_with_rule_prompt` 纪律文本」一并处理更省一轮部署（该缺陷见
+  `bridge: .scratch/voiceprint-personal-memory/spec.md` §Further Notes）。
+- ⚠ 改 `core/openai.py` 与声纹 spec 的档案注入点重叠，动前先查是否有他方会话在改同一文件。
