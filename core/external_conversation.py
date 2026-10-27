@@ -316,10 +316,16 @@ class ExternalConversationController:
         #    to the pre-streaming path (stream-off rollback).
         #    「咻」与非流式时序相当：pump 先行调度，提示音播放让出控制权后
         #    请求即上路（等价于旧 _send_and_track 的先发后播）。
-        full_text = self._with_rule_prompt(text)
-        segments = await self._speak_response_segments(
-            full_text, with_send_sound=not self.uses_xiaoai_asr()
-        )
+        #    票 05：发模型的是「原始 + 纪律 prompt」增强文本，落历史/记忆的
+        #    须是原始 ASR 文本——发请求前登记、收尾（含异常）清除。
+        self.backend.note_raw_turn_text(text)
+        try:
+            full_text = self._with_rule_prompt(text)
+            segments = await self._speak_response_segments(
+                full_text, with_send_sound=not self.uses_xiaoai_asr()
+            )
+        finally:
+            self.backend.note_raw_turn_text("")
         if not segments:
             from core.tools.registry import reply_suppressed
 

@@ -57,6 +57,10 @@ class BackendManagerBase:
     _session_key = ""
     _rule_prompt = ""
     _rule_prompt_for_skill = ""
+    # 连续对话控制器登记的本轮原始用户文本（票 05）：请求文本是
+    # 「原始 + 纪律 prompt」增强版，历史/记忆落账须取原始值。skill/send
+    # 直发路径不登记，落账按请求文本原样。
+    _raw_turn_text: str | None = None
     _tts_provider: str | None = None
     _tts_speaker = None
     _session_tts_speakers: dict[str, str] = {}
@@ -229,6 +233,28 @@ class BackendManagerBase:
         return cls._rule_prompt
 
     @classmethod
+    def note_raw_turn_text(cls, text: str) -> None:
+        """连续对话控制器在发请求前登记本轮原始用户文本（票 05）。
+
+        传空串清除登记——请求结束后残留的登记值只靠 startswith 守卫兜底
+        不够（下一轮 skill/send 直发文本若恰好以旧原文为前缀会被截断），
+        控制器在请求收尾 finally 里显式清除。
+        """
+        cls._raw_turn_text = text or None
+
+    @classmethod
+    def _record_user_text(cls, text: str) -> str:
+        """历史/记忆落账用「用户原始文本」（票 05：分离增强文本与原始 ASR 文本）。
+
+        请求文本以登记值为前缀（= 原始 + 纪律 prompt 增强）时回落原始值；
+        其余路径（skill/send 直发、未登记）按请求文本原样落账。
+        """
+        raw = cls._raw_turn_text
+        if raw and text.startswith(raw):
+            return raw
+        return text
+
+    @classmethod
     def current_session_key(cls) -> str:
         """当前会话键（B-28 票 03 公开只读访问器；写入走 set/reset_session_key）。"""
         return cls._session_key
@@ -336,7 +362,10 @@ class BackendManagerBase:
         # TurnTrace（ticket 11）：本地 ASR 链路没有 is_final 事件，在这里惰性
         # 建轮；原生 ASR 链路此时已有当前轮，只补 LLM 起始时间。
         turn_trace.mark_llm_start()
-        logger.user_speech(text, module=f"{cls.LOG_MODULE}({cls._session_key})")
+        logger.user_speech(
+            cls._record_user_text(text),
+            module=f"{cls.LOG_MODULE}({cls._session_key})",
+        )
         asyncio.create_task(cls._run_transport(run_id, text))
         return run_id
 

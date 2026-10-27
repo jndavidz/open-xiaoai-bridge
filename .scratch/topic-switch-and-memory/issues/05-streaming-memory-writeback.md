@@ -1,7 +1,7 @@
 # 05: 流式路径不落对话记忆 + 断档时间戳不更新（B-30 真机验收暴露）
 
 Type: task
-Status: ready-for-agent
+Status: in-progress
 Blocked by: —（B-30 票 01–04 已 resolved）
 
 ## Problem
@@ -50,3 +50,16 @@ Blocked by: —（B-30 票 01–04 已 resolved）
   `_with_rule_prompt` 纪律文本」一并处理更省一轮部署（该缺陷见
   `bridge: .scratch/voiceprint-personal-memory/spec.md` §Further Notes）。
 - ⚠ 改 `core/openai.py` 与声纹 spec 的档案注入点重叠，动前先查是否有他方会话在改同一文件。
+- 2026-10-28 代码落地（两缺陷一并修，同批改 `core/backend_base.py` /
+  `external_conversation.py` / `openai.py`）：
+  ① 流式收口 `finally` 在 `completed and full_text` 分支补调 `_on_response_complete`
+  （记忆写入 + `_last_response_at` 刷新；基类钩子是 no-op，非流式口径不变）；
+  工具回环探测轮 `completed=False` 不触发，写入仍由 `_run_transport` 独占不双写。
+  ② 原始文本分离：`backend_base` 新增 `note_raw_turn_text`（控制器发请求前登记
+  原始 ASR 文本、收尾 finally 清除）+ `_record_user_text`（startswith 守卫回落）；
+  `_append_history` / `_on_response_complete` / `logger.user_speech` 三个落账点
+  统一经它取原始值——skill/send 直发路径未登记，行为逐字不变。
+  契约测试 7 项入 `tests/test_llm_stream.py`（`StreamingMemoryWritebackTest` +
+  `RawTurnTextSeparationTest`）；全量 755 passed / 3 skipped / 9 failed
+  （9 项均为 WSL 缺 numpy 的既有环境失败，经 HEAD worktree 对照判定与本批无关）。
+  **剩余：镜像重建 + recreate + 真机复验（验收 §最后一条）后转 resolved。**

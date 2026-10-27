@@ -368,7 +368,10 @@ class OpenAIManager(BackendManagerBase):
             return
 
         tools = get_all_tools() if cls._tools_active() else None
-        logger.user_speech(text, module=f"{cls.LOG_MODULE}({cls._session_key})")
+        logger.user_speech(
+            cls._record_user_text(text),
+            module=f"{cls.LOG_MODULE}({cls._session_key})",
+        )
         turn_trace.mark_llm_start()
         # 用量记账维度（P2 ticket 03）：流式路径不经过 _run_transport，在此注入。
         turn_trace.note_context(
@@ -483,11 +486,15 @@ class OpenAIManager(BackendManagerBase):
             logger.error(f"[OpenAI] stream request failed: {cls.last_error}")
         finally:
             # 与非流式口径一致：只有完整回复入会话历史——异常中断的半截
-            # 回答不入（turn_trace 照记，便于排障）。
+            # 回答不入（turn_trace 照记，便于排障）。票 05：同一分支补调
+            # _on_response_complete，流式轮与非流式轮走同一收口钩子
+            # （记忆写入 + _last_response_at 刷新）；降级非流式轮经基类
+            # _run_transport 已触发钩子，此处 completed=False 不重复触发。
             full_text = "".join(full_parts)
             if completed and full_text:
                 cls._append_history(history, text, full_text)
                 turn_trace.note_reply_chars(len(full_text))
+                await cls._on_response_complete(text, full_text)
                 logger.ai_response(
                     full_text, module=f"{cls.LOG_MODULE}({cls._session_key})"
                 )
@@ -683,6 +690,8 @@ class OpenAIManager(BackendManagerBase):
         文件 IO 卸载到 executor（AGENTS.md 异步纪律）；写入/清理失败只记日志。
         """
         await super()._on_response_complete(text, response_text)
+        # 票 05：请求文本可能是「原始 + 纪律 prompt」增强版，落记忆取原始值。
+        text = cls._record_user_text(text)
         cfg = cls._memory_config or {}
         if not cfg.get("enabled") or not response_text:
             return
@@ -709,7 +718,8 @@ class OpenAIManager(BackendManagerBase):
             return
         history.extend(
             [
-                {"role": "user", "content": text},
+                # 票 05：历史 user 侧与记忆同口径，落原始文本不落增强版。
+                {"role": "user", "content": cls._record_user_text(text)},
                 {"role": "assistant", "content": response_text},
             ]
         )

@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -505,6 +506,163 @@ class ToolLoopGuardTest(OpenAIStreamTestBase):
         payloads = await self._run_tool_round(with_reasoning=True)
         for payload in payloads:
             self.assertIs(False, payload["stream"])
+
+
+# ---- 票 05：流式轮记忆回写 + 原始文本分离 ------------------------------------
+
+
+class _MemoryContractMixin:
+    """把 _memory_* 指向临时目录并保存/恢复被改的类属性。"""
+
+    def _patch_memory(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self._memory_tmp = tmp
+        saved = {
+            name: getattr(OpenAIManager, name)
+            for name in (
+                "_memory_config",
+                "_memory_dir",
+                "_last_response_at",
+                "_raw_turn_text",
+            )
+        }
+
+        def _restore():
+            for name, value in saved.items():
+                setattr(OpenAIManager, name, value)
+
+        self.addCleanup(_restore)
+        OpenAIManager._memory_config = {"enabled": True, "gap_minutes": 30}
+        OpenAIManager._memory_dir = Path(tmp.name)
+        OpenAIManager._last_response_at = None
+        OpenAIManager._raw_turn_text = None
+
+    def _memory_rows(self) -> list[dict]:
+        files = list(Path(self._memory_tmp.name).glob("*.jsonl"))
+        if not files:
+            return []
+        return [
+            json.loads(line)
+            for line in files[0].read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+
+class StreamingMemoryWritebackTest(OpenAIStreamTestBase, _MemoryContractMixin):
+    """票 05 验收：流式完整轮落记忆 + 断档时间戳刷新；半截/降级轮不落盘。"""
+
+    async def test_completed_stream_writes_memory_with_raw_user_text(self):
+        """完整流式轮：记忆 +1 行、user 为原始文本、_last_response_at 刷新。"""
+        lines = [sse(role="assistant"), sse("北京今天晴。"), SSE_DONE_LINE]
+        self._patch_memory()
+        self._patch_session(FakeResponse(FakeContent(lines)))
+        raw = "北京天气怎么样"
+        augmented = raw + "\n简短口语，不用 markdown。设备动作必须调用工具。"
+        OpenAIManager.note_raw_turn_text(raw)
+        try:
+            with mock.patch("core.openai.get_all_tools", return_value=[]):
+                with mock.patch.object(OpenAIManager, "_stream_enabled", True):
+                    segments = [
+                        seg
+                        async for seg in OpenAIManager.stream_response_segments(augmented)
+                    ]
+        finally:
+            OpenAIManager.note_raw_turn_text("")
+
+        self.assertEqual(["北京今天晴。"], segments)
+        rows = self._memory_rows()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(raw, rows[0]["user"])  # 不落增强文本
+        self.assertEqual("北京今天晴。", rows[0]["assistant"])
+        self.assertIsNotNone(OpenAIManager._last_response_at)
+        # 会话历史同口径：user 侧落原始文本
+        history = OpenAIManager._sessions[self._session_key]
+        self.assertEqual(raw, history[-2]["content"])
+
+    async def test_interrupted_stream_does_not_write_memory(self):
+        """半截中断轮：不落记忆、不刷断档时间戳（与非流式口径一致）。"""
+        lines = [sse("今天天气很好。"), RuntimeError("connection reset")]
+        self._patch_memory()
+        self._patch_session(FakeResponse(FakeContent(lines)))
+        with mock.patch("core.openai.get_all_tools", return_value=[]):
+            with mock.patch.object(OpenAIManager, "_stream_enabled", True):
+                segments = [
+                    seg async for seg in OpenAIManager.stream_response_segments("你好")
+                ]
+        self.assertEqual(["今天天气很好。"], segments)
+        self.assertEqual([], self._memory_rows())
+        self.assertIsNone(OpenAIManager._last_response_at)
+
+    async def test_degraded_tool_probe_round_does_not_write_memory(self):
+        """工具回环轮整轮转非流式：探测请求 completed=False 不触发新钩子，
+        写入由 _run_transport 独占——不会双写。"""
+        probe_lines = [
+            sse(None, tool_calls=[{"id": "c1", "function": {"name": "f", "arguments": ""}}]),
+        ]
+        self._patch_memory()
+        self._patch_session(FakeResponse(FakeContent(probe_lines)))
+        with mock.patch(
+            "core.openai.get_all_tools", return_value=[{"type": "function"}]
+        ):
+            with mock.patch.object(OpenAIManager, "_stream_enabled", True):
+                with mock.patch.object(
+                    OpenAIManager, "send", mock.AsyncMock(return_value="工具轮回复")
+                ):
+                    segments = [
+                        seg
+                        async for seg in OpenAIManager.stream_response_segments("你好")
+                    ]
+        self.assertEqual(["工具轮回复"], segments)
+        self.assertEqual([], self._memory_rows())
+
+    async def test_non_stream_round_writes_memory_once_with_raw_user_text(self):
+        """非流式轮（真实 send 传输核）：记忆恰好一行、user 为原始文本。"""
+        body = {
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": "北京现在晴。"}}
+            ]
+        }
+
+        async def fake_post(url, payload, headers):
+            return body
+
+        self._patch_memory()
+        raw = "原始问题"
+        OpenAIManager.note_raw_turn_text(raw)
+        try:
+            with mock.patch.object(OpenAIManager, "_post_llm", side_effect=fake_post):
+                reply = await OpenAIManager.send(
+                    raw + "\n纪律prompt", wait_response=True
+                )
+        finally:
+            OpenAIManager.note_raw_turn_text("")
+
+        self.assertEqual("北京现在晴。", reply)
+        rows = self._memory_rows()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(raw, rows[0]["user"])
+        self.assertEqual("北京现在晴。", rows[0]["assistant"])
+
+
+class RawTurnTextSeparationTest(unittest.TestCase):
+    """_record_user_text 守卫语义（票 05）：登记前缀内回落原始值，其余原样。"""
+
+    def tearDown(self):
+        OpenAIManager.note_raw_turn_text("")
+
+    def test_registered_prefix_falls_back_to_raw(self):
+        OpenAIManager.note_raw_turn_text("你好")
+        self.assertEqual("你好", OpenAIManager._record_user_text("你好\n纪律prompt"))
+        self.assertEqual("你好", OpenAIManager._record_user_text("你好"))
+
+    def test_unregistered_text_recorded_as_is(self):
+        self.assertEqual("skill直发", OpenAIManager._record_user_text("skill直发"))
+
+    def test_empty_registration_clears(self):
+        OpenAIManager.note_raw_turn_text("你好")
+        OpenAIManager.note_raw_turn_text("")
+        self.assertEqual("任意文本", OpenAIManager._record_user_text("任意文本"))
 
 
 if __name__ == "__main__":
