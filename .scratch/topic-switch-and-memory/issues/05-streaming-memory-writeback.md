@@ -63,3 +63,10 @@ Blocked by: —（B-30 票 01–04 已 resolved）
   `RawTurnTextSeparationTest`）；全量 755 passed / 3 skipped / 9 failed
   （9 项均为 WSL 缺 numpy 的既有环境失败，经 HEAD worktree 对照判定与本批无关）。
   **剩余：镜像重建 + recreate + 真机复验（验收 §最后一条）后转 resolved。**
+- 2026-10-28 部署完成：WSL 路径 A 构建（HEAD `6f5a457`）→ SSH 流式 load（NAS 镜像
+  `bd2301c1`，旧镜像自动摘 tag 可回滚）→ `deploy/config.py` 同步 NAS（备份
+  `config.py.bak-20261028-presync`，`COMMAND_ALIASES` 接线随合流上生产，空表=零行为）
+  → force-recreate。容器内验证：票 05 两处修复符号在镜像（backend_base/openai 各 3 处）、
+  暂停标记修复在镜像；KWS 启动日志 `[score:2.5, threshold:0.3]`；`/api/health` healthy。
+  **剩余仅真机复验：`stream=true` 连说三轮普通问答，`data/memory/` 行数 +3 且 `user`
+  无纪律文本 → 转 resolved。**
