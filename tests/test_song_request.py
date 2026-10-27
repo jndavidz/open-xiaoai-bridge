@@ -939,6 +939,33 @@ class WakeupPauseTest(unittest.TestCase):
             song_request._note_played(_search_item(sid="2"), [_search_item(sid="2")])
             self.assertIsNone(song_request._resume_task)
 
+    def test_auto_resume_timeout_releases_paused_flag(self):
+        # 超时窗口耗尽（设备 30s 内一直没回到空闲）必须释放暂停态：
+        # 否则下一轮唤醒被 is_paused_for_wakeup 短路，暂停接管语义失效
+        _seed_state(current=_search_item(), candidates=[_search_item()], index=0)
+        speaker = FakeSpeaker(playing="playing")
+
+        async def scenario():
+            self.assertTrue(await song_request.pause_for_wakeup())
+            self.assertTrue(song_request._paused_for_wakeup)
+            self.assertIsNotNone(song_request._resume_task)
+            await song_request._resume_task  # MAX_S=0 → 立即超时退出
+
+        with mock.patch.object(song_request, "get_speaker", return_value=speaker):
+            with mock.patch.object(song_request, "_RESUME_MAX_S", 0.0):
+                _run(scenario())
+        self.assertFalse(song_request._paused_for_wakeup)
+
+    def test_auto_resume_without_speaker_releases_paused_flag(self):
+        # 拿不到 speaker 永远续不了播：不得让幂等闸门一直谎报「已接管」
+        async def scenario():
+            song_request._paused_for_wakeup = True
+            await song_request._auto_resume(song_request._generation)
+            self.assertFalse(song_request._paused_for_wakeup)
+
+        with mock.patch.object(song_request, "get_speaker", return_value=None):
+            _run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

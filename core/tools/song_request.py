@@ -540,8 +540,12 @@ async def resume_after_wakeup(reason: str = "command") -> bool:
 
 async def _auto_resume(generation: int) -> None:
     """等待设备回到空闲（原生 TTS 播完）后自动续播；有新曲则作废。"""
+    global _paused_for_wakeup
     speaker = get_speaker()
     if speaker is None:
+        # 拿不到 speaker 就永远续不了播：释放暂停态，别让
+        # pause_for_wakeup 的幂等闸门一直谎报「已接管」。
+        _paused_for_wakeup = False
         return
     waited = 0.0
     idle_streak = 0
@@ -561,6 +565,12 @@ async def _auto_resume(generation: int) -> None:
         if idle_streak >= _RESUME_IDLE_STREAK:
             await resume_after_wakeup("auto")
             return
+    # 超时窗口耗尽（设备一直不在空闲：被外部长播占住 / 一直有人说话）：
+    # 本任务的续播职责到此为止，释放暂停态——否则下一轮唤醒会被
+    # is_paused_for_wakeup 短路成「不暂停不接管」，播放中唤醒的暂停语义失效。
+    if generation == _generation:
+        _paused_for_wakeup = False
+        logger.info("[SongRequest] auto-resume window expired; paused flag released")
 
 
 async def _do_stop() -> str:
