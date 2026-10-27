@@ -16,7 +16,7 @@
 
 ```bash
 cd /mnt/d/_work/repos/open-xiaoai/bridge/deploy
-cp .env.example .env && vim .env      # 必填 5（OPEN_XIAOAI_TOKEN / BRIDGE_API_TOKEN / DEEPSEEK_API_KEY / HA_TOKEN / ADMIN_TOKEN）+ 可选（BRIDGE_API_TOKENS / INJECT_* / HA_BASE_URL / MONITOR_SERVICES / TURN_TRACE_ENABLED），逐项说明见 .env.example
+cp .env.example .env && vim .env      # 必填 4（OPEN_XIAOAI_TOKEN / DEEPSEEK_API_KEY / HA_TOKEN / ADMIN_TOKEN）+ 业务鉴权 BRIDGE_API_TOKENS（具名 label:token 集合，旧单值 BRIDGE_API_TOKEN 已于 2026-10-24 迁移收口）+ 可选（INJECT_* / HA_BASE_URL / MONITOR_SERVICES / TURN_TRACE_ENABLED），逐项说明见 .env.example
 # 下载模型包（VAD+KWS；xiaoai_asr 模式不需要 ASR 大模型，但包内含，体积可控）
 #   URL 见下方"模型包"节，解压到 ./models/
 ```
@@ -101,7 +101,7 @@ reboot
 6. 音箱喊 **「你好助教」** → 进入辅导人设（四年级导师，苏格拉底式引导、不直接报答案）；喊「你好小塔」切回后确认人格无串台
 7. 音箱先喊 **「你好小塔」** 进对话（听到"我在"），再说 **「现在上海天气怎么样」** → 回答来自 weather 工具而非纯生成；bridge 日志见 `tool round: ['weather_get']` 回环。**注意：连说"小塔，…"无效**（唤醒词是完整「你好小塔」，KWS 词表无单独「小塔」）
 8. HA 侧建一个临时脚本调 `POST http://10.10.10.2:9092/api/play/text`（body `{"text":"来自HA的播报"}`）→ 音箱说话
-9. 音箱喊 **「停止聆听」** → 麦克风静音 + KWS 停止分析 + TTS「已停止聆听」（隐私开关，语音通道自关）；`curl -X POST -H "Authorization: Bearer $BRIDGE_API_TOKEN" http://10.10.10.2:9092/api/audio_input`（唯一恢复路径；配置了 `BRIDGE_API_TOKEN` 时必须带 Bearer，否则 401/503）→ mic 恢复 on + KWS 恢复分析，返回 `{"success":true,"mic":"on","listening":true}`
+9. 音箱喊 **「停止聆听」** → 麦克风静音 + KWS 停止分析 + TTS「已停止聆听」（隐私开关，语音通道自关）；`curl -X POST -H "Authorization: Bearer <token>" http://10.10.10.2:9092/api/audio_input`（唯一恢复路径；token 取 `.env` `BRIDGE_API_TOKENS` 任一 label 的 token 值——现网无旧单值 `BRIDGE_API_TOKEN`，不带 Bearer = 401 token_missing）→ mic 恢复 on + KWS 恢复分析，返回 `{"success":true,"mic":"on","listening":true}`（2026-10-28 部署冒烟实测）
 
 ## 5.5 后台面板（:9092/admin）
 

@@ -94,6 +94,11 @@ DOCKER_CONFIG=/tmp/docker-config \
 
 ## 2. 部署 / 重建容器
 
+> **备份惯例**（2026-10-28 定）：改 NAS `config.py` / `data/memory/` / `wecom-assistant/app/` 前
+> 先就地备份，命名 `<原名>.bak-<YYYYMMDD>[-用途]`；**稳定运行约一周后旧备份可删**
+> （当前在册：`config.py.bak-20261027-pre-music` / `-aurora-music` / `-20261028-turntrace` /
+> `-20261028-presync`、`data/memory.bak-20261028`、`wecom-assistant/app/main.py.bak-20261028`）。
+
 ```bash
 # 路径 A 之后（镜像已在 NAS）：直接强制重建
 ssh -o BatchMode=yes zxsadmin@10.10.10.2 \
@@ -119,7 +124,7 @@ cd bridge/deploy && docker compose up -d --force-recreate
 | 2 | T7.3 WOL | **须说"小爱同学，打开电脑"**（xiaoai 截胡）；直接说"打开电脑"无效 | NUC 唤醒（HA `switch.nuc_hifi_wol` turn_on）→ 实测 `HA switch.turn_on OK` ✓ |
 | 3 | T8 工具闭环 | **先喊"你好小塔"进对话再问**；连说"小塔，北京天气怎么样"无效（唤醒词是"你好小塔"） | OpenAI 兼容后端调度 Open-Meteo → 实测 `tool round: ['weather_get']` ✓ |
 | 4 | T7.6 关 | 喊「停止聆听」 | 麦克风停 + TTS「已停止聆听」；日志见 `set_mic(False)` / `disable_listening()` |
-| 5 | T7.6 开（唯一恢复路径） | `curl -X POST http://<nas>:9092/api/audio_input` | `{"success":true,"mic":"on","listening":true}` |
+| 5 | T7.6 开（唯一恢复路径） | `curl -X POST -H "Authorization: Bearer <token>" http://<nas>:9092/api/audio_input`（token 取 `.env` `BRIDGE_API_TOKENS` 任一 label 的 token 值；现网必填 Bearer，缺省 401 token_missing） | `{"success":true,"mic":"on","listening":true}` |
 | 6 | T7.6 静默回退 | 停止聆听后再喊任意词 | 无响应（语音通道已关，符合设计） |
 
 ## 4. 改动类型 → 生效方式速查
