@@ -1000,12 +1000,10 @@ def _cancel_advance() -> None:
 
 
 def _arm_advance() -> None:
-    """专辑队列还有下一首时挂上续播监听（已到末尾则不挂）。"""
+    """专辑队列挂上续播监听（含最后一首：由 `_auto_advance` 记录「专辑播完」）。"""
     global _advance_task
     _cancel_advance()
     if not _state.get("album") or _state.get("current") is None:
-        return
-    if _state["index"] + 1 >= len(_state["candidates"]):
         return
     try:
         loop = asyncio.get_running_loop()

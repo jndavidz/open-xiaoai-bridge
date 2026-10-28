@@ -1177,16 +1177,21 @@ class AutoAdvanceTest(unittest.TestCase):
         self.assertEqual("晴天", song_request._state["current"]["name"])
         self.assertEqual([], [p["url"] for p in speaker.play_calls if p["url"]])
 
-    def test_last_track_does_not_arm(self):
+    def test_last_track_arms_end_watcher_and_stops(self):
+        # 最后一首也要挂监听：播完只记录「专辑播完」并停止，不切歌、不循环
         t1 = self._track(3, "她的睫毛", "a3")
+        speaker = FakeSpeaker()
 
         async def fn():
             song_request._note_played(t1, [], album_mode=True)
-            return song_request._advance_task
+            task = song_request._advance_task
+            self.assertIsNotNone(task, "末尾也要挂监听以记录播完")
+            song_request._state["started_at"] -= t1["duration_s"]
+            await task
 
-        patches = _play_env(self._api(), FakeSpeaker())
-        with patches[0], patches[1], patches[2], patches[3]:
-            self.assertIsNone(_run(fn()))
+        self._run_with_end("finished", {"speaker": speaker, "fn": fn})
+        self.assertEqual("她的睫毛", song_request._state["current"]["name"])
+        self.assertEqual([], [p["url"] for p in speaker.play_calls if p["url"]])
 
     def test_plain_play_does_not_arm(self):
         async def fn():
