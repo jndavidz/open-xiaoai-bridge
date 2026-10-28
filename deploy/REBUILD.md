@@ -97,7 +97,7 @@ DOCKER_CONFIG=/tmp/docker-config \
 > **备份惯例**（2026-10-28 定）：改 NAS `config.py` / `data/memory/` / `wecom-assistant/app/` 前
 > 先就地备份，命名 `<原名>.bak-<YYYYMMDD>[-用途]`；**稳定运行约一周后旧备份可删**
 > （当前在册：`config.py.bak-20261027-pre-music` / `-aurora-music` / `-20261028-turntrace` /
-> `-20261028-presync`、`data/memory.bak-20261028`、`wecom-assistant/app/main.py.bak-20261028`）。
+> `-20261028-presync` / `-20261028-pre-album` / `-20261028-pre-stopword`、`data/memory.bak-20261028`、`wecom-assistant/app/main.py.bak-20261028`）。
 
 ```bash
 # 路径 A 之后（镜像已在 NAS）：直接强制重建
@@ -148,7 +148,7 @@ cd bridge/deploy && docker compose up -d --force-recreate
   **须"小爱同学，打开电脑"**（小爱唤醒才把指令转发 bridge 截胡）；直接说"打开电脑"无小爱前缀→不进 bridge→不唤醒。
 - AI 对话唤醒词 = **「你好小塔」**（2026-10-27 起定稿；session_key 沿用 agent:javis）/ **「你好助教」**（辅导，agent:tutor）。旧词「你好贾维斯 / 你好老师」已退役。
   **连说"小塔，北京天气怎么样"无效**——KWS 词表仅「你好小塔」整词，无单独「小塔」。须分两步：喊「你好小塔」听到"我在"→再说问题。
-- 文档已修正：`README` 第75行错误样例"贾维斯，现在上海天气怎么样"（连说无效）已改为「你好贾维斯」进对话再问；「贾维斯」短唤醒词**保持现状不加**（用户 08-29 决定）。
+- 文档已修正：`README` 旧错误样例「贾维斯，现在上海天气怎么样」（连说无效）已更正为「你好小塔」进对话再问（2026-10-28 复核：现网文档已无「贾维斯」残留；短唤醒词口径见上条「无单独『小塔』」）。
 
 ### 5.3 本轮验收结果（全绿）
 - ① 停止聆听关+TTS ✓　② 静默回退 ✓　③ 恢复 mic:on ✓

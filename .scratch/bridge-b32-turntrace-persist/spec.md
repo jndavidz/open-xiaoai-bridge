@@ -1,6 +1,6 @@
 # Spec: bridge B-32 —— TurnTrace 落盘（A4）
 
-Status: completed（落盘代码已落地 @ bridge 67883a1，随夜间镜像部署。⚠ 现网 `turn_trace.enabled=False` ⇒ `data/turntrace/` 至今未生成，SLO ≥40 轮统计仍无数据源；开启属配置写，见 `ws: docs/plan/pending-followups.md` §3a）
+Status: completed（落盘代码已落地 @ bridge 67883a1。✅ 2026-10-28 复核：`deploy/config.py` 的 `turn_trace.enabled/persist` 均已为 True（dev 基线仍 False，分侧把守）⇒ 数据源已就绪，`data/turntrace/` 待自然积累 ≥40 轮后按 SLO 票口径复核，见 `ws: docs/plan/pending-followups.md` §4（自动到期观察项））
 
 来源：长时间工作计划 A 区第 4 项（pending-followups 3a 的前置改进）。
 

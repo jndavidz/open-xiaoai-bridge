@@ -1,6 +1,6 @@
 # Spec: bridge B-31 —— 指令匹配归一化 + 别名键底座（A2 / 评审 W4 机制层）
 
-Status: completed（机制已落地 @ bridge 27ae7fe，随夜间镜像部署。⚠ 两点遗留：`COMMAND_ALIASES` 表仍为空待用户裁决填值；**现网 config.py 没有该表与 `aliases=` 接线**，即数据面未上生产——对账见 `ws: docs/plan/pending-followups.md` §现网/仓库配置漂移）
+Status: completed（机制已落地 @ bridge 27ae7fe；**数据面已上生产**——`deploy/config.py` 已建 `COMMAND_ALIASES` 并接线 `aliases=`，表空 = 逐字等价，待用户裁决填值，见 `ws: docs/plan/pending-followups.md` §1.4）
 
 ## Problem
 
@@ -14,7 +14,7 @@ Status: completed（机制已落地 @ bridge 27ae7fe，随夜间镜像部署。�
 1. `core/commands/matching.py` 纯函数：`normalize_command_text`
    （NFKC 全角→半角 + 去空白标点 + 拉丁小写）与 `resolve_command_key`
    （归一化精确 → 别名映射）。**不含模糊/拼音匹配**——「宁可少截不可错吞」，
-   拼音级容错的放行范围属用户裁决（ws: pending-followups §5），只留机制。
+   拼音级容错的放行范围属用户裁决（`ws: docs/plan/pending-followups.md` §1.4），只留机制。
 2. `route_before_wakeup` 新增可选 `aliases` 参数：两张指令表查找改经
    `resolve_command_key`；`停止聆听` 同口径归一化（标点抖动免疫）。
    别名表缺省/空 = 现状逐字等价（守门测试钉住）。
