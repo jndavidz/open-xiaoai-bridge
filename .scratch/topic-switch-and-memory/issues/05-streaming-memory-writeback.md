@@ -1,7 +1,7 @@
 # 05: 流式路径不落对话记忆 + 断档时间戳不更新（B-30 真机验收暴露）
 
 Type: task
-Status: in-progress
+Status: resolved
 Blocked by: —（B-30 票 01–04 已 resolved）
 
 ## Problem
@@ -70,3 +70,9 @@ Blocked by: —（B-30 票 01–04 已 resolved）
   暂停标记修复在镜像；KWS 启动日志 `[score:2.5, threshold:0.3]`；`/api/health` healthy。
   **剩余仅真机复验：`stream=true` 连说三轮普通问答，`data/memory/` 行数 +3 且 `user`
   无纪律文本 → 转 resolved。**
+- 2026-10-28 真机复验通过（收口）：`data/memory/agent_javis_home.20261028.jsonl` 当日
+  **53 行**（`15:10` 仍在追加），抽查首行 `user` 为原话「播放整张叶惠美的专辑」、
+  `assistant` 为回复正文——**无纪律 prompt 回灌**；`stream=true` 为常态，工具轮与普通轮
+  均在写入。验收两条中「turntrace 出现当日 JSONL」当场暴露新 bug（persist 落 `/app/core/data`
+  镜像层），已由 `bridge 48c5372` 修正为 `/app/data/turntrace` 并把当日 24 行抢救回卷
+  （见 B-32 行 / 台账 §5）。本票转 **resolved**。
