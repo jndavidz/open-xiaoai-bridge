@@ -116,7 +116,9 @@ class ExternalConversationController:
 
     @property
     def exit_keywords(self) -> list[str]:
-        return self._cfg("exit_keywords", ["退出", "停止", "再见"])
+        # 默认不含「停止」：它是媒体控制词（song_request action=stop），
+        # 不能先被退出会话截胡（真机 2026-10-28）。
+        return self._cfg("exit_keywords", ["退出", "再见"])
 
     @property
     def timeout(self) -> int:

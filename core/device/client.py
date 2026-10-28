@@ -37,6 +37,8 @@ PLAYER_GET_CONTEXT = "ubus call mediaplayer player_get_context"
 PLAYBACK_STATUS = "mphelper mute_stat"
 PLAYBACK_PAUSE = "mphelper pause"
 PLAYBACK_RESUME = "mphelper play"
+PLAYBACK_NEXT = "mphelper iot_next"
+PLAYBACK_PREV = "mphelper iot_prev"
 STOP_AUDIO = "killall tts_play.sh miplayer 2>/dev/null; mphelper pause"
 
 SYSTEM_INFO = "ubus call system info"
@@ -681,6 +683,14 @@ class DeviceCapabilities:
     async def playback_resume(self) -> CapabilityResult:
         spec = resolve_capability("playback_resume")
         return await self._invoke(spec, PLAYBACK_RESUME)
+
+    async def playback_next(self) -> CapabilityResult:
+        spec = resolve_capability("playback_next")
+        return await self._invoke(spec, PLAYBACK_NEXT)
+
+    async def playback_prev(self) -> CapabilityResult:
+        spec = resolve_capability("playback_prev")
+        return await self._invoke(spec, PLAYBACK_PREV)
 
     async def stop_audio(self) -> CapabilityResult:
         spec = resolve_capability("stop_audio")

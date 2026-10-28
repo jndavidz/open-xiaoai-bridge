@@ -1290,6 +1290,29 @@ class APIServer:
         except Exception as e:  # noqa: BLE001 - 健康接口不得因单段失败整体 500
             logger.debug(f"[APIServer] health audio snapshot failed: {e}")
 
+        # KWS 可听性（2026-10-28）：唤醒没反应时先分清「闸门/暂停卡住」还是
+        # 「音频被音乐盖住」——此前只有命中日志，哑了没有任何观测面。
+        try:
+            kws = get_kws()
+            if kws is not None:
+                gate_count, gate_reasons = kws.gate_status()
+                audio["kws"] = {
+                    "paused": bool(getattr(kws, "paused", False)),
+                    "listen_disabled": bool(getattr(kws, "listen_disabled", False)),
+                    "gate_count": int(gate_count),
+                    "gate_reasons": list(gate_reasons),
+                }
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[APIServer] health kws snapshot failed: {e}")
+
+        # 点歌队列运行态（只给计数/标志，不给歌名文本）
+        try:
+            from core.tools import song_request
+
+            audio["song_queue"] = song_request.queue_health()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[APIServer] health song queue snapshot failed: {e}")
+
         playback: dict = {}
         try:
             from core.device import get_playback_events

@@ -245,6 +245,8 @@ APP_CONFIG = {
         # 排除 bilibili（headers 无通道必 403）与 migu（copyrightId 回传链
         # 复杂化 spike，需要时在此加）。
         "sources": ["kuwo", "netease", "qq"],
+        # 专辑端点的源策略（action=album）：目前仅 netease 接入，其余源 501。
+        "album_sources": ["netease"],
         # 音质固定 320k（消费铁律 ≤320k mp3，代码常量 _QUALITY 不可配）
     },
     "wakeup": {
@@ -386,7 +388,10 @@ APP_CONFIG = {
         "tts_speed": 1.0,
         "tts_speaker": "xiaoai",  # 小爱原生 TTS，零配置
         "session_tts_speakers": {},
-        "exit_keywords": ["退出", "停止", "再见", "退下", "下去吧"],
+        # 退出连续对话的关键词。⚠ 不含「停止」：停止是媒体控制词，用户说
+        # 「停止/停止播放」是要关音乐，不是要退对话（真机 2026-10-28：命中退出
+        # 关键词退出会话后，续播又把音乐放回来了，体感「停不掉」）。
+        "exit_keywords": ["退出", "再见", "退下", "下去吧"],
         # 工具层（Agent 1.5 / 阶段 1.5）：function calling 回环。默认开启；
         # 仅 chat_completions 风格（DeepSeek）注入 tools。只读工具见 core/tools/。
         "tool_calls_enabled": True,

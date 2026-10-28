@@ -505,6 +505,44 @@ CAPABILITIES: dict[str, CapabilitySpec] = {
         description="继续播放（mphelper play）",
         notes=("播放启动有延迟，不做立即回读；状态由 playback_status 轮询",),
     ),
+    # next/prev 用 iot_ 变体：原厂 next/prev 会先播 key_prev_next.opus 提示音，
+    # 两段 JSON 混在 stdout 会让 JSON_CODE 判据失效；iot_ 变体无提示音、无埋点，
+    # stdout 只剩 player_play_operation 的 JSON。脚本原文见
+    # ws: docs/devices/lx06/mphelper-playback-cli.md §1。
+    "playback_next": CapabilitySpec(
+        name="playback_next",
+        method="mphelper iot_next",
+        params=(),
+        success=SuccessCriterion.JSON_CODE,
+        group=CapabilityGroup.ACTION,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=False,
+        description="切到下一首（设备 mediaplayer 队列，mphelper iot_next）",
+        notes=(
+            "只对设备自有播放队列有效（原生小爱/媒体播放器）；DLNA 投送中队列归投送方，"
+            "此时 next 通常无效且报文无法区分",
+            "⚠ 真机未验（2026-10-28 仅脚本原文+脚本层判据核对）——首个验证窗口确认 "
+            "code:0 与曲目实际切换，失败/无队列形态一并记录",
+        ),
+    ),
+    "playback_prev": CapabilitySpec(
+        name="playback_prev",
+        method="mphelper iot_prev",
+        params=(),
+        success=SuccessCriterion.JSON_CODE,
+        group=CapabilityGroup.ACTION,
+        readback=None,
+        timeout_ms=6000,
+        blocking=False,
+        idempotent=False,
+        description="切到上一首（设备 mediaplayer 队列，mphelper iot_prev）",
+        notes=(
+            "与 playback_next 同口径：仅设备自有队列有效，DLNA 投送中无效",
+            "⚠ 真机未验（2026-10-28）——首个验证窗口与 playback_next 一并确认",
+        ),
+    ),
     "stop_audio": CapabilitySpec(
         name="stop_audio",
         method="shell:killall tts_play.sh miplayer + mphelper pause",

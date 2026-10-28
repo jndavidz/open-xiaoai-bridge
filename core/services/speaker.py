@@ -165,6 +165,14 @@ class SpeakerManager:
             res = await self.device.pause()
         return bool(res.ok)
 
+    async def next_track(self) -> bool:
+        """切到设备自身播放队列的下一首（桥自持队列由 song_request 处理）。"""
+        return bool((await self.device.playback_next()).ok)
+
+    async def prev_track(self) -> bool:
+        """切到设备自身播放队列的上一首。"""
+        return bool((await self.device.playback_prev()).ok)
+
     async def play(
         self,
         text=None,

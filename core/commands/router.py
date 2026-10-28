@@ -99,7 +99,11 @@ async def route_before_wakeup(
                         wait=False,  # play(text) 阻塞式内含等完成
                         gate_seconds=30,
                     ):
-                        await speaker.play(text=intro)
+                        # 开场白完成等待（事件面）硬上限 3s：默认按文本估算的最小预算
+                        # 是 8s，而事件流冷启动/退避窗内观测不到播放事件时会白等满
+                        # 8s——真机 2026-10-28 05:11:51→05:12:00「唤醒到聆听」卡 8 秒。
+                        # 事件正常时播放一结束即返回（实测 ~1.5s），不受此上限影响。
+                        await speaker.play(text=intro, timeout=3000)
                 return backend  # 进入连续对话
         return None
 

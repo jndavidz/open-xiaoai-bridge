@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-def _load_event_manager(make_hook):
+def _load_event_manager(make_hook, order=None):
     """以桩依赖加载 core/wakeup_session.py，返回 (EventManager 类, fakes)。
 
     make_hook(rejected_cls) → 异步钩子；rejected_cls 是本次桩内的
@@ -30,6 +30,7 @@ def _load_event_manager(make_hook):
         for n in [
             "core.ref", "core.backend_registry", "core.services.protocols.typing",
             "core.services.speaker", "core.utils.config", "core.utils.logger",
+            "core.tools", "core.tools.song_request",
         ]
     }
     for name in saved:
@@ -71,6 +72,26 @@ def _load_event_manager(make_hook):
     log = _Log()
     sys.modules["core.utils.logger"].logger = log
 
+    # 在线点歌桩：唤醒必须在 before_wakeup（开场白会顶掉当前曲）之前暂停播放
+    song_calls: list[str] = order if order is not None else []
+
+    async def _pause_for_wakeup():
+        song_calls.append("pause_for_wakeup")
+        return False
+
+    async def _resume_after_wakeup(reason="command"):
+        song_calls.append("resume_after_wakeup")
+        return False
+
+    song_stub = types.SimpleNamespace(
+        cancel_pending_resume=lambda: song_calls.append("cancel_resume"),
+        pause_for_wakeup=_pause_for_wakeup,
+        resume_after_wakeup=_resume_after_wakeup,
+        is_paused_for_wakeup=lambda: False,
+    )
+    sys.modules["core.tools"].song_request = song_stub
+    sys.modules["core.tools.song_request"] = song_stub
+
     class _Config:
         def get_app_config(self, path):
             assert path == "wakeup.before_wakeup"
@@ -98,6 +119,8 @@ def _load_event_manager(make_hook):
         "routed": routed,
         "log": log,
         "rejected_cls": rejected_cls,
+        "song_calls": song_calls,
+        "song_stub": song_stub,
     }
 
 
@@ -148,6 +171,45 @@ class WakeupHookErrorHandlingTest(unittest.TestCase):
 
         self.assertEqual(fakes["routed"], [], "None 不路由（现行为不变）")
         self.assertEqual(fakes["kws_calls"], ["pause", "resume"])
+
+    def test_song_paused_before_intro_hook(self):
+        """开场白会顶掉当前曲 ⇒ 必须在 before_wakeup 之前暂停点歌（才续得回来）。
+
+        钩子返回 None 即可验证先后顺序（生产里开场白就在这个钩子里播）。
+        """
+        order: list[str] = []
+
+        def make_hook(rejected):
+            async def hook(speaker, text, source, app):
+                order.append("hook")
+                return None
+            return hook
+
+        EM, fakes = _load_event_manager(make_hook, order=order)
+        # 桩在加载期结束后被还原；wakeup() 里是运行期 import，故调用前重新注入
+        prev_tools = sys.modules.get("core.tools")
+        prev_song = sys.modules.get("core.tools.song_request")
+        tools_mod = types.ModuleType("core.tools")
+        tools_mod.song_request = fakes["song_stub"]
+        sys.modules["core.tools"] = tools_mod
+        sys.modules["core.tools.song_request"] = fakes["song_stub"]
+        try:
+            asyncio.run(EM.wakeup("你好小塔", "kws"))
+        finally:
+            for key, prev in (
+                ("core.tools", prev_tools),
+                ("core.tools.song_request", prev_song),
+            ):
+                if prev is None:
+                    sys.modules.pop(key, None)
+                else:
+                    sys.modules[key] = prev
+
+        self.assertEqual(
+            ["cancel_resume", "pause_for_wakeup", "hook"],
+            order,
+            "暂停必须发生在 before_wakeup（开场白）之前",
+        )
 
 
 if __name__ == "__main__":

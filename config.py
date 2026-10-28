@@ -230,6 +230,8 @@ APP_CONFIG = {
         # 排除 bilibili（headers 无通道必 403）与 migu（copyrightId 回传链
         # 复杂化 spike，需要时在此加）。
         "sources": ["kuwo", "netease", "qq"],
+        # 专辑端点的源策略（action=album）：目前仅 netease 接入，其余源 501。
+        "album_sources": ["netease"],
         # 音质固定 320k（消费铁律 ≤320k mp3，代码常量 _QUALITY 不可配）
     },
     "wakeup": {
@@ -435,7 +437,7 @@ APP_CONFIG = {
         # },
         "agent_tts_speakers": {},
         "response_timeout": 120,  # 等待 OpenClaw agent 响应的超时时间（秒）
-        "exit_keywords": ["退出", "停止", "再见"],  # 退出连续对话的关键词
+        "exit_keywords": ["退出", "再见"],  # 退出连续对话的关键词（不含「停止」：属媒体控制词）
         # rule_prompt: 用于「自动播放」和「连续对话」场景
         #   - app.send_to("openclaw", text, and_play=True) 会自动追加
         #   - OpenClawConversationController 会自动追加
@@ -471,7 +473,7 @@ APP_CONFIG = {
         "tts_speaker": "xiaoai",
         # "tts_provider": "doubao",  # 可选 xiaoai/doubao/openai/mlx_audio；不填保持旧逻辑
         "session_tts_speakers": {},
-        "exit_keywords": ["退出", "停止", "再见"],
+        "exit_keywords": ["退出", "再见"],
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字。字数控制在300字以内",
         # 「换个话题」暗号（spec topic-switch-and-memory）：exact=整句精确命中；
@@ -524,7 +526,7 @@ APP_CONFIG = {
         "tts_speaker": "xiaoai",
         # "tts_provider": "doubao",  # 可选 xiaoai/doubao/openai/mlx_audio；不填保持旧逻辑
         "session_tts_speakers": {},
-        "exit_keywords": ["退出", "停止", "再见"],
+        "exit_keywords": ["退出", "再见"],
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送给 QwenPaw 的，他看不到你回复的文字。字数控制在300字以内",
     },

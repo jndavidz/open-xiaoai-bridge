@@ -49,6 +49,7 @@ class FakeSpeaker:
 
     def __init__(self, announce_error: Exception | None = None):
         self.calls: list[tuple] = []
+        self.play_kwargs: list[dict] = []
         self.mic = True
         self.announce_error = announce_error
 
@@ -60,6 +61,7 @@ class FakeSpeaker:
 
     async def play(self, text="", **kwargs):
         self.calls.append(("play", text))
+        self.play_kwargs.append(dict(kwargs))
 
     async def set_mic(self, enabled):
         self.mic = enabled
@@ -325,6 +327,9 @@ class RouterContractTest(unittest.TestCase):
             ["announce:open", "play", "announce:close"],
             "intro 经 announce 双闸门",
         )
+        # 开场白完成等待必须有硬上限：默认按文本估算的最小预算是 8s，事件面冷启动
+        # 时观测不到播放事件 ⇒ 白等 8s（真机 2026-10-28 唤醒到聆听卡 8 秒）
+        self.assertEqual(3000, self.speaker.play_kwargs[-1].get("timeout"))
 
     def test_persona_intro_rejected_by_wordlist_propagates(self) -> None:
         """B-28 票 01：intro 命中词表 → announce 默认拒绝上抛（由 wakeup 收口为可见日志），

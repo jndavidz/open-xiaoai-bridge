@@ -215,6 +215,20 @@ class WakeupSessionManager:
 
         if kws:
             kws.pause()
+
+        # 唤醒先暂停在线点歌：人设开场白/对话 TTS 走同一条媒体播放通道，会直接
+        # 把当前曲顶掉（真机 2026-10-28：KWS 唤醒后「继续播放」只能报「没有可
+        # 续播的内容」，因为曲已被开场白杀掉了）。原生唤醒在 on_interrupt 里
+        # 已暂停过，这里幂等。
+        from core.tools import song_request
+
+        paused_for_wakeup = False
+        try:
+            song_request.cancel_pending_resume()
+            paused_for_wakeup = await song_request.pause_for_wakeup()
+        except Exception as exc:  # noqa: BLE001 - 暂停失败不许阻断唤醒
+            logger.warning(f"[Wakeup] pause song before wakeup failed: {exc}")
+
         # P0 ticket 03：before_wakeup 里的播报经 announce 后有了确定性异常路径
         # （AnnounceRejected）；resume 必须放 finally，否则 KWS 会话暂停态
         # （内存标志，无看门狗）会保持到重启，音箱再也听不到唤醒词。
@@ -251,10 +265,10 @@ class WakeupSessionManager:
                 kws.resume()
         logger.info(f"[Wakeup] before_wakeup returned: {should_wakeup}")
         if should_wakeup is not None:
-            # 要进连续对话：撤掉「空闲即续播」的自动任务，改由会话结束时续播
-            from core.tools import song_request
-
-            song_request.cancel_pending_resume()
+            # 要进连续对话：暂停时挂上的「空闲即续播」任务必须撤掉，改由会话结束
+            # 统一续播（否则对话途中设备一空闲就把音乐放回来）。
+            if paused_for_wakeup:
+                song_request.cancel_pending_resume()
             await self.reset_all_sessions()
 
         if should_wakeup == "xiaozhi":

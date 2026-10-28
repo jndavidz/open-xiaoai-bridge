@@ -81,6 +81,8 @@ class RegistryTest(_Base):
             "play_url",
             "play_file",
             "pause",
+            "playback_next",
+            "playback_prev",
             "tts_synthesize",
             "service_status",
             "system_memory",
@@ -297,6 +299,20 @@ class PlaybackCapabilityTest(_Base):
         res = _run(self.caps.pause())
         self.assertEqual(self.device.calls[0][0], "mphelper pause")
         self.assertTrue(res.ok)
+
+    def test_next_prev_use_iot_variants(self) -> None:
+        # iot_ 变体无提示音：stdout 只剩操作 JSON，JSON_CODE 判据才成立
+        self.device.on("mphelper iot_next", '{"code": 0}')
+        res = _run(self.caps.playback_next())
+        self.assertEqual(self.device.calls[0][0], "mphelper iot_next")
+        self.assertTrue(res.ok)
+
+        self.device.reset()
+        self.device.on("mphelper iot_prev", '{"code": 1}')
+        res = _run(self.caps.playback_prev())
+        self.assertEqual(self.device.calls[0][0], "mphelper iot_prev")
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error, "code_nonzero")
 
     def test_play_file_uses_miplayer_and_exit_code(self) -> None:
         self.device.on("miplayer -f", "", exit_code=0)
