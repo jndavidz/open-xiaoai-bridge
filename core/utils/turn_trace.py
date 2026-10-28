@@ -141,7 +141,10 @@ def trace_enabled(config_reader: Callable[[], Any] | None = None) -> bool:
 # ---- 落盘面（B-32/A4：每轮 summary JSONL 持久化，容器重启不再丢统计口径）----
 
 _PERSIST_LOCK = threading.Lock()
-_PERSIST_DIR = Path(__file__).resolve().parents[1] / "data" / "turntrace"
+# parents[2] = 仓库/镜像根（/app），与 usage_ledger 同口径，落在 bind-mount 的
+# /app/data 下；用 parents[1] 会写进 /app/core/data（镜像层，recreate 即丢，
+# 真机 2026-10-28 审计发现 B-32 的持久化实际没达成）。
+_PERSIST_DIR = Path(__file__).resolve().parents[2] / "data" / "turntrace"
 
 
 def _read_config_persist() -> bool:

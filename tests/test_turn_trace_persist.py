@@ -15,6 +15,22 @@ if str(ROOT) not in sys.path:
 from core.utils import turn_trace  # noqa: E402
 
 
+class TurnTracePersistDirTest(unittest.TestCase):
+    """落盘目录必须与 usage_ledger 同口径：仓库根 data/（bind-mount），不是 core/。"""
+
+    def test_persist_dir_is_repo_data_not_core(self):
+        saved = turn_trace._PERSIST_DIR
+        try:
+            import importlib
+
+            module = importlib.reload(turn_trace)
+            path = module._PERSIST_DIR
+        finally:
+            turn_trace._PERSIST_DIR = saved
+        self.assertEqual(ROOT / "data" / "turntrace", path)
+        self.assertNotIn("core", path.parts)
+
+
 class TurnTracePersistTest(unittest.TestCase):
     def setUp(self):
         import tempfile
