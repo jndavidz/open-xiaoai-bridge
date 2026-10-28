@@ -516,6 +516,23 @@ def _album_announce_text(album_name: str, item: dict) -> str:
     return f"为你播放专辑《{album_name}》，从《{track}》开始"
 
 
+# 专辑名与检索词的匹配门槛：ASR 把专辑名听错时，/album 会返回一张毫不相干的
+# 专辑并直接开播（真机 2026-10-28：「蛋黄涅…小情歌」放出了 29 首的日文 OST）。
+_ALBUM_MATCH_RATIO = 0.5
+
+
+def _album_matches(query: str, album_name: str) -> bool:
+    """检索词与返回专辑名是否足够像（防「报错名字却放别的专辑」）。"""
+    q = _PUNCT_RE.sub("", _BRACKET_RE.sub("", str(query or "").lower()))
+    a = _PUNCT_RE.sub("", _BRACKET_RE.sub("", str(album_name or "").lower()))
+    if not q or not a:
+        return False
+    if q in a or a in q:
+        return True
+    overlap = len(set(a) & set(q))
+    return overlap / len(set(a)) >= _ALBUM_MATCH_RATIO
+
+
 async def _do_album(query: str, requested_source, artist: str) -> str:
     """专辑连播：一次 /album 调用拿官方曲序，队列按 track_no 顺序向后铺。"""
     sources = _album_sources(requested_source)
@@ -535,6 +552,20 @@ async def _do_album(query: str, requested_source, artist: str) -> str:
                 continue
             albums, items = found
             album_name = _album_name(items, albums, query)
+            if not _album_matches(query, album_name):
+                # 检索词与命中专辑对不上（多为 ASR 听错）：不播，回报候选专辑
+                names = [
+                    str(a.get("name") or "").strip()
+                    for a in albums
+                    if isinstance(a, dict) and str(a.get("name") or "").strip()
+                ][:3]
+                logger.info(
+                    f"[SongRequest] album mismatch: query={query!r} "
+                    f"best={album_name!r} candidates={names}"
+                )
+                hint = "、".join(f"《{n}》" for n in names)
+                tail = f"，候选有{hint}" if hint else ""
+                return f"没找到与《{query}》匹配的专辑{tail}，换个说法或加上歌手名试试"
             # 逐曲尝试：某首取不到直链就顺延到下一首，队列仍按官方曲序
             for position, item in enumerate(items):
                 ok, confirmed, played = await _start_item(

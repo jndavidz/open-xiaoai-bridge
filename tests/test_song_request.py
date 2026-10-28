@@ -1004,6 +1004,36 @@ class AlbumPathTest(unittest.TestCase):
         self.assertIn("没有找到能播放的专辑", out)
         self.assertFalse([p for p in speaker.play_calls if p["url"]])
 
+    def test_album_mismatch_refuses_and_lists_candidates(self):
+        # 真机 2026-10-28：「蛋黄涅…小情歌」放出了毫不相干的 29 首日文 OST
+        items = [self._track(1, "某曲")]
+        items[0]["album"] = "猫小九之守护校园"
+        speaker = FakeSpeaker()
+        out = self._act(
+            self._album_env(
+                items,
+                albums=[
+                    {"id": "1", "name": "猫小九之守护校园", "artist": "某"},
+                    {"id": "2", "name": "校园夏日小情歌", "artist": "蛋黄捏"},
+                ],
+            ),
+            speaker,
+            {"action": "album", "query": "蛋黄涅夏日校园夏日小情歌"},
+        )
+        self.assertIn("没找到与", out)
+        self.assertIn("校园夏日小情歌", out)  # 候选回给用户/模型重试
+        self.assertFalse([p for p in speaker.play_calls if p["url"]])
+
+    def test_album_fuzzy_name_still_matches(self):
+        # ASR 顺序抖动（夏日校园夏日小情歌）仍应命中《校园夏日小情歌》
+        items = [self._track(1, "校园夏日小情歌")]
+        items[0]["album"] = "校园夏日小情歌"
+        speaker = FakeSpeaker()
+        out = self._act(
+            self._album_env(items), speaker, {"action": "album", "query": "夏日校园夏日小情歌"}
+        )
+        self.assertIn("专辑《校园夏日小情歌》", out)
+
     def test_album_announce_uses_actual_album_name(self):
         # 播报专辑名以曲目 album 字段为准（候选列表可能混入同名异手专辑）
         items = [self._track(1, "以父之名")]
