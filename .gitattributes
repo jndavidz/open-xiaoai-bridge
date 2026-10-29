@@ -1,0 +1,38 @@
+# 行尾与二进制规则（2026-10-29 补）
+#
+# 本仓是 open-xiaoai-bridge（Python 为主 + Rust 扩展 maturin 构建）。
+# 补此文件前仓内无 .gitattributes，全部文件走 core.autocrlf，
+# 曾导致 Windows 侧检出为 CRLF、WSL 侧（autocrlf 未设）整片显示幻影 modified。
+
+# ---- 源码/文档/配置：LF ----
+*.py    text eol=lf
+*.rs    text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.lock  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+.gitignore      text eol=lf
+LICENSE         text eol=lf
+*.example text eol=lf
+
+# ---- Windows 侧执行：必须 CRLF ----
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# ---- 二进制资源 ----
+*.mp3   binary
+*.wav   binary
+*.onnx  binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.gz    binary
+*.zip   binary
