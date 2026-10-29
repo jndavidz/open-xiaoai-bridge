@@ -193,6 +193,12 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 ## 8. 安全
 
 - `.env` 不入库；`OPEN_XIAOAI_TOKEN` 已启用（client 连接需携带同值 Bearer）；**未配置该变量时服务端拒绝所有 client 连接（fail closed）**
+- `MANAGED_TOKENS`（B-05，默认不配 = 托管面全部 503）：music-control 专用凭据，JSON
+  `{"<token>": {"name": "<principal>", "targets": ["lx06"]}}`。与 `BRIDGE_API_TOKENS`
+  **完全分离**——既有业务 token 不会自动获得 `/api/music/*` 控制权；target 必须与会话一致。
+  路由：`POST /api/music/sessions`、`GET /api/music/sessions/{id}`、
+  `POST .../commands`（幂等 `idem_key` + `expected_epoch`）、`GET .../events`（SSE，
+  支持 `Last-Event-ID` 与缺口 `reset`）。
 - `BRIDGE_API_TOKENS` 具名业务 token 集合（`label:token,...`，与 `ADMIN_TOKEN` 分离；票 12）：配置后 `/api/play/*`、`/api/wakeup`、`/api/interrupt`、`/api/audio_input`、`/api/inject*`、`/api/tts/doubao` 必须带 `Authorization: Bearer <token>`；命中哪个 label 就在审计日志记 `label=`（调用方可定点吊销/轮换）。**未配置时这些写类端点返回 503（失败关闭）**，`/api/health`、`/api/status` 等只读端点仍可用；**配置非法（格式错/label 重复/值重复）时整份 503 `auth_config_invalid`**，细节看服务端日志
   - `BRIDGE_API_TOKEN`（旧单值）已收口：**2026-10-24 迁移完成并删除 legacy**（`.env` 仅存 `BRIDGE_API_TOKENS`）。
     回滚支点 = 镜像 `rollback-pre12` 标签 + NAS `.env.bak-20261024-pre12`（含旧值，0600）；完整模型与迁移步骤见 `ws: .scratch/lx06-voice-hub-followups/notes/10-token-model.md` §6

@@ -30,7 +30,7 @@ open-xiaoai-bridge/
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + 只读工具（hass/weather/music/device_status）+ guardrails 四分级护栏 + ir_send C 级工具（P3）
 │   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）+ 文本归一化/别名键 matching（B-31）
-│   ├── music/                     # 托管播放原语（B-04，默认不接管生产流量）：TrackRef/队列项/位置快照 + ManagedStore（SQLite 单事务）+ ManagedExecutor（有界单 worker）
+│   ├── music/                     # 托管播放（B-04/B-05，默认不接管生产流量）：TrackRef/队列项/位置快照 + ManagedStore（SQLite 单事务）+ ManagedExecutor（有界单 worker）+ EventBus/ManagedService（幂等回执、代次闸门、事件同事务）+ auth（music-control 专用凭据）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
@@ -40,6 +40,7 @@ open-xiaoai-bridge/
 │   │   ├── health.py              # /api/health 纯函数组装（内存态 + 可选设备探针）
 │   │   ├── inject_control.py      # PC 注入开关判定 + 原子开窗/回滚（纯逻辑）
 │   │   ├── admin_api.py           # 后台面板 API（/admin 页面 + /api/admin/*）
+│   │   ├── managed_api.py         # 托管播放 HTTP/SSE（B-05）：/api/music/*，music-control 凭据 + target 约束，失败关闭
 │   │   ├── admin_static/index.html# 面板单页前端（零外部依赖）
 │   │   ├── audio/
 │   │   │   ├── stream.py          # GlobalStream 全局音频流（多路输入广播）
@@ -852,4 +853,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**857 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**874 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 17 项命令/事件/SSE = 874。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

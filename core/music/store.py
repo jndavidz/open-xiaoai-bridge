@@ -31,6 +31,8 @@ from core.music.model import (
 
 DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "managed" / "state.db"
 
+EVENT_RETAIN = 500   # 每会话保留的事件条数（有界回放窗口）
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS managed_sessions (
     session_id TEXT PRIMARY KEY,
@@ -38,13 +40,33 @@ CREATE TABLE IF NOT EXISTS managed_sessions (
     updated_at REAL    NOT NULL,
     payload    TEXT    NOT NULL
 );
+CREATE TABLE IF NOT EXISTS managed_events (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT    NOT NULL,
+    kind       TEXT    NOT NULL,
+    payload    TEXT    NOT NULL,
+    created_at REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_managed_events_session ON managed_events(session_id, seq);
+CREATE TABLE IF NOT EXISTS managed_receipts (
+    principal      TEXT NOT NULL,
+    idem_key       TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    receipt_id     TEXT NOT NULL,
+    session_id     TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    state          TEXT NOT NULL,
+    epoch          INTEGER NOT NULL,
+    created_at     REAL NOT NULL,
+    PRIMARY KEY (principal, idem_key)
+);
 """
 
 
 class ManagedStore:
     def __init__(self, path: str | Path | None = DEFAULT_DB, *, clock=time.time):
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         if path is None:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         else:
@@ -75,6 +97,7 @@ class ManagedStore:
         transport: str = "dlna",
         player_backend: str = "mediaplayer",
         lease_id: str = "",
+        target: str = "",
         session_id: str | None = None,
     ) -> SessionState:
         state = SessionState(
@@ -85,6 +108,7 @@ class ManagedStore:
             transport=str(transport),
             player_backend=str(player_backend),
             lease_id=str(lease_id),
+            target=str(target),
         )
         self._save(state)
         return state
@@ -187,6 +211,114 @@ class ManagedStore:
         self._save(state)
         return state
 
+    # ---- 事件与回执（与会话状态同一事务）----
+
+    def save_with_events(
+        self,
+        state: SessionState,
+        events: list[dict],
+        *,
+        receipt: dict | None = None,
+    ) -> list[dict]:
+        """一次事务：写会话状态 + 追加事件 + （可选）写幂等回执。
+
+        崩溃不会出现「状态已写、关键事件未写」：三者同生共死。
+        """
+
+        state.updated_at = self._clock()
+        payload = json.dumps(self._encode(state), ensure_ascii=False)
+        stored: list[dict] = []
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO managed_sessions(session_id, epoch, updated_at, payload) "
+                "VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
+                "epoch=excluded.epoch, updated_at=excluded.updated_at, payload=excluded.payload",
+                (state.session_id, state.epoch, state.updated_at, payload),
+            )
+            for event in events:
+                cur = self._conn.execute(
+                    "INSERT INTO managed_events(session_id, kind, payload, created_at) "
+                    "VALUES(?,?,?,?)",
+                    (state.session_id, str(event.get("kind") or "event"),
+                     json.dumps(event, ensure_ascii=False), self._clock()),
+                )
+                stored.append({"seq": cur.lastrowid, **event})
+            self._conn.execute(
+                "DELETE FROM managed_events WHERE session_id = ? AND seq <= "
+                "(SELECT MAX(seq) FROM managed_events WHERE session_id = ?) - ?",
+                (state.session_id, state.session_id, EVENT_RETAIN),
+            )
+            if receipt is not None:
+                self._conn.execute(
+                    "INSERT INTO managed_receipts(principal, idem_key, payload_digest, "
+                    "receipt_id, session_id, kind, state, epoch, created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (receipt["principal"], receipt["idem_key"], receipt["payload_digest"],
+                     receipt["receipt_id"], receipt["session_id"], receipt["kind"],
+                     receipt["state"], int(receipt["epoch"]), self._clock()),
+                )
+        return stored
+
+    def transition(
+        self,
+        session_id: str,
+        mutate,
+        *,
+        events: list[dict] | None = None,
+        receipt_factory=None,
+        epoch: int | None = None,
+    ) -> tuple[SessionState, list[dict]]:
+        """在锁内做一次状态迁移，并把状态/事件/回执一次提交（B-05 命令路径）。"""
+
+        with self._lock:
+            state = self._require(session_id)
+            self._check_epoch(state, epoch)
+            mutate(state)
+            receipt = receipt_factory(state) if receipt_factory is not None else None
+            stamped = [
+                ({**event, "epoch": state.epoch} if event.get("epoch") is None else event)
+                for event in (events or [])
+            ]
+            stored = self.save_with_events(state, stamped, receipt=receipt)
+            return state, stored
+
+    def events_after(self, session_id: str, after_seq: int, limit: int = 200) -> tuple[list[dict], bool]:
+        """回放 + 缺口检测：after_seq 早于保留窗口 ⇒ gap=True（调用方应重置）。"""
+
+        with self._lock:
+            bounds = self._conn.execute(
+                "SELECT MIN(seq), MAX(seq) FROM managed_events WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            rows = self._conn.execute(
+                "SELECT seq, payload FROM managed_events WHERE session_id = ? AND seq > ? "
+                "ORDER BY seq LIMIT ?",
+                (session_id, int(after_seq), max(1, int(limit))),
+            ).fetchall()
+        oldest, newest = (bounds or (None, None))
+        gap = bool(oldest is not None and after_seq > 0 and after_seq < oldest - 1)
+        return ([{"seq": seq, **json.loads(payload)} for seq, payload in rows],
+                gap or (oldest is not None and after_seq > newest))
+
+    def last_event_seq(self, session_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(seq) FROM managed_events WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def receipt_get(self, principal: str, idem_key: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload_digest, receipt_id, session_id, kind, state, epoch "
+                "FROM managed_receipts WHERE principal = ? AND idem_key = ?",
+                (principal, idem_key),
+            ).fetchone()
+        if not row:
+            return None
+        return {"payload_digest": row[0], "receipt_id": row[1], "session_id": row[2],
+                "kind": row[3], "state": row[4], "epoch": int(row[5])}
+
     def bump_epoch(self, session_id: str) -> int:
         state = self._require(session_id)
         state.epoch += 1
@@ -262,6 +394,7 @@ class ManagedStore:
             "transport": state.transport,
             "player_backend": state.player_backend,
             "lease_id": state.lease_id,
+            "target": state.target,
             "entries": [
                 {"entry_id": e.entry_id, "quality": e.quality,
                  "source": e.ref.source, "id": e.ref.id,
@@ -287,6 +420,7 @@ class ManagedStore:
             transport=data["transport"],
             player_backend=data["player_backend"],
             lease_id=data.get("lease_id", ""),
+            target=data.get("target", ""),
             entries=[
                 QueueEntry(entry_id=e["entry_id"],
                            ref=TrackRef.make(e["source"], e["id"], e.get("extra")),

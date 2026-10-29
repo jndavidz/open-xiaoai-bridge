@@ -152,6 +152,7 @@ class SessionState:
     transport: str
     player_backend: str
     lease_id: str = ""
+    target: str = ""            # 设备目标（music-control scope 的 target 维度）
     entries: list[QueueEntry] = field(default_factory=list)
     current_index: int = -1
     position: PositionSnapshot | None = None
@@ -175,6 +176,7 @@ class SessionState:
             "transport": self.transport,
             "player_backend": self.player_backend,
             "lease_id": self.lease_id,
+            "target": self.target,
             "entries": [
                 {"entry_id": e.entry_id, "ref": json.loads(e.ref.canonical()),
                  "quality": e.quality}

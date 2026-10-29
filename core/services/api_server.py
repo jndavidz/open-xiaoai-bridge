@@ -540,6 +540,29 @@ class APIServer:
         # TTS endpoints
         self.app.router.add_post("/api/tts/doubao", self.handle_tts_doubao)
         self.app.router.add_get("/api/tts/doubao_voices", self.handle_tts_voices)
+        self._setup_managed_routes()
+
+    def _setup_managed_routes(self) -> None:
+        """托管播放 API/SSE（B-05）：始终注册、失败关闭。
+
+        未配置 `MANAGED_TOKENS` 时所有 /api/music/* 返回 503，既有端点不受影响；
+        初始化失败（例如磁盘不可写）只告警，不阻断语音主链路。
+        """
+
+        try:
+            import os
+
+            from core.music.auth import MusicAuth
+            from core.music.service import ManagedService
+            from core.services.managed_api import ManagedAPI
+
+            self.managed_api = ManagedAPI(
+                ManagedService(), MusicAuth(os.environ.get("MANAGED_TOKENS", ""))
+            )
+            self.managed_api.register(self.app)
+        except Exception as exc:  # noqa: BLE001 - 托管面失败不得拖垮 bridge
+            self.managed_api = None
+            logger.warning(f"[APIServer] managed playback API unavailable: {exc}")
 
     def _create_background_task(
         self,
