@@ -19,7 +19,7 @@ import asyncio
 from core.music.tts_focus import FocusDenied, FocusToken
 from core.utils.logger import logger
 
-RELEASE_GRACE_S = 2.0
+RELEASE_GRACE_S = 5.0
 
 _hold_count = 0
 _hold_token: FocusToken | None = None

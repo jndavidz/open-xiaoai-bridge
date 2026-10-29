@@ -185,7 +185,14 @@ async def _run_managed(action: str, args: dict) -> str:
     from core.music import song_bridge
 
     if action in ("stop", "pause", "resume", "next", "prev"):
-        return await song_bridge.command(action)
+        result = await song_bridge.command(action)
+        if action in ("resume", "next", "prev"):
+            # 音乐重新接管音频：结束本轮连续对话（单轮语义），否则麦克风继续开着，
+            # 音乐会 VAD 当成说话，下一轮 TTS 又把音乐暂停。
+            from core.tools.registry import suppress_reply
+
+            suppress_reply()
+        return result
     query = str(args.get("query") or "").strip()
     items = await _managed_collect(
         query,

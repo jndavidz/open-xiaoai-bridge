@@ -635,7 +635,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
     （保护 KWS/VAD 回声），**退出词/超时/停止聆听**时 `release_hold()`；
   - **点歌 = 单轮**：起播成功即 `suppress_reply` → 结束会话（模型需澄清才多一轮）；
   - `speaker.announce` 走同一引用计数（`required`：暂停确认不了 ⇒ `AnnounceRejected`），
-    单次播报只短暂持有；归零后 **2s 去抖**才恢复、新 `hold()` 取消待恢复（开场白→对话
+    单次播报只短暂持有；归零后 **5s 去抖**才恢复、新 `hold()` 取消待恢复（开场白→对话
     之间不闪回音乐）；
   - **「继续播放」**：`force_release()` 立即放弃资格，随后 `ensure_resumed()`（resume 后
     **回读验证**，假成功就重起当前 entry）；
