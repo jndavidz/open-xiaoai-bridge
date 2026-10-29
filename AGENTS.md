@@ -629,12 +629,18 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   `focus_superseded`/`entry_changed`/`external_takeover`/`resume_unsupported`），绝不偷偷 Play。
   `speak()` 对每个 provider 独立给结果（ok/failed/cancelled/unknown），unknown 或 weak 先做一次
   **安全停止**再交回调用方；`tts_providers.py` 给 doubao/openai/mlx_audio（各自 Rust 播放令牌）
-  与 xiaoai/脚本回退（announce + 停设备音频）的适配。**已接线**（`focus_bridge.py`）：
-  `speaker.announce` 在词表检查通过后取 focus（`required`：音乐在播但暂停确认不了 ⇒
-  `AnnounceRejected`，绝不两路抢设备），finally 先释放 focus 再归还 KWS 闸门（恢复音乐不会
-  落在闸门关闭窗口）；对话回复段（`_speak_response_segments`）取 focus 但**非 required**
-  （focus 失败不阻断回复），异常路径同样释放。麦态/KWS/录制的 finally 归还原语义不变
-  （`mic_gate` 按进入时快照恢复，用户停止聆听保持 off）。
+  与 xiaoai/脚本回退（announce + 停设备音频）的适配。**已接线（会话级）**（`focus_bridge.py`，
+  2026-10-29 与用户确认）：
+  - **连续对话 = 多轮**：`start()` 进入即 `hold()`（暂停音乐并确认），整段对话保持暂停
+    （保护 KWS/VAD 回声），**退出词/超时/停止聆听**时 `release_hold()`；
+  - **点歌 = 单轮**：起播成功即 `suppress_reply` → 结束会话（模型需澄清才多一轮）；
+  - `speaker.announce` 走同一引用计数（`required`：暂停确认不了 ⇒ `AnnounceRejected`），
+    单次播报只短暂持有；归零后 **2s 去抖**才恢复、新 `hold()` 取消待恢复（开场白→对话
+    之间不闪回音乐）；
+  - **「继续播放」**：`force_release()` 立即放弃资格，随后 `ensure_resumed()`（resume 后
+    **回读验证**，假成功就重起当前 entry）；
+  - **唤醒打断**：托管音乐在管时不再 `stop_device_audio`（停了媒体上下文就回不来）；
+  - 麦态/KWS/录制的 finally 归还原语义不变（`mic_gate` 按进入时快照恢复，停止聆听保持 off）。
 - **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
   quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
   亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
