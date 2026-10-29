@@ -245,6 +245,7 @@ def _apply(state: SessionState, kind: str, payload: dict) -> None:
         state.intent = Intent.STOPPED
         state.auto_advance = False
         state.recovery_token = None
+        state.focus_token = None
         state.stop_reason = str(payload.get("reason") or "user")
     elif kind in ("next", "prev"):
         if not state.entries:

@@ -1,0 +1,187 @@
+"""TTS focus 与音乐恢复资格（B-07）。
+
+不变量：
+
+  1. **先暂停音乐并确认**，再播报；暂停未确认就不播。
+  2. 恢复资格绑定 `session/epoch/entry/focus token`：用户 pause/stop/next、外部接管、
+     代次变化、重复播报换令牌，任一发生即作废，旧令牌永远换不回播放。
+  3. 暂停/停止态**不偷偷 seek/Play**；backend 未声明 resume 时如实返回未恢复。
+  4. 每个 provider 独立给结果（ok / failed / cancelled / unknown / weak），
+     不用一个布尔成功把四个 provider 合并；弱完成/未知先做一次安全停止再决定。
+  5. 麦态/KWS/录制的归还在调用方 finally 里（本模块不接管这些资源）。
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Protocol
+
+from core.music.model import Intent, ManagedError, Phase, SessionState
+from core.music.player import Unsupported
+from core.music.service import ManagedService
+
+
+class FocusDenied(ManagedError):
+    """无法取得/延续 TTS focus（暂停失败、会话已停止等）。"""
+
+
+@dataclass(frozen=True)
+class FocusToken:
+    token: str
+    session_id: str
+    epoch: int
+    entry_id: str | None
+    position_s: float | None
+    provider: str
+    created_at: float
+
+
+@dataclass
+class SpeakResult:
+    """一个 provider 的独立结局（绝不与其它 provider 合并）。"""
+
+    provider: str
+    status: str                 # ok | failed | cancelled | unknown
+    started: bool = False
+    quality: str | None = None  # strong | weak（仅 ok 时有意义）
+    reason: str = ""
+    safe_stopped: bool = False
+
+    def as_dict(self) -> dict:
+        return {
+            "provider": self.provider, "status": self.status,
+            "started": self.started, "quality": self.quality,
+            "reason": self.reason, "safe_stopped": self.safe_stopped,
+        }
+
+
+class TtsSpeaker(Protocol):
+    name: str
+
+    async def speak(self, text: str, *, token: FocusToken) -> SpeakResult: ...
+    async def cancel(self, token: FocusToken) -> bool: ...
+
+
+class TtsFocus:
+    def __init__(self, service: ManagedService, player, *, clock=time.monotonic) -> None:
+        self.service = service
+        self.store = service.store
+        self.player = player
+        self.clock = clock
+
+    # ---- 取得 focus（先暂停并确认）----
+
+    async def acquire(self, session_id: str, *, provider: str, reason: str = "tts") -> FocusToken:
+        state = self._require(session_id)
+        if state.intent == Intent.STOPPED or state.phase == Phase.STOPPED:
+            raise FocusDenied("session is stopped")
+        if state.focus_token:
+            # 已在 focus 中（连续播报）：复用现有暂停，只换令牌
+            entry_id = state.current.entry_id if state.current else None
+            token = self._issue(state, entry_id, provider)
+            self._set_focus(state.session_id, token.token)
+            return token
+        if state.phase != Phase.PLAYING:
+            raise FocusDenied("music is not playing; refuse to take focus")
+        await self.player.pause(session_id)
+        if await self.player.backend.state() != "paused":
+            raise FocusDenied(f"pause not confirmed before {reason}")
+        paused = self._require(session_id)          # pause 会 bump epoch
+        entry_id = paused.current.entry_id if paused.current else None
+        token = self._issue(paused, entry_id, provider)
+        self._set_focus(session_id, token.token)
+        return token
+
+    # ---- 播报：每个 provider 独立结果 ----
+
+    async def speak(self, token: FocusToken, text: str,
+                    speakers: list[TtsSpeaker]) -> list[SpeakResult]:
+        results: list[SpeakResult] = []
+        for speaker in speakers:
+            try:
+                result = await speaker.speak(text, token=token)
+            except Exception as exc:  # noqa: BLE001 - 单个 provider 失败不牵连其它
+                result = SpeakResult(speaker.name, "failed", False, reason=str(exc)[:160])
+            if result.status in ("unknown",) or (
+                result.status == "ok" and result.quality == "weak"
+            ):
+                # 弱/未知完成：先安全停止这一段 TTS，再交回调用方决定后续
+                try:
+                    await speaker.cancel(token)
+                    result.safe_stopped = True
+                except Exception:  # noqa: BLE001
+                    result.safe_stopped = False
+            results.append(result)
+        return results
+
+    async def cancel(self, token: FocusToken, speakers: list[TtsSpeaker]) -> int:
+        cancelled = 0
+        for speaker in speakers:
+            try:
+                if await speaker.cancel(token):
+                    cancelled += 1
+            except Exception:  # noqa: BLE001
+                continue
+        return cancelled
+
+    # ---- 释放：只有同一 focus 且可恢复才继续 ----
+
+    async def release(self, token: FocusToken) -> tuple[bool, str]:
+        state = self.store.get(token.session_id)
+        if state is None:
+            return False, "session_gone"
+        # 先给最有信息量的拒绝原因，再做令牌/代次比对
+        if state.intent == Intent.STOPPED or state.phase == Phase.STOPPED:
+            return False, "stopped"
+        if state.epoch != token.epoch:
+            return False, "epoch_changed"
+        if state.focus_token != token.token:
+            return False, "focus_superseded"
+        current = state.current
+        if token.entry_id and (current is None or current.entry_id != token.entry_id):
+            return False, "entry_changed"
+        if await self.player.backend.state() != "paused":
+            return False, "external_takeover"
+        self._set_focus(token.session_id, None)
+        try:
+            await self.player.resume(token.session_id)
+        except Unsupported:
+            return False, "resume_unsupported"
+        return True, "resumed"
+
+    def invalidate(self, session_id: str, *, reason: str = "command") -> None:
+        """用户命令/外部事件作废恢复资格（不改变暂停状态）。"""
+
+        self._set_focus(session_id, None)
+
+    # ---- 内部 ----
+
+    def _require(self, session_id: str) -> SessionState:
+        state = self.store.get(session_id)
+        if state is None:
+            raise FocusDenied(f"unknown session {session_id!r}")
+        return state
+
+    def _issue(self, state: SessionState, entry_id: str | None, provider: str) -> FocusToken:
+        position = state.position.position_s if state.position else None
+        return FocusToken(
+            token=f"f-{uuid.uuid4().hex[:10]}",
+            session_id=state.session_id,
+            epoch=state.epoch,
+            entry_id=entry_id,
+            position_s=position,
+            provider=str(provider or "tts"),
+            created_at=self.clock(),
+        )
+
+    def _set_focus(self, session_id: str, token_id: str | None) -> None:
+        state = self.store.get(session_id)
+        if state is None:
+            return
+
+        def mutate(current: SessionState) -> None:
+            current.focus_token = token_id
+
+        self.store.transition(session_id, mutate)

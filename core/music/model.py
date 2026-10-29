@@ -158,6 +158,7 @@ class SessionState:
     current_index: int = -1
     position: PositionSnapshot | None = None
     recovery_token: str | None = None
+    focus_token: str | None = None     # 当前 TTS focus（B-07）
     auto_advance: bool = False
     stop_reason: str = ""
     updated_at: float = 0.0
@@ -187,6 +188,7 @@ class SessionState:
             "current_entry_id": self.current.entry_id if self.current else None,
             "position": self.position.as_dict() if self.position else None,
             "recovery_token": self.recovery_token,
+            "focus_token": self.focus_token,
             "auto_advance": self.auto_advance,
             "stop_reason": self.stop_reason,
             "updated_at": self.updated_at,
