@@ -4,6 +4,15 @@
 """
 
 from core.music.auth import MusicAuth, MusicAuthError, MusicGrant
+from core.music.backends import DlnaBackend, RpcBackend
+from core.music.player import (
+    DLNA,
+    RPC,
+    BackendProfile,
+    Decision,
+    ManagedQueuePlayer,
+    Unsupported,
+)
 from core.music.events import EventBus, Subscription
 from core.music.executor import CommandTicket, ManagedExecutor
 from core.music.service import (
@@ -30,6 +39,14 @@ from core.music.store import ManagedStore
 
 __all__ = [
     "COMMANDS",
+    "DLNA",
+    "RPC",
+    "BackendProfile",
+    "Decision",
+    "DlnaBackend",
+    "ManagedQueuePlayer",
+    "RpcBackend",
+    "Unsupported",
     "CommandState",
     "CommandTicket",
     "ConflictError",

@@ -137,13 +137,17 @@ class ManagedStore:
         ref: TrackRef,
         *,
         quality: str = "320k",
+        duration_s: float = 0.0,
         epoch: int | None = None,
     ) -> QueueEntry:
         state = self._require(session_id)
         self._check_epoch(state, epoch)
         entry = QueueEntry(entry_id=f"e-{uuid.uuid4().hex[:10]}", ref=ref,
-                           quality=str(quality or "320k"))
+                           quality=str(quality or "320k"),
+                           duration_s=max(0.0, float(duration_s or 0.0)))
         state.entries.append(entry)
+        if state.current_index < 0:
+            state.current_index = 0   # 第一条入队即成为当前项
         self._save(state)
         return entry
 
@@ -418,6 +422,7 @@ class ManagedStore:
             "target": state.target,
             "entries": [
                 {"entry_id": e.entry_id, "quality": e.quality,
+                 "duration_s": e.duration_s,
                  "source": e.ref.source, "id": e.ref.id,
                  "extra": e.ref.extra_dict}
                 for e in state.entries
@@ -445,7 +450,8 @@ class ManagedStore:
             entries=[
                 QueueEntry(entry_id=e["entry_id"],
                            ref=TrackRef.make(e["source"], e["id"], e.get("extra")),
-                           quality=e.get("quality", "320k"))
+                           quality=e.get("quality", "320k"),
+                           duration_s=float(e.get("duration_s") or 0.0))
                 for e in data.get("entries") or []
             ],
             current_index=int(data.get("current_index", -1)),

@@ -94,6 +94,7 @@ class QueueEntry:
     entry_id: str
     ref: TrackRef
     quality: str = "320k"
+    duration_s: float = 0.0     # 可信时长（0 = 未知，EOF 只能进 unknown）
 
 
 @dataclass(frozen=True)
