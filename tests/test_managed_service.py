@@ -102,7 +102,7 @@ class CommandReceiptTest(_Base):
 class SharedSessionTest(_Base):
     def test_all_entries_see_one_session_and_epoch(self) -> None:
         # 四种入口（Agent/HTTP/KWS/HA 的抽象）都只是 command()，必须看到同一代次
-        for track in ("1", "2", "3", "4"):
+        for track in ("1", "2", "3", "4", "5"):
             self.store.append(self.sid, TrackRef.make("kuwo", track))
         principals = ["songloft", "mobile", "bridge-kws", "ha"]
         epochs = []
