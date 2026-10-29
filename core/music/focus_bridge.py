@@ -23,6 +23,18 @@ def enabled() -> bool:
     return song_bridge.managed_enabled()
 
 
+def manages_music() -> bool:
+    """托管模式且当前有在管会话：唤醒/打断不应直接停设备音频。
+
+    否则设备 play 面对已丢失的媒体上下文是无操作，音乐永久回不来；
+    暂停/恢复交给 TTS focus（由播报入口取得、播完按资格释放）。
+    """
+
+    from core.music import song_bridge
+
+    return song_bridge.managed_enabled() and bool(song_bridge.active_session())
+
+
 async def acquire(reason: str = "tts") -> FocusToken | None:
     """返回 focus 令牌；无托管会话/音乐未在播时返回 None（无需 focus）。"""
 

@@ -23,24 +23,44 @@ if str(ROOT) not in sys.path:
 
 from core.music import song_bridge  # noqa: E402
 from core.music.model import Intent, Phase, TrackRef  # noqa: E402
-from core.music.player import Decision  # noqa: E402
+from core.music.player import RPC, Decision  # noqa: E402
 from core.music.runtime import ManagedRuntime, get_runtime, set_runtime  # noqa: E402
 from core.music.service import ManagedService  # noqa: E402
 from core.music.store import ManagedStore  # noqa: E402
 
 
+class FakeBackendState:
+    def __init__(self, value: str = "paused"):
+        self.value = value
+
+    async def state(self) -> str:
+        return self.value
+
+
 class FakePlayer:
+    profile = RPC
+
     def __init__(self, decisions: list[Decision]):
         self.decisions = decisions
         self.started: list[str] = []
+        self.restarted = 0
         self.paused = 0
         self.resumed = 0
         self.pause_error: Exception | None = None
+        self.backend = FakeBackendState()
         self.ticks = 0
+
+    async def play(self, uri: str) -> bool:
+        self.started.append(uri)
+        return True
 
     async def start(self, session_id: str) -> bool:
         self.started.append(session_id)
         return True
+
+    async def restart(self, session_id: str) -> bool:
+        self.restarted += 1
+        return await self.start(session_id)
 
     async def pause_backend(self) -> None:
         if self.pause_error:
@@ -166,7 +186,16 @@ class SongBridgeTest(unittest.IsolatedAsyncioTestCase):
 
         resume = await song_bridge.command("resume")
         self.assertIn("resume", resume)
-        self.assertEqual(1, self.player.resumed, "resume 必须真的恢复播放")
+        self.assertEqual(1, self.player.resumed, "暂停态 resume 必须真的恢复播放")
+
+    async def test_resume_restarts_when_device_context_was_lost(self) -> None:
+        await song_bridge.play_items(self._items())
+        self.player.backend.value = "idle"      # 唤醒/TTS 已把媒体上下文顶掉
+        result = await song_bridge.command("resume")
+        self.assertIn("resume", result)
+        self.assertEqual(1, self.player.restarted, "上下文丢失时必须显式重新起播")
+        self.assertEqual(0, self.player.resumed, "mphelper play 对已丢失上下文是无操作")
+        self.assertEqual("observed", self._receipt_state("resume"))
 
     def _receipt_state(self, kind: str) -> str:
         # 从事件流里找到最近一次该命令的 receipt，再查它的状态
@@ -182,6 +211,23 @@ class SongBridgeTest(unittest.IsolatedAsyncioTestCase):
         result = await song_bridge.command("pause")
         self.assertIn("未能执行", result)
         self.assertEqual("failed", self._receipt_state("pause"))
+
+    async def test_restart_re_resolves_the_uri(self) -> None:
+        from core.music.player import ManagedQueuePlayer
+
+        store = self.store
+        calls: list[str] = []
+
+        async def resolver(entry):
+            calls.append(entry.entry_id)
+            return "http://cdn/x.mp3"
+
+        player = ManagedQueuePlayer(store, self.player, resolver, clock=lambda: 0.0)
+        sid = self.service.open_session(target="lx06")["session_id"]
+        store.append(sid, TrackRef.make("kuwo", "9"), duration_s=10)
+        await player.start(sid)
+        await player.restart(sid)
+        self.assertEqual(2, len(calls), "重启必须重新解析直链，不能复用可能过期的 URI")
 
     async def test_commands_without_a_session_are_explicit(self) -> None:
         self.assertEqual("托管队列还没有内容", await song_bridge.command("pause"))

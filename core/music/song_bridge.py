@@ -108,7 +108,13 @@ async def command(kind: str, **payload) -> str:
             await runtime.player.pause_backend()
             service.observe(receipt.receipt_id)
         elif kind == "resume":
-            await runtime.player.resume_backend()
+            backend_state = await runtime.player.backend.state()
+            if backend_state == "paused":
+                await runtime.player.resume_backend()
+            else:
+                # 唤醒/TTS 已把设备媒体上下文顶掉（idle/unknown）：设备控制 CLI 的 play
+                # 对已丢失上下文是无操作，必须显式重新起播当前 entry（用户显式命令，不是偷偷播）。
+                await runtime.player.restart(runtime.session_id)
             service.observe(receipt.receipt_id)
         elif kind in ("next", "prev"):
             await runtime.player.start(runtime.session_id)

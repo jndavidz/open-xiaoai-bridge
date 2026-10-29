@@ -22,6 +22,7 @@ from typing import Protocol
 from core.music.model import Intent, ManagedError, Phase, SessionState
 from core.music.player import Unsupported
 from core.music.service import ManagedService
+from core.utils.logger import logger
 
 
 class FocusDenied(ManagedError):
@@ -169,13 +170,19 @@ class TtsFocus:
         current = state.current
         if token.entry_id and (current is None or current.entry_id != token.entry_id):
             return False, "entry_changed"
-        if await self.player.backend.state() != "paused":
+        backend_now = await self.player.backend.state()
+        if backend_now != "paused":
+            # 设备上下文已被 TTS/唤醒中断顶掉：不偷偷重播，交回用户显式恢复
+            logger.info(f"[TtsFocus] focus lost before resume (state={backend_now})")
+            self._set_focus(token.session_id, None)
             return False, "external_takeover"
         self._set_focus(token.session_id, None)
         try:
             await self.player.resume(token.session_id)
-        except Unsupported:
+        except Unsupported as exc:
+            logger.info(f"[TtsFocus] resume unsupported: {exc}")
             return False, "resume_unsupported"
+        logger.debug("[TtsFocus] music resumed after focus")
         return True, "resumed"
 
     def invalidate(self, session_id: str, *, reason: str = "command") -> None:

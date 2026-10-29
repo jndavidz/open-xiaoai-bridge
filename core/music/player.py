@@ -264,6 +264,17 @@ class ManagedQueuePlayer:
 
     # ---- 暂停 / seek / 外部接管 ----
 
+    async def restart(self, session_id: str, *, epoch: int | None = None) -> bool:
+        """重新起播当前 entry（设备上下文已被 TTS/中断顶掉时的显式恢复）。
+
+        强制重新解析 URI：旧直链可能已过期；这不是「偷偷 seek」——由用户的
+        显式恢复命令触发，且从当前 entry 头开始。
+        """
+
+        self._prepared_uri = None
+        self._prepared_entry = None
+        return await self.start(session_id, epoch=epoch)
+
     async def pause_backend(self) -> None:
         """只驱动设备暂停 + 冻结探测器（状态/回执由命令层负责）。"""
 

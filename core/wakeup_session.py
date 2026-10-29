@@ -98,6 +98,18 @@ class WakeupSessionManager:
         命令必须先牺牲当前曲目；暂停 + 空闲后自动续播（song_request 侧）解决。
         """
         try:
+            from core.music import focus_bridge
+
+            if focus_bridge.manages_music():
+                # 托管模式：唤醒**不**直接停设备音频（停了就回不来），
+                # 音乐由 TTS focus 在播报前暂停、播完按资格恢复。
+                from core.xiaoai import XiaoAI
+
+                await XiaoAI.start_recording()
+                return
+        except Exception as exc:  # noqa: BLE001 - 判定失败回落既有策略
+            logger.debug(f"[Wakeup] managed-music check failed: {exc}")
+        try:
             from core.tools import song_request
 
             if song_request.is_paused_for_wakeup():

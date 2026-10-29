@@ -122,6 +122,49 @@ class AnnounceFocusTest(test_announce.AnnounceTestBase):
                 test_announce._run(scenario())
 
 
+class WakeupManagedAudioTest(unittest.IsolatedAsyncioTestCase):
+    """唤醒打断：托管模式不得直接停设备音频（停了就回不来）。"""
+
+    def _manager(self):
+        from core import wakeup_session as ws
+
+        return object.__new__(ws.WakeupSessionManager)
+
+    async def test_managed_mode_keeps_audio_for_focus(self) -> None:
+        manager = self._manager()
+        stop = mock.AsyncMock()
+        record = mock.AsyncMock()
+        with mock.patch("core.music.focus_bridge.manages_music", return_value=True), \
+                mock.patch.object(type(manager), "_stop_device_playback", stop), \
+                mock.patch("core.xiaoai.XiaoAI.start_recording", record):
+            await manager._interrupt_device_playback()
+        stop.assert_not_awaited()
+        record.assert_awaited_once()
+
+    async def test_legacy_mode_falls_back_to_stop(self) -> None:
+        manager = self._manager()
+        stop = mock.AsyncMock()
+        with mock.patch("core.music.focus_bridge.manages_music", return_value=False), \
+                mock.patch.object(type(manager), "_stop_device_playback", stop), \
+                mock.patch("core.tools.song_request.is_paused_for_wakeup", return_value=False), \
+                mock.patch("core.tools.song_request.pause_for_wakeup",
+                           mock.AsyncMock(return_value=False)):
+            await manager._interrupt_device_playback()
+        stop.assert_awaited_once()
+
+    async def test_managed_legacy_pause_still_wins_when_flagged(self) -> None:
+        manager = self._manager()
+        stop = mock.AsyncMock()
+        record = mock.AsyncMock()
+        with mock.patch("core.music.focus_bridge.manages_music", return_value=False), \
+                mock.patch.object(type(manager), "_stop_device_playback", stop), \
+                mock.patch("core.tools.song_request.is_paused_for_wakeup", return_value=True), \
+                mock.patch("core.xiaoai.XiaoAI.start_recording", record):
+            await manager._interrupt_device_playback()
+        stop.assert_not_awaited()
+        record.assert_awaited_once()
+
+
 class ConversationFocusTest(test_pipeline.ConversationLoopTestBase):
     async def test_reply_segments_take_and_release_focus(self) -> None:
         token = _token("f-reply")
