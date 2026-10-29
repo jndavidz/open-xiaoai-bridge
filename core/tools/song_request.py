@@ -295,23 +295,30 @@ def _announce_text(item: dict) -> str:
     return text + "，这就为你播放"
 
 
-async def _speak_and_start(speaker, message: str, url: str) -> bool:
+async def _speak_and_start(speaker, message: str, url: str) -> tuple[bool, int]:
     """经 announce 双闸门播报选曲文案后起播 URL（非阻塞）。
 
     文案撞 KWS 词表（歌名/歌手名不可控）时降级为通用文案重试；
     仍被拒则不打播报、仅起播（announce 拒绝的是文案，不是播放本身）。
+
+    返回 ``(ok, play_seq)``：``play_seq`` 在**起播 URL 之前**取，选曲播报自己的
+    playing/idle 事件因此落在下界之外，不会被当成这首曲的起播/结束（B-03）。
     """
+    from core.device import get_playback_events
     from core.services.speaker import AnnounceRejected
 
     for text in (message, _FALLBACK_ANNOUNCE):
         try:
             async with speaker.announce(text=text, reason="song_request", wait=False):
                 await speaker.play(text=text)
-                return bool(await speaker.play(url=url, blocking=False))
+                seq = get_playback_events().begin_playback()
+                ok = bool(await speaker.play(url=url, blocking=False))
+                return ok, seq
         except AnnounceRejected as exc:
             logger.warning(f"[SongRequest] announce rejected (word={exc.word}); fallback")
             continue
-    return bool(await speaker.play(url=url, blocking=False))
+    seq = get_playback_events().begin_playback()
+    return bool(await speaker.play(url=url, blocking=False)), seq
 
 
 async def _confirm_playing(speaker) -> bool:
@@ -468,7 +475,7 @@ async def _do_play(query: str, requested_source) -> str:
                 continue
             # 尝试用原始候选（同曲其他版本可作为取链失败的兜底），队列用去重结果
             for item in raw_items:
-                ok, confirmed, _played = await _start_item(
+                ok, confirmed, _played, play_seq = await _start_item(
                     speaker, session, item, _announce_text(item)
                 )
                 if not ok:
@@ -478,7 +485,7 @@ async def _do_play(query: str, requested_source) -> str:
                     # 队列只剩同一首：按歌手补别的歌后再按当前曲过滤
                     extra = await _extend_with_singer(session, source, items)
                     queue = _queue_for(item, list(items) + extra)
-                _note_played(item, queue)
+                _note_played(item, queue, play_seq=play_seq)
                 logger.info(
                     f"[SongRequest] playing {item.get('name')!r} via {source} "
                     f"(confirmed={confirmed})"
@@ -568,7 +575,7 @@ async def _do_album(query: str, requested_source, artist: str) -> str:
                 return f"没找到与《{query}》匹配的专辑{tail}，换个说法或加上歌手名试试"
             # 逐曲尝试：某首取不到直链就顺延到下一首，队列仍按官方曲序
             for position, item in enumerate(items):
-                ok, confirmed, played = await _start_item(
+                ok, confirmed, played, play_seq = await _start_item(
                     speaker,
                     session,
                     item,
@@ -580,7 +587,7 @@ async def _do_album(query: str, requested_source, artist: str) -> str:
                 if played is not item:
                     # 跨源补播的曲目补上专辑曲序，队列/日志口径与官方曲序一致
                     played = dict(played, track_no=item.get("track_no"))
-                _note_played(played, items[position + 1:], album_mode=True)
+                _note_played(played, items[position + 1:], album_mode=True, play_seq=play_seq)
                 from core.tools.registry import suppress_reply
 
                 suppress_reply()
@@ -604,8 +611,13 @@ async def _do_album(query: str, requested_source, artist: str) -> str:
     return f"没有找到能播放的专辑《{query}》，换个专辑名或指定歌手试试"
 
 
-def _note_played(item: dict, candidates: list[dict], album_mode: bool = False) -> None:
-    """落队列状态：当前曲 + 历史 + 候选集（同一首只占一个队列位）。"""
+def _note_played(item: dict, candidates: list[dict], album_mode: bool = False,
+                 play_seq: int = 0) -> None:
+    """落队列状态：当前曲 + 历史 + 候选集（同一首只占一个队列位）。
+
+    ``play_seq`` 是本曲起播前的事件序号（`begin_playback()`），完成监听只认
+    它之后的事件；0 表示不设下界。
+    """
     global _generation, _paused_for_wakeup
     _generation += 1
     _paused_for_wakeup = False
@@ -621,6 +633,7 @@ def _note_played(item: dict, candidates: list[dict], album_mode: bool = False) -
     state["index"] = 0
     state["album"] = album_mode
     state["started_at"] = time.monotonic()
+    state["play_seq"] = int(play_seq or 0)   # 本曲起播前的事件序号（完成监听的下界）
     # 专辑队列：挂上「播完自动下一首」监听；点歌/普通播放则清掉旧监听
     _cancel_advance()
     if album_mode:
@@ -797,6 +810,7 @@ async def _do_stop() -> str:
             "history": [],
             "album": False,
             "started_at": 0.0,
+            "play_seq": 0,
         }
     )
     logger.info("[SongRequest] stopped and queue cleared")
@@ -896,8 +910,11 @@ async def _start_item(
     message: str | None,
     *,
     search_fallback: bool = False,
-) -> tuple[bool, bool, dict]:
-    """对单个 item 取直链并起播；返回 (成功, 回读确认, 实际播放的 item)。
+) -> tuple[bool, bool, dict, int]:
+    """对单个 item 取直链并起播；返回 (成功, 回读确认, 实际播放的 item, 起播序号)。
+
+    起播序号来自事件面 `begin_playback()`，在**下发播放命令之前**取得：之后的
+    完成监听用它把上一段播放的 playing/idle 排除在本曲之外（B-03 代次绑定）。
 
     `message=None` 表示静默起播（专辑自动续播不打断音乐）；
     `search_fallback=True`（专辑连播）：本源取不到直链时跨源补同一首，
@@ -917,22 +934,26 @@ async def _start_item(
                     f"[SongRequest] album track {item.get('name')!r} -> {alt_source} fallback"
                 )
     if not url:
-        return False, False, item
+        return False, False, item, 0
     if message is None:
+        # 静默起播：下界就在下发之前
+        from core.device import get_playback_events
+
+        play_seq = get_playback_events().begin_playback()
         ok = bool(await speaker.play(url=url, blocking=False))
     else:
-        ok = await _speak_and_start(speaker, message, url)
+        # 选曲播报先响：下界由 _speak_and_start 在 URL 起播前取（排除播报事件）
+        ok, play_seq = await _speak_and_start(speaker, message, url)
     if not ok:
         logger.error(f"[SongRequest] play rejected by device ({source})")
-        return False, False, item
-    return True, await _confirm_playing(speaker), played
+        return False, False, item, play_seq
+    return True, await _confirm_playing(speaker), played, play_seq
 
 
 # ---- 专辑自动续播（自然播完 → 下一首，静默起播不打断） ----
 # 真机 2026-10-28：只组队列不会自己往下走——第 1 首播完即静默停住。
 # 复用事件面 wait_for_finish（paused 不算结束，唤醒暂停不会误判成播完）。
 
-_ADVANCE_TIMEOUTS = 2  # 同一首连续两次「超时但仍在播」即放弃（防 URL 卡死死循环）
 # 判定「自然播完」的最短播放时长比例：唤醒提示音/桥内 TTS 会顶掉当前曲，
 # 事件面同样表现为 idle；真机 2026-10-28 就是这样被误判成播完（晴天只放了 63s）。
 _ADVANCE_MIN_RATIO = 0.7
@@ -946,8 +967,16 @@ def _duration_s(item: dict) -> float:
     return 0.0
 
 
-async def _wait_track_end(item: dict) -> str:
-    """等一首自然播完 → 'finished'；读不到状态 → 'unreadable'；始终不结束 → 'still_playing'。"""
+async def _wait_track_end(item: dict, since_seq: int | None = None) -> str:
+    """等一首自然播完。
+
+    返回 ``finished`` / ``weak:<reason>`` / ``unreadable``。
+
+    只有**主源亲自观察到起播和结束**（`Completion.is_strong`）才算 finished；
+    影子兜底、宽限兜底、超时、未见起播、等待期间出现过未恢复的暂停，以及跨代次
+    （since_seq 之前）的证据一律弱完成——B-03 规定这些都不能驱动自动续播。
+    超时不再用设备回读「补」成完成：读回 idle 只能证明现在空闲，不能证明这首播完了。
+    """
     from core.device import get_playback_events
 
     duration = item.get("duration_s")
@@ -957,28 +986,16 @@ async def _wait_track_end(item: dict) -> str:
         else 240.0
     )
     budget_ms = max(60_000.0, seconds * 1000.0 + 30_000.0)
-    timeouts = 0
-    while True:
-        finished, _started, reason = await get_playback_events().wait_for_finish(
-            budget_ms
-        )
-        if not finished:
-            return "unreadable"
-        if reason != "timeout":
-            return "finished"
-        speaker = get_speaker()
-        status = None
-        if speaker is not None:
-            try:
-                status = await speaker.get_playing(sync=True)
-            except Exception:  # noqa: BLE001 - 回读失败按不可判定处理
-                status = None
-        if status in ("playing", "paused"):
-            timeouts += 1
-            if timeouts >= _ADVANCE_TIMEOUTS:
-                return "still_playing"
-            continue
-        return "finished" if status == "idle" else "unreadable"
+    done = await get_playback_events().wait_for_finish(
+        budget_ms, since_seq=since_seq
+    )
+    if not done.finished:
+        return "unreadable"
+    if done.paused:
+        return "weak:paused"
+    if not done.is_strong:
+        return f"weak:{done.reason}"
+    return "finished"
 
 
 def _cancel_advance() -> None:
@@ -1025,7 +1042,7 @@ async def _auto_advance(generation: int) -> None:
         if item is None:
             return
         started_at = float(_state.get("started_at") or 0.0)
-        outcome = await _wait_track_end(item)
+        outcome = await _wait_track_end(item, _state.get("play_seq"))
         if generation != _generation or not _state.get("album"):
             return
         if _state.get("current") is not item:
@@ -1115,7 +1132,7 @@ async def _do_switch_serial(delta: int, *, announce: bool = True) -> str:
             return "没有更早的曲目了"
 
     async with aiohttp.ClientSession() as session:
-        ok, confirmed, played = await _start_item(
+        ok, confirmed, played, play_seq = await _start_item(
             speaker,
             session,
             item,
@@ -1135,6 +1152,7 @@ async def _do_switch_serial(delta: int, *, announce: bool = True) -> str:
         state["index"] = state["candidates"].index(item)
     state["current"] = played
     state["started_at"] = time.monotonic()
+    state["play_seq"] = int(play_seq or 0)
     # 切歌即换曲：作废旧续播任务/暂停态，并按专辑队列重新挂续播监听
     _generation += 1
     _paused_for_wakeup = False
@@ -1161,4 +1179,5 @@ _state: dict = {
     "index": -1,      # 当前曲在候选集中的下标
     "album": False,   # 队列是否来自专辑连播（next/prev 允许跨源补同一首）
     "started_at": 0.0,  # 当前曲起播时刻（monotonic；自动续播判断「真播完」用）
+    "play_seq": 0,    # 起播前的事件序号：完成监听只认它之后的事件（B-03）
 }

@@ -166,6 +166,26 @@ class AnnounceNormalPathTest(AnnounceTestBase):
         self.assertTrue(session.wait_finished)
         self.assertFalse(session.wait_started)
         self.assertIn(session.wait_reason, ("idle", "idle_grace"))
+        # B-03：完成证据要带上来源与质量，弱证据不得冒充「完整播完」
+        self.assertEqual("weak", session.wait_quality)
+        self.assertEqual("context", session.wait_source)
+
+    def test_weak_completion_is_reported_as_weak_evidence(self) -> None:
+        self.device.on("text_to_speech", '{"code": 0}')
+        self.device.on("player_get_context", _context(0))  # 从未观察到起播
+
+        async def scenario():
+            async with self.speaker.announce(text="长文本播报", reason="t") as session:
+                await self.speaker.play(text="长文本播报", blocking=False)
+            return session
+
+        # 例行的宽限兜底走 DEBUG（不刷屏），但结论必须如实带上质量
+        with mock.patch.object(speaker_module.logger, "debug") as debug:
+            session = _run(scenario())
+        messages = " ".join(str(call.args[0]) for call in debug.call_args_list)
+        self.assertIn("weak evidence", messages)
+        self.assertIn("quality=weak", messages)
+        self.assertEqual("weak", session.wait_quality)
 
     def test_blocking_caller_with_wait_false_skips_second_wait(self) -> None:
         self.device.on("text_to_speech", _synth())

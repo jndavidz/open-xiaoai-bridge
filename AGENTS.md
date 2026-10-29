@@ -597,6 +597,15 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 - `event_plane.source`（context/client/native，默认 context）、`shadow_sources`
   （默认 ["client"]）、`poll_interval_ms`、`start_grace_ms`、`native_cmd`（默认空 =
   不启动 native 源；运行时镜像无 ssh，勿加依赖）。适配器支持热重载。
+- **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
+  quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
+  亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
+  `_wait_track_end` 只认 `is_strong` 且未暂停的完成，**超时不靠读回补成完成**；
+  `context` 的 status=2 按**暂停**（不是空闲）处理，暂停后未恢复的 idle 不算播完。
+  跨曲排除旧事件：在**下发播放命令之前**取 `begin_playback()` 并把序号传给
+  `wait_for_finish(since_seq=...)`（选曲播报在 URL 起播前取号，播报自身事件不计入）；
+  旧 `paused` 不再给「已在播放」背书。native：`prepare()` 做有界就绪确认（进程存活），
+  零行退出按 5s→10s→…（上限 60s）退避，每个退避窗口最多强制重启一次。
 - `inject.enabled`（默认 false）或环境变量 `INJECT_ENABLE`：关闭时不监听 `:9093`，
   注入端点 503；开启时窗口 = 闸门 + 中继 + 唤醒，三者同开同关。
   ⚠️ **开启 ≠ 可裸奔（票 12）**：未配 `INJECT_ALLOW_CIDR` 且未显式 `INJECT_ALLOW_ANON=1`
@@ -836,4 +845,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**828 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 参数闸门用例 = 828。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**846 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

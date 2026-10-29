@@ -1215,12 +1215,27 @@ class AutoAdvanceTest(unittest.TestCase):
         self.assertEqual("以父之名", song_request._state["current"]["name"])
         self.assertEqual([], [p["url"] for p in speaker.play_calls if p["url"]])
 
+    def test_weak_completion_does_not_advance(self):
+        # B-03：影子/宽限兜底的完成是弱证据，不能驱动自动续播
+        t1 = self._track(1, "以父之名", "a1")
+        t2 = self._track(2, "懦夫", "a2")
+        speaker = FakeSpeaker()
+
+        async def fn():
+            song_request._note_played(t1, [t2], album_mode=True)
+            song_request._state["started_at"] -= t1["duration_s"]
+            await song_request._advance_task
+
+        self._run_with_end("weak:shadow_finished", {"speaker": speaker, "fn": fn})
+        self.assertEqual("以父之名", song_request._state["current"]["name"])
+        self.assertEqual([], [p["url"] for p in speaker.play_calls if p["url"]])
+
     def test_stop_cancels_pending_advance(self):
         t1 = self._track(1, "以父之名", "a1")
         t2 = self._track(2, "懦夫", "a2")
         speaker = FakeSpeaker()
 
-        async def _blocking_wait(_item):
+        async def _blocking_wait(_item, _since_seq=None):
             await asyncio.sleep(3600)
             return "finished"
 
@@ -1505,6 +1520,82 @@ class WakeupPauseTest(unittest.TestCase):
 
         with mock.patch.object(song_request, "get_speaker", return_value=None):
             _run(scenario())
+
+
+class WaitTrackEndQualityTest(unittest.TestCase):
+    """B-03：只有「主源观察到起播 + 观察到结束」才算 finished。"""
+
+    def _track_end(self, completion, since_seq=11):
+        fake = mock.Mock()
+        fake.wait_for_finish = mock.AsyncMock(return_value=completion)
+        with mock.patch("core.device.get_playback_events", return_value=fake):
+            outcome = _run(
+                song_request._wait_track_end({"duration_s": 10}, since_seq=since_seq)
+            )
+        return outcome, fake
+
+    def test_shadow_finished_is_weak(self):
+        from core.device.playback_events import Completion
+
+        outcome, _ = self._track_end(
+            Completion(True, True, "shadow_finished", "weak", "client")
+        )
+        self.assertEqual("weak:shadow_finished", outcome)
+
+    def test_idle_grace_is_weak(self):
+        from core.device.playback_events import Completion
+
+        outcome, _ = self._track_end(
+            Completion(True, False, "idle_grace", "weak", "context")
+        )
+        self.assertEqual("weak:idle_grace", outcome)
+
+    def test_timeout_never_completes_even_with_readback(self):
+        # 超时读回 idle 只能证明「现在空闲」，不能证明这首播完了
+        from core.device.playback_events import Completion
+
+        outcome, _ = self._track_end(
+            Completion(True, True, "timeout", "weak", None)
+        )
+        self.assertEqual("weak:timeout", outcome)
+
+    def test_paused_before_idle_is_not_a_finish(self):
+        from core.device.playback_events import Completion
+
+        outcome, _ = self._track_end(
+            Completion(True, True, "idle", "strong", "context", paused=True)
+        )
+        self.assertEqual("weak:paused", outcome)
+
+    def test_primary_idle_with_start_is_finished(self):
+        from core.device.playback_events import Completion
+
+        outcome, _ = self._track_end(Completion(True, True, "idle", "strong", "context"))
+        self.assertEqual("finished", outcome)
+
+    def test_native_finished_event_is_finished(self):
+        from core.device.playback_events import Completion
+
+        outcome, _ = self._track_end(
+            Completion(True, True, "finished_event", "strong", "native")
+        )
+        self.assertEqual("finished", outcome)
+
+    def test_no_observation_is_unreadable(self):
+        from core.device.playback_events import Completion
+
+        outcome, _ = self._track_end(
+            Completion(False, False, "no_observation", None, None)
+        )
+        self.assertEqual("unreadable", outcome)
+
+    def test_begin_playback_seq_is_forwarded(self):
+        from core.device.playback_events import Completion
+
+        _, fake = self._track_end(
+            Completion(True, True, "idle", "weak", "context"), since_seq=42
+        )
+        self.assertEqual(42, fake.wait_for_finish.await_args.kwargs["since_seq"])
 
 
 if __name__ == "__main__":

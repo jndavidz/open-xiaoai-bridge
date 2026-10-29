@@ -16,6 +16,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -30,6 +31,11 @@ from core.device.playback_events import (  # noqa: E402
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _triple(result):
+    """Completion 的旧三元组视图（断言只看这三项）。"""
+    return (result.finished, result.started, result.reason)
 
 
 class SequenceReader:
@@ -90,7 +96,7 @@ class ContextSourceTest(unittest.TestCase):
         result = _run(adapter.wait_for_finish(2000, 100))
         elapsed = time.monotonic() - started
 
-        self.assertEqual(result, (True, True, "idle"))
+        self.assertEqual(_triple(result), (True, True, "idle"))
         self.assertLess(elapsed, 1.0)
 
     def test_never_playing_but_idle_finishes_after_grace(self) -> None:
@@ -100,7 +106,7 @@ class ContextSourceTest(unittest.TestCase):
         result = _run(adapter.wait_for_finish(2000, 40))
         elapsed_ms = (time.monotonic() - started) * 1000
 
-        self.assertEqual(result, (True, False, "idle_grace"))
+        self.assertEqual(_triple(result), (True, False, "idle_grace"))
         self.assertGreaterEqual(elapsed_ms, 30.0, "必须等宽限期，不能一看到空闲就返回")
         self.assertLess(elapsed_ms, 1000.0)
 
@@ -109,14 +115,14 @@ class ContextSourceTest(unittest.TestCase):
 
         result = _run(adapter.wait_for_finish(80, 10))
 
-        self.assertEqual(result, (False, False, "no_observation"))
+        self.assertEqual(_triple(result), (False, False, "no_observation"))
 
     def test_reader_exception_is_treated_as_no_observation(self) -> None:
         adapter = make_adapter(reader=SequenceReader([RuntimeError("rpc broken")]))
 
         result = _run(adapter.wait_for_finish(80, 10))
 
-        self.assertEqual(result, (False, False, "no_observation"))
+        self.assertEqual(_triple(result), (False, False, "no_observation"))
 
     def test_started_without_finish_uses_timeout_fallback(self) -> None:
         adapter = make_adapter(reader=SequenceReader([1]))
@@ -125,7 +131,7 @@ class ContextSourceTest(unittest.TestCase):
         result = _run(adapter.wait_for_finish(120, 10))
         elapsed = time.monotonic() - started
 
-        self.assertEqual(result, (True, True, "timeout"))
+        self.assertEqual(_triple(result), (True, True, "timeout"))
         self.assertGreaterEqual(elapsed, 0.1)
         self.assertLess(elapsed, 1.0)
 
@@ -134,7 +140,7 @@ class ContextSourceTest(unittest.TestCase):
 
         result = _run(adapter.wait_for_finish(80, 5000))
 
-        self.assertEqual(result, (True, False, "timeout"))
+        self.assertEqual(_triple(result), (True, False, "timeout"))
 
 
 class ClientSourceTest(unittest.TestCase):
@@ -149,7 +155,7 @@ class ClientSourceTest(unittest.TestCase):
             adapter.feed_client_status("idle")
             return await task
 
-        self.assertEqual(_run(scenario()), (True, True, "idle"))
+        self.assertEqual(_triple(_run(scenario())), (True, True, "idle"))
 
     def test_paused_is_not_finished(self) -> None:
         adapter = make_adapter(source="client", grace=100)
@@ -168,7 +174,7 @@ class ClientSourceTest(unittest.TestCase):
         result = _run(scenario())
         elapsed = time.monotonic() - started
 
-        self.assertEqual(result, (True, True, "timeout"))
+        self.assertEqual(_triple(result), (True, True, "timeout"))
         self.assertGreaterEqual(elapsed, 0.15, "paused 不得提前解锁")
         self.assertNotEqual(result[2], "idle")
 
@@ -181,7 +187,7 @@ class ClientSourceTest(unittest.TestCase):
             adapter.feed_client_status("paused")
             return await task
 
-        self.assertEqual(_run(scenario()), (True, True, "timeout"))
+        self.assertEqual(_triple(_run(scenario())), (True, True, "timeout"))
 
     def test_duplicate_and_out_of_order_events(self) -> None:
         adapter = make_adapter(source="client", grace=100)
@@ -199,7 +205,7 @@ class ClientSourceTest(unittest.TestCase):
 
         result = _run(scenario())
 
-        self.assertEqual(result, (True, True, "idle"))
+        self.assertEqual(_triple(result), (True, True, "idle"))
 
     def test_playing_before_wait_is_entry_state(self) -> None:
         adapter = make_adapter(source="client", grace=100)
@@ -211,14 +217,14 @@ class ClientSourceTest(unittest.TestCase):
             adapter.feed_client_status("idle")
             return await task
 
-        self.assertEqual(_run(scenario()), (True, True, "idle"))
+        self.assertEqual(_triple(_run(scenario())), (True, True, "idle"))
 
     def test_no_events_at_all_cannot_confirm(self) -> None:
         adapter = make_adapter(source="client", grace=10)
 
         result = _run(adapter.wait_for_finish(60))
 
-        self.assertEqual(result, (False, False, "no_observation"))
+        self.assertEqual(_triple(result), (False, False, "no_observation"))
 
     def test_unknown_client_payload_is_ignored(self) -> None:
         adapter = make_adapter(source="client", grace=10)
@@ -230,7 +236,7 @@ class ClientSourceTest(unittest.TestCase):
             adapter.feed_client_status("")
             return await task
 
-        self.assertEqual(_run(scenario()), (False, False, "no_observation"))
+        self.assertEqual(_triple(_run(scenario())), (False, False, "no_observation"))
 
 
 class NativeLineParseTest(unittest.TestCase):
@@ -303,7 +309,7 @@ class NativeSourceTest(unittest.TestCase):
             )
             return await task
 
-        self.assertEqual(_run(scenario()), (True, True, "finished_event"))
+        self.assertEqual(_triple(_run(scenario())), (True, True, "finished_event"))
 
     def test_native_without_cmd_does_not_start_stream(self) -> None:
         adapter = make_adapter(source="native", grace=10)
@@ -311,7 +317,7 @@ class NativeSourceTest(unittest.TestCase):
         result = _run(adapter.wait_for_finish(60))
         snapshot = adapter.snapshot()
 
-        self.assertEqual(result, (False, False, "no_observation"))
+        self.assertEqual(_triple(result), (False, False, "no_observation"))
         self.assertFalse(snapshot["native_cmd_configured"])
         self.assertFalse(snapshot["native_running"])
 
@@ -327,7 +333,7 @@ class ShadowModeTest(unittest.TestCase):
         result = _run(adapter.wait_for_finish(2000, 50))
         snapshot = adapter.snapshot()
 
-        self.assertEqual(result, (True, True, "idle"))
+        self.assertEqual(_triple(result), (True, True, "idle"))
         # client 影子源什么都没看到 ⇒ 开始标志不一致（且没来得及看到结束）
         self.assertGreaterEqual(snapshot["mismatch_count"], 1)
         self.assertIsNotNone(snapshot["last_mismatch"])
@@ -382,8 +388,191 @@ class ShadowModeTest(unittest.TestCase):
         result = _run(scenario())
         elapsed = time.monotonic() - started
 
-        self.assertEqual(result, (True, True, "idle"))
+        self.assertEqual(_triple(result), (True, True, "idle"))
         self.assertLess(elapsed, 1.0, "影子源是慢速轮询时不得阻塞主等待")
+
+
+class GenerationBindingTest(unittest.TestCase):
+    """B-03：起播序号之前的证据不能完成本次播放。"""
+
+    def test_entry_playing_is_ignored_when_since_seq_given(self) -> None:
+        adapter = make_adapter(source="client", grace=10)
+        adapter.feed_client_status("playing")          # 上一段播放的开播事件
+        seq = adapter.begin_playback()
+
+        async def scenario():
+            task = asyncio.ensure_future(
+                adapter.wait_for_finish(80, since_seq=seq)
+            )
+            await asyncio.sleep(0.01)
+            adapter.feed_client_status("idle")          # 新事件，但本次从未起播
+            return await task
+
+        result = _run(scenario())
+        self.assertEqual(_triple(result), (True, False, "idle_grace"))
+        self.assertEqual(result.quality, "weak")
+
+    def test_events_after_begin_playback_still_complete(self) -> None:
+        adapter = make_adapter(source="client", grace=10)
+        adapter.feed_client_status("playing")          # 旧段
+        seq = adapter.begin_playback()
+
+        async def scenario():
+            task = asyncio.ensure_future(
+                adapter.wait_for_finish(200, since_seq=seq)
+            )
+            await asyncio.sleep(0.01)
+            adapter.feed_client_status("playing")       # 本段真正起播
+            await asyncio.sleep(0.01)
+            adapter.feed_client_status("idle")
+            return await task
+
+        result = _run(scenario())
+        self.assertEqual(_triple(result), (True, True, "idle"))
+        self.assertEqual(result.source, "client")
+        # 主源（client）亲自看到起播+结束 ⇒ strong；只有影子/宽限兜底才是 weak
+        self.assertEqual(result.quality, "strong")
+
+    def test_entry_paused_does_not_count_as_started(self) -> None:
+        """旧 paused 不能给「等待开始时已在播放」背书（B-03）。"""
+
+        adapter = make_adapter(source="client", grace=10)
+        adapter.feed_client_status("paused")
+
+        async def scenario():
+            task = asyncio.ensure_future(adapter.wait_for_finish(80))
+            await asyncio.sleep(0.01)
+            adapter.feed_client_status("idle")
+            return await task
+
+        result = _run(scenario())
+        self.assertEqual(_triple(result), (True, False, "idle_grace"))
+        self.assertEqual(result.quality, "weak")
+
+
+class _EofStream:
+    async def readline(self) -> bytes:
+        return b""
+
+
+class PausedEvidenceTest(unittest.TestCase):
+    """B-03：暂停不是结束；暂停后未恢复的 idle 不能当作播完。"""
+
+    def test_paused_mid_wait_keeps_paused_flag(self) -> None:
+        adapter = make_adapter(source="client", grace=10)
+
+        async def scenario():
+            task = asyncio.ensure_future(adapter.wait_for_finish(200))
+            await asyncio.sleep(0.01)
+            adapter.feed_client_status("playing")
+            await asyncio.sleep(0.01)
+            adapter.feed_client_status("paused")
+            await asyncio.sleep(0.01)
+            adapter.feed_client_status("idle")
+            return await task
+
+        result = _run(scenario())
+        self.assertEqual(_triple(result), (True, True, "idle"))
+        self.assertTrue(result.paused, "暂停后未恢复必须留痕")
+
+    def test_context_status_2_is_paused_not_idle(self) -> None:
+        adapter = make_adapter(
+            source="context", reader=SequenceReader([2]), grace=10
+        )
+        result = _run(adapter.wait_for_finish(60))
+        # 2 曾被当成空闲 ⇒ 宽限后假完成；现在按暂停处理，只能走超时兜底
+        self.assertEqual(_triple(result), (True, True, "timeout"))
+        self.assertTrue(result.paused)
+
+
+class _BlockingStream:
+    """永不 EOF 的假 stdout（流保持存活）。"""
+
+    async def readline(self) -> bytes:
+        await asyncio.sleep(3600)
+        return b""
+
+
+class _EofProcess:
+    """立即 EOF 的假子进程（模拟 cmd 不存在 / 无行退出）。"""
+
+    def __init__(self) -> None:
+        self.stdout = _EofStream()
+        self.returncode = None
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+
+class NativeBackoffTest(unittest.TestCase):
+    """B-03：native 无行退出后按退避，重复 prepare 不得形成 fork 风暴。"""
+
+    def test_repeated_prepare_spawns_once_per_backoff_window(self) -> None:
+        adapter = make_adapter(source="native", native_cmd="false")
+        spawns: list[str] = []
+
+        async def fake_spawn(cmd, **kwargs):
+            spawns.append(str(cmd))
+            return _EofProcess()
+
+        async def scenario():
+            with mock.patch("asyncio.create_subprocess_shell", fake_spawn):
+                first = await adapter.prepare()
+                await asyncio.sleep(0.02)   # 让 reader 跑完并登记退避
+                second = await adapter.prepare()
+                third = await adapter.prepare()
+            return first, second, third
+
+        first, second, third = _run(scenario())
+        self.assertFalse(second)
+        self.assertFalse(third)
+        self.assertEqual(1, len(spawns), spawns)
+        # 假进程立即 EOF：就绪确认必须如实返回 False（不能只看「fork 成功」）
+        self.assertFalse(first)
+        self.assertGreaterEqual(adapter.snapshot()["native_attempts"], 1)
+
+    def test_reconnect_happens_after_the_backoff_expires(self) -> None:
+        adapter = make_adapter(source="native", native_cmd="false")
+        spawns: list[str] = []
+
+        async def fake_spawn(cmd, **kwargs):
+            spawns.append(str(cmd))
+            return _EofProcess()
+
+        async def scenario():
+            with mock.patch("asyncio.create_subprocess_shell", fake_spawn):
+                await adapter.prepare()
+                await asyncio.sleep(0.02)
+                adapter._native_retry_at = 0.0   # 模拟退避窗口已过
+                adapter._native_force_at = 0.0
+                second = await adapter.prepare()
+            return second
+
+        _run(scenario())
+        self.assertEqual(2, len(spawns), "退避到期后必须允许重连")
+
+    def test_prepare_reports_ready_for_a_live_stream(self) -> None:
+        adapter = make_adapter(source="native", native_cmd="cat")
+        spawns: list[str] = []
+
+        class _LiveProcess:
+            def __init__(self) -> None:
+                self.stdout = _BlockingStream()
+                self.returncode = None
+
+            def terminate(self) -> None:
+                self.returncode = 0
+
+        async def fake_spawn(cmd, **kwargs):
+            spawns.append(str(cmd))
+            return _LiveProcess()
+
+        async def scenario():
+            with mock.patch("asyncio.create_subprocess_shell", fake_spawn):
+                return await adapter.prepare()
+
+        self.assertTrue(_run(scenario()))
+        self.assertEqual(1, len(spawns))
 
 
 class SnapshotAndConfigTest(unittest.TestCase):
@@ -452,7 +641,7 @@ class ShadowFallbackTest(unittest.TestCase):
             adapter.feed_client_status("idle")
             return await task
 
-        self.assertEqual(_run(scenario()), (True, True, "shadow_finished"))
+        self.assertEqual(_triple(_run(scenario())), (True, True, "shadow_finished"))
         last = adapter.snapshot()["last_result"]
         self.assertEqual(last["reason"], "shadow_finished")
         self.assertEqual(last["completion_source"], "client")
@@ -471,7 +660,7 @@ class ShadowFallbackTest(unittest.TestCase):
             adapter.feed_client_status("idle")
             return await task
 
-        self.assertEqual(_run(scenario()), (False, False, "no_observation"))
+        self.assertEqual(_triple(_run(scenario())), (False, False, "no_observation"))
 
 
 if __name__ == "__main__":

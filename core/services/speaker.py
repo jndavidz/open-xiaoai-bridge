@@ -119,15 +119,36 @@ def find_blocked_word(text: str | None) -> str | None:
     return None
 
 
+def _log_completion_evidence(reason: str, done) -> None:
+    """弱完成如实落日志（B-03）。
+
+    影子兜底意味着主源整段没观测到（事件面降级）⇒ WARNING；宽限/超时/未起播
+    是短播报的例行结局 ⇒ DEBUG（不污染 INFO，结论仍落在 session 字段与快照里）。
+    """
+
+    message = (
+        "[Speaker] completion is weak evidence "
+        f"(reason={reason!r}, wait_reason={done.reason}, source={done.source}, "
+        f"quality={done.quality}, started={done.started}, paused={done.paused})"
+    )
+    if done.reason == "shadow_finished":
+        logger.warning(message)
+    else:
+        logger.debug(message)
+
+
 class _AnnounceSession:
     """一次 announce 的观测句柄：等待完成的结局（测试与调用方可读）。"""
 
-    __slots__ = ("wait_finished", "wait_started", "wait_reason")
+    __slots__ = ("wait_finished", "wait_started", "wait_reason",
+                 "wait_quality", "wait_source")
 
     def __init__(self) -> None:
         self.wait_finished: bool | None = None
         self.wait_started: bool | None = None
         self.wait_reason: str | None = None
+        self.wait_quality: str | None = None
+        self.wait_source: str | None = None
 
 
 class SpeakerManager:
@@ -285,20 +306,20 @@ class SpeakerManager:
         """
 
         budget_ms = estimate_playback_budget_ms(text, timeout_ms)
-        finished, started, reason = await get_playback_events().wait_for_finish(
-            budget_ms
-        )
-        if not finished:
+        done = await get_playback_events().wait_for_finish(budget_ms)
+        if not done.finished:
             logger.warning(
                 "[Speaker] playback status readback failed, cannot confirm "
-                f"completion (budget={budget_ms:.0f}ms, reason={reason})"
+                f"completion (budget={budget_ms:.0f}ms, reason={done.reason})"
             )
-        elif reason == "timeout":
+        elif done.reason == "timeout":
             logger.warning(
                 f"[Speaker] playback completion not observed, timeout fallback "
-                f"(budget={budget_ms:.0f}ms, started={started})"
+                f"(budget={budget_ms:.0f}ms, started={done.started})"
             )
-        return finished
+        elif not done.is_strong:
+            _log_completion_evidence(text, done)
+        return done.finished
 
     async def _cleanup_tts_file(self, path: str) -> None:
         """删除合成临时文件；前缀不是 /tmp/tts/ 时只告警、绝不删除。"""
@@ -649,25 +670,34 @@ class SpeakerManager:
                     await get_playback_events().prepare()
                 except Exception as exc:  # noqa: BLE001 - 预启动失败不影响播报
                     logger.debug(f"[Speaker] native event prepare failed: {exc}")
+                # 本次播报的下界：进入 announce 之前的事件（上一段播放的
+                # playing/idle）不能给这次播报当起播/结束证据（B-03）。
+                announce_seq = get_playback_events().begin_playback()
                 yield session
                 if wait:
-                    finished, started, wait_reason = (
-                        await get_playback_events().wait_for_finish(wait_budget_ms)
+                    done = await get_playback_events().wait_for_finish(
+                        wait_budget_ms, since_seq=announce_seq
                     )
-                    session.wait_finished = finished
-                    session.wait_started = started
-                    session.wait_reason = wait_reason
-                    if not finished:
+                    session.wait_finished = done.finished
+                    session.wait_started = done.started
+                    session.wait_reason = done.reason
+                    session.wait_quality = done.quality
+                    session.wait_source = done.source
+                    if not done.finished:
                         logger.warning(
                             "[Speaker] announce completion unconfirmed "
-                            f"(reason={reason!r}, wait_reason={wait_reason}, "
+                            f"(reason={reason!r}, wait_reason={done.reason}, "
                             f"budget={wait_budget_ms:.0f}ms)"
                         )
-                    elif wait_reason == "timeout":
+                    elif done.reason == "timeout":
                         logger.warning(
                             "[Speaker] announce completion not observed, "
                             f"timeout fallback (reason={reason!r})"
                         )
+                    elif not done.is_strong:
+                        # 弱证据：没有观察到起播、或只有影子/宽限兜底。保留结局
+                        # 但显式标注，不能让长文本播报冒充「完整播完」。
+                        _log_completion_evidence(reason, done)
             finally:
                 self._ungate_kws(kws, token)
 

@@ -2,13 +2,14 @@
 
 对上层只暴露两件事：
 
-    finished, started, reason = await adapter.wait_for_finish(timeout_ms, start_grace_ms)
+    done = await adapter.wait_for_finish(timeout_ms, start_grace_ms)
+    done.finished / done.started / done.reason / done.quality / done.paused
     adapter.snapshot()
 
 三种事件源（`event_plane.source` 选主源，`shadow_sources` 并行比对）：
 
   - ``context``（默认）：每 ``poll_interval_ms`` 轮询能力层
-    ``player_context().info.status``（1=播放中，0/2=空闲）。这是 ticket 03
+    ``player_context().info.status``（1=播放中，0=空闲，2=暂停）。这是 ticket 03
     阻塞播报的原始行为，原样搬进本模块，作为统一入口。
   - ``client``：client 侧 ``playing`` 事件（``XiaoAI.on_event`` 的 playing
     分支喂入）。``playing`` → 开始；``idle`` → 结束；``paused`` 不算结束。
@@ -36,12 +37,13 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, NamedTuple
 
 from core.utils.logger import logger
 from core.utils import turn_trace
 
 __all__ = [
+    "Completion",
     "DEFAULT_EVENT_PLANE",
     "EventPlaneConfig",
     "PlaybackEventAdapter",
@@ -51,6 +53,27 @@ __all__ = [
     "set_playback_events",
 ]
 
+
+class Completion(NamedTuple):
+    """一次完成等待的结论。
+
+    ``quality=strong`` ⇔ 主源亲自观察到起播**和**结束（context idle / native
+    finished_event）；影子兜底、宽限兜底、超时、未见起播一律 ``weak``。
+    ``paused=True`` 表示等待期间看到过暂停且之后没有恢复——暂停后的 idle 不能
+    当作「播完」。
+    """
+
+    finished: bool
+    started: bool
+    reason: str
+    quality: str | None = None   # strong | weak | None（未完成）
+    source: str | None = None    # 完成事实来自哪个源（primary 或影子）
+    paused: bool = False         # 等待期间出现过未恢复的暂停
+
+    @property
+    def is_strong(self) -> bool:
+        return self.quality == "strong"
+
 SOURCES: tuple[str, ...] = ("context", "client", "native")
 DEFAULT_SOURCE = "context"
 DEFAULT_SHADOW_SOURCES: tuple[str, ...] = ("client",)
@@ -59,7 +82,8 @@ DEFAULT_START_GRACE_MS = 1000.0
 
 # `player_get_context.info.status`：1 = 播放中；0/2 = 链路空闲（0 空闲、2 暂停）。
 CONTEXT_PLAYING_STATUS = 1
-CONTEXT_IDLE_STATUSES = (0, 2)
+CONTEXT_IDLE_STATUSES = (0,)
+CONTEXT_PAUSED_STATUSES = (2,)
 
 # 影子比对的默认容差：小于它视为同一时刻（轮询粒度不同会导致必然偏差）。
 _MIN_MISMATCH_TOLERANCE_MS = 500.0
@@ -224,6 +248,8 @@ def _context_kind(status: Any) -> str | None:
         return None
     if status == CONTEXT_PLAYING_STATUS:
         return "playing"
+    if status in CONTEXT_PAUSED_STATUSES:
+        return "paused"
     if status in CONTEXT_IDLE_STATUSES:
         return "idle"
     return None
@@ -239,6 +265,7 @@ class _SourceState:
 
     kind: str
     at: float
+    seq: int = 0
 
 
 @dataclass
@@ -255,6 +282,7 @@ class _SourceView:
     idle_seen_at_ms: float | None = None
     observations: int = 0
     entry_observed: bool = False
+    paused: bool = False          # 本段等待里出现过未恢复的暂停
     reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -339,6 +367,7 @@ class PlaybackEventAdapter:
         # 状态与订阅者列表都必须用线程锁保护。
         self._state_lock = threading.Lock()
         self._states: dict[str, _SourceState] = {}
+        self._seq = 0          # 单调事件序号（begin_playback / since_seq 绑定用）
         self._source_events: dict[str, int] = {source: 0 for source in SOURCES}
         self._recent_events: deque[dict[str, Any]] = deque(maxlen=_RECENT_EVENTS_MAX)
         self._sessions: list[_WaitSession] = []
@@ -350,9 +379,13 @@ class PlaybackEventAdapter:
         self._native_task: asyncio.Task | None = None
         self._native_error: str | None = None
         self._native_retry_at = 0.0
+        self._native_force_at = 0.0     # 下一次允许 "立即重试" 的时刻（防 fork 风暴）
+        self._native_attempts = 0       # 连续「零行即退出」的次数（指数退避）
+        self._native_spawn_lines = 0    # 本次子进程产出的行数（判「无行」）
         self._native_lines = 0
         self._native_last_line_at = 0.0
         self._native_warned = False
+        self._native_closing = False    # 主动 close 不算「流自己断了」
 
     # ---- 配置 ----
 
@@ -384,10 +417,21 @@ class PlaybackEventAdapter:
             return
         self._record("native", _native_kind(status))
 
+    def begin_playback(self) -> int:
+        """起播前取事件序号；把返回值传给 `wait_for_finish(since_seq=...)`。
+
+        语义：序号之前的事件属于上一段播放，不能用来证明/结束本次播放。
+        阻塞播报没有这个痛点（起播与等待同一调用栈），可不传。
+        """
+
+        with self._state_lock:
+            return self._seq
+
     def _record(self, source: str, kind: str) -> None:
         at = time.monotonic()
         with self._state_lock:
-            self._states[source] = _SourceState(kind=kind, at=at)
+            self._seq += 1
+            self._states[source] = _SourceState(kind=kind, at=at, seq=self._seq)
             self._source_events[source] = self._source_events.get(source, 0) + 1
             self._recent_events.append({"source": source, "kind": kind, "at": at})
             sessions = list(self._sessions)
@@ -411,17 +455,25 @@ class PlaybackEventAdapter:
         start_grace_ms: float | None = None,
         *,
         poll_interval_ms: float | None = None,
-    ) -> tuple[bool, bool, str]:
+        since_seq: int | None = None,
+    ) -> Completion:
         """等待本次播报结束。
 
-        返回 ``(finished, started, reason)``：
+        返回 ``Completion(finished, started, reason, quality, source)``（可按
+        三元组解包，兼容旧调用）：
 
           - ``finished``：是否可判定「本次播报已结束」。超时兜底也返回 True
             （与 ticket 03 一致：超时是完成判据的兜底，不是失败），只有在
             整个等待期间**完全读不到主源状态**时才返回 False。
           - ``started``：本次等待是否观察到主源进入「播放中」。
           - ``reason``：``idle`` / ``finished_event`` / ``idle_grace`` /
-            ``timeout`` / ``no_observation``。
+            ``timeout`` / ``shadow_finished`` / ``no_observation``。
+          - ``quality``：``strong``（native 原生结束事件）或 ``weak``（其余完成）。
+          - ``source``：完成事实来自哪个源。
+
+        ``since_seq``（来自 `begin_playback()`）：序号之前的状态/事件属于上一段
+        播放，不再作为「等待开始时已在播放」的证据——避免旧 paused/旧 playing
+        与新 idle 拼成一次假完成。
         """
 
         loop = asyncio.get_running_loop()
@@ -442,10 +494,10 @@ class PlaybackEventAdapter:
         now = time.monotonic()
         primary_source, shadow_sources = self._resolve_sources()
         views: dict[str, _SourceView] = {
-            primary_source: self._new_view(primary_source, "primary", now, timeout_s)
+            primary_source: self._new_view(primary_source, "primary", now, timeout_s, since_seq)
         }
         for source in shadow_sources:
-            views[source] = self._new_view(source, "shadow", now, timeout_s)
+            views[source] = self._new_view(source, "shadow", now, timeout_s, since_seq)
 
         session = _WaitSession(
             loop=loop,
@@ -469,8 +521,10 @@ class PlaybackEventAdapter:
                 except ValueError:
                     pass
         result = self._apply_shadow_fallback(session, result)
-        self._finalize_session(session, result)
-        return result
+        view = self._completion_view(session)
+        completion = self._build_completion(session, result, view)
+        self._finalize_session(session, completion, view)
+        return completion
 
     def _resolve_sources(self) -> tuple[str, list[str]]:
         source = self.config.source
@@ -485,7 +539,12 @@ class PlaybackEventAdapter:
         return source, shadows
 
     def _new_view(
-        self, source: str, role: str, now: float, timeout_s: float
+        self,
+        source: str,
+        role: str,
+        now: float,
+        timeout_s: float,
+        since_seq: int | None = None,
     ) -> _SourceView:
         available = source != "native" or bool((self.config.native_cmd or "").strip())
         view = _SourceView(source=source, role=role, available=available)
@@ -496,13 +555,19 @@ class PlaybackEventAdapter:
             state = self._states.get(source)
         if state is None:
             return view
+        if since_seq is not None and state.seq <= since_seq:
+            # 序号之前的事件属于上一段播放：不能当作本次「已在播放」。
+            return view
         if (now - state.at) * 1000.0 > timeout_s * 1000.0:
             return view
         view.entry_observed = True
-        if state.kind in ("playing", "paused"):
-            # paused 表示播放链路曾有内容（client 语义：暂停不是结束）。
+        if state.kind == "playing":
             view.started = True
             view.started_at_ms = 0.0
+        elif state.kind == "paused":
+            # paused 只说明链路曾有内容，**不等于本次已起播**：旧 paused 与新
+            # idle 拼在一起会造出一次假完成（B-03）。
+            pass
         else:
             view.idle_seen_at_ms = 0.0
         return view
@@ -583,13 +648,16 @@ class PlaybackEventAdapter:
         rel = round((at - session.started_at) * 1000.0, 1)
         view.observations += 1
         if kind == "playing":
+            view.paused = False
             if not view.started:
                 view.started = True
                 view.started_at_ms = rel
                 # 乱序（idle 先到、playing 后到）：以 playing 为准重新计时宽限。
                 view.idle_seen_at_ms = None
         elif kind == "paused":
-            # paused 不算结束；它只说明播放链路曾经开始过。
+            # paused 不算结束；它只说明播放链路曾经开始过。**但暂停之后没有恢复**
+            # 就转 idle，多半是用户暂停/被顶掉，不能当作「播完」（B-03）。
+            view.paused = True
             if not view.started:
                 view.started = True
                 view.started_at_ms = rel
@@ -627,6 +695,45 @@ class PlaybackEventAdapter:
         return result
 
     @staticmethod
+    def _completion_view(session: _WaitSession) -> _SourceView | None:
+        """哪条时间线构成了「完成」：主源优先，否则影子源的完整 start→finish。"""
+
+        primary = session.primary
+        if primary.finished:
+            return primary
+        return next(
+            (
+                view
+                for view in session.views.values()
+                if view is not primary and view.available and view.started and view.finished
+            ),
+            None,
+        )
+
+    @classmethod
+    def _build_completion(
+        cls, session: _WaitSession, result: tuple[bool, bool, str],
+        view: "_SourceView | None",
+    ) -> Completion:
+        finished, started, reason = result
+        primary = session.primary
+        if not finished:
+            return Completion(False, started, reason, None, None, primary.paused)
+        if view is None:
+            # timeout 等无完成视图的情形：弱证据，且没有事件源真正「完成」过
+            return Completion(True, started, reason, "weak", None, primary.paused)
+        # strong ⇔ 主源亲自看到起播 + 结束；影子兜底/宽限兜底都是 weak
+        strong = (
+            view is primary
+            and view.started
+            and view.reason in ("idle", "finished_event")
+        )
+        return Completion(
+            True, started, reason, "strong" if strong else "weak",
+            view.source, view.paused,
+        )
+
+    @staticmethod
     def _evaluate(session: _WaitSession) -> tuple[bool, bool, str] | None:
         now = time.monotonic()
         elapsed = now - session.started_at
@@ -657,9 +764,10 @@ class PlaybackEventAdapter:
     # ---- 影子比对与快照 ----
 
     def _finalize_session(
-        self, session: _WaitSession, result: tuple[bool, bool, str]
+        self, session: _WaitSession, result: Completion,
+        completion: "_SourceView | None",
     ) -> None:
-        finished, started, reason = result
+        finished, started, reason = result.finished, result.started, result.reason
         elapsed_ms = round((time.monotonic() - session.started_at) * 1000.0, 1)
         primary = session.primary
         if not primary.reason:
@@ -679,28 +787,8 @@ class PlaybackEventAdapter:
                 view.reason = "no_observation"
 
         timelines = {source: view.as_dict() for source, view in session.views.items()}
-        completion = primary
-        if not primary.finished:
-            completion = next(
-                (
-                    view
-                    for view in session.views.values()
-                    if view is not primary and view.started and view.finished
-                ),
-                None,
-            )
-        completion_source = completion.source if (finished and completion) else None
-        completion_quality = None
-        if finished:
-            completion_quality = (
-                "strong"
-                if (
-                    completion is not None
-                    and completion.source == "native"
-                    and completion.reason == "finished_event"
-                )
-                else "weak"
-            )
+        completion_source = result.source
+        completion_quality = result.quality
         record = {
             "source": primary.source,
             "completion_source": completion_source,
@@ -708,6 +796,7 @@ class PlaybackEventAdapter:
             "finished": finished,
             "started": started,
             "reason": reason,
+            "paused": result.paused,
             "elapsed_ms": elapsed_ms,
             "timelines": timelines,
         }
@@ -819,7 +908,9 @@ class PlaybackEventAdapter:
                     (self.config.native_cmd or "").strip()
                 ),
                 "native_running": self._native_running(),
+                "native_ready": self._native_running(),
                 "native_error": self._native_error,
+                "native_attempts": self._native_attempts,
                 "native_lines": self._native_lines,
                 "native_last_line_age_ms": (
                     _round((now - self._native_last_line_at) * 1000.0)
@@ -842,17 +933,22 @@ class PlaybackEventAdapter:
 
     # ---- native 拉流（默认关闭，仅在配置 native_cmd 时启动）----
 
-    async def prepare(self) -> bool:
-        """起播前预启动 native 流；退避窗口内也允许一次立即尝试。
+    async def prepare(self, ready_timeout_ms: float = 200.0) -> bool:
+        """起播前预启动 native 流，并给出**有界**就绪确认。
 
-        只启动子进程，不等待事件；首行/就绪仍由 wait_for_finish 观察。
-        非 native 主源/影子时 no-op。
+        就绪判据 = 子进程在短窗口内仍然存活（`ubus listen` 只在事件时出流，
+        没有输出不等于没就绪；进程立刻退出才是没就绪）。这样「订阅就绪」不再
+        只能靠第一条播放事件反推（B-03）。非 native 主源/影子时 no-op。
         """
 
         source, shadows = self._resolve_sources()
         if source != "native" and "native" not in shadows:
             return False
-        return await self._ensure_native(force=True)
+        if not await self._ensure_native(force=True):
+            return False
+        budget = max(0.0, min(float(ready_timeout_ms), 2000.0)) / 1000.0
+        await asyncio.sleep(min(0.02, budget))
+        return self._native_running()
 
     async def _ensure_native(self, force: bool = False) -> bool:
         cmd = (self.config.native_cmd or "").strip()
@@ -861,8 +957,10 @@ class PlaybackEventAdapter:
         if self._native_running():
             return True
         now = time.monotonic()
-        if force:
+        if force and now >= self._native_force_at:
+            # 退避窗口内允许一次立即尝试；之后必须等退避，避免每次播报都 fork
             self._native_retry_at = 0.0
+            self._native_force_at = now + self._native_backoff()
         if now < self._native_retry_at:
             return False
         try:
@@ -880,9 +978,15 @@ class PlaybackEventAdapter:
             )
             return False
         self._native_error = None
+        self._native_spawn_lines = 0
         self._native_task = asyncio.ensure_future(self._read_native(proc))
         logger.info("[PlaybackEvents] native event stream started")
         return True
+
+    def _native_backoff(self) -> float:
+        """零行退出的指数退避（5s → 10s → … 上限 60s）。"""
+
+        return min(_NATIVE_RETRY_BACKOFF_S * (2 ** self._native_attempts), 60.0)
 
     async def _read_native(self, proc: Any) -> None:
         stdout = getattr(proc, "stdout", None)
@@ -891,9 +995,14 @@ class PlaybackEventAdapter:
                 line = await stdout.readline()
                 if not line:
                     break
+                text = line.decode("utf-8", "replace")
                 self._native_lines += 1
+                self._native_spawn_lines += 1
                 self._native_last_line_at = time.monotonic()
-                self.feed_native_line(line.decode("utf-8", "replace"))
+                if parse_native_play_status(text) is None:
+                    continue   # 噪声行证明进程活着，但不能抵消「断流」计数
+                self._native_attempts = 0
+                self.feed_native_line(text)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 拉流异常不得影响播报
@@ -907,10 +1016,20 @@ class PlaybackEventAdapter:
             except Exception:  # noqa: BLE001
                 pass
             self._native_task = None
-            self._native_retry_at = time.monotonic() + _NATIVE_RETRY_BACKOFF_S
+            intentional = self._native_closing
+            self._native_closing = False
+            if intentional:
+                return
+            if self._native_spawn_lines == 0:
+                # 一行都没有：命令/网络不对，按指数退避，别每次播报都重 fork
+                self._native_attempts += 1
+            # 先按「本次之前的连续失败次数」算退避，再加一 —— 首次是 5s 不是 10s
+            backoff = self._native_backoff()
+            self._native_retry_at = time.monotonic() + backoff
             logger.warning(
-                "[PlaybackEvents] native event stream ended; "
-                "completion falls back to timeout"
+                "[PlaybackEvents] native event stream ended "
+                f"(lines={self._native_spawn_lines}, attempts={self._native_attempts}, "
+                f"retry_in={backoff:.0f}s); completion falls back to timeout"
             )
 
     async def close(self) -> None:
@@ -919,6 +1038,7 @@ class PlaybackEventAdapter:
         task = self._native_task
         if task is None:
             return
+        self._native_closing = True
         task.cancel()
         try:
             await task
