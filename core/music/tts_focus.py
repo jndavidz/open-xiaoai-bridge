@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -73,11 +74,15 @@ class TtsSpeaker(Protocol):
 
 
 class TtsFocus:
-    def __init__(self, service: ManagedService, player, *, clock=time.monotonic) -> None:
+    def __init__(self, service: ManagedService, player, *, clock=time.monotonic,
+                 confirm_timeout_s: float = 1.5, poll_s: float = 0.1) -> None:
         self.service = service
         self.store = service.store
         self.player = player
         self.clock = clock
+        # 设备暂停不是瞬时生效：必须给一个有界的结算窗口再判「未确认」
+        self.confirm_timeout_s = max(0.0, float(confirm_timeout_s))
+        self.poll_s = max(0.01, float(poll_s))
 
     # ---- 取得 focus（先暂停并确认）----
 
@@ -94,13 +99,27 @@ class TtsFocus:
         if state.phase != Phase.PLAYING:
             raise FocusDenied("music is not playing; refuse to take focus", code="not_playing")
         await self.player.pause(session_id)
-        if await self.player.backend.state() != "paused":
+        state_now = await self._wait_state("paused")
+        if state_now == "idle":
+            # 暂停期间曲目正好放完：没有音乐可让，也就不需要 focus
+            raise FocusDenied("music ended before focus", code="not_playing")
+        if state_now != "paused":
             raise FocusDenied(f"pause not confirmed before {reason}", code="pause_unconfirmed")
         paused = self._require(session_id)          # pause 会 bump epoch
         entry_id = paused.current.entry_id if paused.current else None
         token = self._issue(paused, entry_id, provider)
         self._set_focus(session_id, token.token)
         return token
+
+    async def _wait_state(self, want: str) -> str:
+        """有界结算：设备暂停需要一会儿才在回读里体现。"""
+
+        deadline = self.clock() + self.confirm_timeout_s
+        state = await self.player.backend.state()
+        while state != want and self.clock() < deadline:
+            await asyncio.sleep(self.poll_s)
+            state = await self.player.backend.state()
+        return state
 
     # ---- 播报：每个 provider 独立结果 ----
 

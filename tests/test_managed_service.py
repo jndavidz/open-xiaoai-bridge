@@ -137,6 +137,8 @@ class EventLogTest(_Base):
         self.assertFalse(gap)
         kinds = [e["kind"] for e in events]
         self.assertIn("session_opened", kinds)
+        opened = next(e for e in events if e["kind"] == "session_opened")
+        self.assertEqual(1, opened["epoch"], "session_opened 必须带建会话时的代次")
         command = [e for e in events if e["kind"] == "command"][-1]
         self.assertEqual(receipt.epoch, command["epoch"])
         self.assertEqual(state.epoch, command["epoch"])

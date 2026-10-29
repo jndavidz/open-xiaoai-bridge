@@ -45,8 +45,9 @@ class TargetMismatch(ManagedError):
 COMMANDS: frozenset[str] = frozenset(
     {"play", "pause", "resume", "stop", "next", "prev", "seek"}
 )
-# 只改状态、不需设备执行 ⇒ applied；其余先 accepted，等 B-06 的设备层回执
-_STATE_ONLY = frozenset({"pause", "resume", "stop"})
+# 只改状态、不需设备执行 ⇒ applied；pause/resume/play/next/prev 都要设备动作，
+# 先 accepted，设备确认后由调用方 observe() 推进为 observed。
+_STATE_ONLY = frozenset({"stop"})
 
 
 @dataclass(frozen=True)

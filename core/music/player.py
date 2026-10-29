@@ -264,15 +264,18 @@ class ManagedQueuePlayer:
 
     # ---- 暂停 / seek / 外部接管 ----
 
-    async def pause(self, session_id: str) -> None:
+    async def pause_backend(self) -> None:
+        """只驱动设备暂停 + 冻结探测器（状态/回执由命令层负责）。"""
+
         if self._detector is None:
             raise Unsupported("nothing is playing")
         if not await self.backend.pause():
             raise ManagedError("backend rejected pause")
         self._detector.on_pause(self.clock())
-        self.store.transition(session_id, _mark_paused, events=[{"kind": "paused"}])
 
-    async def resume(self, session_id: str) -> None:
+    async def resume_backend(self) -> None:
+        """只驱动设备恢复 + 解冻探测器（未声明 resume 的 backend 明拒）。"""
+
         if self._detector is None:
             raise Unsupported("nothing is playing")
         if not self.backend.profile.resume:
@@ -280,6 +283,13 @@ class ManagedQueuePlayer:
         if not await self.backend.resume():
             raise ManagedError("backend rejected resume")
         self._detector.on_resume(self.clock())
+
+    async def pause(self, session_id: str) -> None:
+        await self.pause_backend()
+        self.store.transition(session_id, _mark_paused, events=[{"kind": "paused"}])
+
+    async def resume(self, session_id: str) -> None:
+        await self.resume_backend()
         self.store.transition(session_id, _mark_resumed, events=[{"kind": "resumed"}])
 
     async def seek(self, session_id: str, position_s: float) -> None:

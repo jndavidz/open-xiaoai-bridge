@@ -105,7 +105,8 @@ class _Base(unittest.TestCase):
         self.store.mark_playing(self.sid)
         self.backend = FakeBackend("playing")
         self.player = FakePlayer(self.store, self.backend)
-        self.focus = TtsFocus(self.service, self.player)
+        self.focus = TtsFocus(self.service, self.player,
+                              confirm_timeout_s=0.05, poll_s=0.01)
 
     def tearDown(self) -> None:
         self.store.close()
@@ -141,6 +142,50 @@ class AcquireTest(_Base):
         self.service.command(self.sid, kind="stop", principal="p", idem_key="s")
         with self.assertRaises(FocusDenied):
             self._acquire()
+
+    def test_pause_confirm_has_a_settle_window(self) -> None:
+        """设备暂停不是瞬时回读：允许在结算窗口内看到 paused。"""
+
+        class SlowPausePlayer(FakePlayer):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.polls = 0
+
+            async def pause(self, session_id):
+                await super().pause(session_id)
+                self.backend.state_value = "playing"   # 刚下发时还没生效
+
+        slow = SlowPausePlayer(self.store, self.backend)
+        focus = TtsFocus(self.service, slow, confirm_timeout_s=0.5, poll_s=0.01)
+        original_state = slow.backend.state
+
+        async def state():
+            slow.polls += 1
+            if slow.polls >= 3:
+                return "paused"
+            return await original_state()
+
+        slow.backend.state = state
+
+        import asyncio
+
+        token = asyncio.run(focus.acquire(self.sid, provider="xiaoai"))
+        self.assertIsNotNone(token)
+        self.assertGreaterEqual(slow.polls, 3)
+
+    def test_music_ended_during_pause_needs_no_focus(self) -> None:
+        class EndingPlayer(FakePlayer):
+            async def pause(self, session_id):
+                await super().pause(session_id)
+                self.backend.state_value = "idle"
+
+        focus = TtsFocus(self.service, EndingPlayer(self.store, self.backend),
+                         confirm_timeout_s=0.1, poll_s=0.01)
+        with self.assertRaises(FocusDenied) as ctx:
+            import asyncio
+
+            asyncio.run(focus.acquire(self.sid, provider="xiaoai"))
+        self.assertEqual("not_playing", ctx.exception.code)
 
     def test_second_announcement_reissues_the_token(self) -> None:
         first = self._acquire()

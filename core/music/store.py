@@ -91,7 +91,11 @@ class ManagedStore:
             lease_id=str(lease_id),
             target=str(target),
         )
-        stored = self.save_with_events(state, list(events or []))
+        stamped = [
+            ({**event, "epoch": state.epoch} if event.get("epoch") is None else event)
+            for event in (events or [])
+        ]
+        stored = self.save_with_events(state, stamped)
         return state, stored
 
     # ---- 读 ----

@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from core.music.backends import DlnaBackend
+from core.music.backends import RpcBackend
 from core.music.model import ManagedError, TrackRef
 from core.music.player import ManagedQueuePlayer
 from core.music.runtime import ManagedRuntime, get_runtime, set_runtime
@@ -32,8 +32,16 @@ def _build_runtime() -> ManagedRuntime:
     if runtime is not None:
         return runtime
     store = ManagedStore()
+    # B-04：重启只还原元数据并把旧会话置 recovery_pending——绝不自动起播
+    restored = store.restore()
+    if restored:
+        from core.utils.logger import logger
+
+        logger.info(f"[SongBridge] restored {len(restored)} managed session(s) -> recovery_pending")
     service = ManagedService(store=store)
-    player = ManagedQueuePlayer(store, DlnaBackend(), _default_resolver)
+    # 设备通道是 mediaplayer 的 player_play_url（RPC），不是 DLNA SOAP；
+    # 它已验证 pause/play（设备播放控制 CLI），所以用 RpcBackend 的能力矩阵。
+    player = ManagedQueuePlayer(store, RpcBackend(), _default_resolver)
     runtime = ManagedRuntime(player, service=service)
     set_runtime(runtime)
     return runtime
@@ -66,7 +74,7 @@ async def play_items(items: list[dict], *, start_index: int = 0, album: bool = F
                             idem_key=f"stop-{runtime.session_id}")
         except Exception:  # noqa: BLE001 - 旧会话已失效时直接换新
             pass
-    snapshot = service.open_session(target=target(), transport="dlna",
+    snapshot = service.open_session(target=target(), transport="rpc",
                                     player_backend="mediaplayer", principal="song_request")
     sid = snapshot["session_id"]
     for item in items:
@@ -94,10 +102,20 @@ async def command(kind: str, **payload) -> str:
         idem_key=f"{kind}-{runtime.session_id}-{service.store.get(runtime.session_id).epoch}",
         target=target(),
     )
-    if kind in ("next", "prev"):
-        await runtime.player.start(runtime.session_id)
-        # 设备已起播 ⇒ accepted → observed（回执与事件同事务）
-        service.observe(receipt.receipt_id)
+    # 设备动作与状态分离：命令先落状态/回执，再驱动设备；设备确认后 observe。
+    try:
+        if kind == "pause":
+            await runtime.player.pause_backend()
+            service.observe(receipt.receipt_id)
+        elif kind == "resume":
+            await runtime.player.resume_backend()
+            service.observe(receipt.receipt_id)
+        elif kind in ("next", "prev"):
+            await runtime.player.start(runtime.session_id)
+            service.observe(receipt.receipt_id)
+    except Exception as exc:  # noqa: BLE001 - 设备拒绝要如实回报，不假装成功
+        service.observe(receipt.receipt_id, state="failed", detail=str(exc)[:160])
+        return f"托管命令未能执行（{kind}）：{exc}"
     if kind == "stop":
         await runtime.stop()
         runtime.bind(None)

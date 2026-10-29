@@ -33,11 +33,22 @@ class FakePlayer:
     def __init__(self, decisions: list[Decision]):
         self.decisions = decisions
         self.started: list[str] = []
+        self.paused = 0
+        self.resumed = 0
+        self.pause_error: Exception | None = None
         self.ticks = 0
 
     async def start(self, session_id: str) -> bool:
         self.started.append(session_id)
         return True
+
+    async def pause_backend(self) -> None:
+        if self.pause_error:
+            raise self.pause_error
+        self.paused += 1
+
+    async def resume_backend(self) -> None:
+        self.resumed += 1
 
     async def tick(self, session_id: str) -> Decision:
         self.ticks += 1
@@ -145,11 +156,54 @@ class SongBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.session_id)
         self.assertFalse(self.runtime.running)
 
+    async def test_pause_and_resume_drive_the_device_and_mark_observed(self) -> None:
+        await song_bridge.play_items(self._items())
+        sid = self.runtime.session_id
+        pause = await song_bridge.command("pause")
+        self.assertIn("pause", pause)
+        self.assertEqual(1, self.player.paused, "pause 必须真的下发到设备")
+        self.assertEqual("observed", self._receipt_state("pause"))
+
+        resume = await song_bridge.command("resume")
+        self.assertIn("resume", resume)
+        self.assertEqual(1, self.player.resumed, "resume 必须真的恢复播放")
+
+    def _receipt_state(self, kind: str) -> str:
+        # 从事件流里找到最近一次该命令的 receipt，再查它的状态
+        sid = self.runtime.session_id
+        events, _ = self.store.events_after(sid, 0)
+        receipt_id = [e for e in events if e.get("kind") == "command"
+                      and e.get("command") == kind][-1]["receipt_id"]
+        return self.store.receipt_by_id(receipt_id)["state"]
+
+    async def test_device_rejection_is_reported_not_faked(self) -> None:
+        await song_bridge.play_items(self._items())
+        self.player.pause_error = RuntimeError("device busy")
+        result = await song_bridge.command("pause")
+        self.assertIn("未能执行", result)
+        self.assertEqual("failed", self._receipt_state("pause"))
+
     async def test_commands_without_a_session_are_explicit(self) -> None:
         self.assertEqual("托管队列还没有内容", await song_bridge.command("pause"))
 
     async def test_play_items_without_candidates_is_rejected(self) -> None:
         self.assertEqual("没有可播放的曲目", await song_bridge.play_items([]))
+
+    async def test_build_runtime_restores_old_sessions_as_recovery_pending(self) -> None:
+        path = Path(self._tmp.name) / "restore.db"
+
+        def factory():
+            return ManagedStore(path)
+
+        song_bridge._reset_for_tests()   # 让两次构建都走 factory（而不是 setUp 的运行时）
+        with mock.patch.object(song_bridge, "ManagedStore", factory):
+            first = song_bridge._build_runtime()
+            sid = first.service.open_session(target="lx06")["session_id"]
+            song_bridge._reset_for_tests()
+            second = song_bridge._build_runtime()
+            restored = second.service.store.get(sid)
+        self.assertEqual(Phase.RECOVERY_PENDING, restored.phase)
+        self.assertIsNone(restored.recovery_token)
 
 
 class SongRequestDispatchTest(unittest.IsolatedAsyncioTestCase):
