@@ -351,6 +351,7 @@ class PlaybackEventAdapter:
         self._native_error: str | None = None
         self._native_retry_at = 0.0
         self._native_lines = 0
+        self._native_last_line_at = 0.0
         self._native_warned = False
 
     # ---- 配置 ----
@@ -467,6 +468,7 @@ class PlaybackEventAdapter:
                     self._sessions.remove(session)
                 except ValueError:
                     pass
+        result = self._apply_shadow_fallback(session, result)
         self._finalize_session(session, result)
         return result
 
@@ -603,6 +605,28 @@ class PlaybackEventAdapter:
                 view.idle_seen_at_ms = rel
 
     @staticmethod
+    def _apply_shadow_fallback(
+        session: _WaitSession, result: tuple[bool, bool, str]
+    ) -> tuple[bool, bool, str]:
+        """主源完全无观测、影子源却看到完整 start→idle 时，不判失败。
+
+        native 流可能僵尸/退避；client 影子仍能证明本次播放已起播并结束。
+        只在 primary ``no_observation`` 时兜底，且要求影子 started+finished，
+        避免把无关的 idle 当完成。
+        """
+
+        finished, _started, reason = result
+        if finished or reason != "no_observation":
+            return result
+        primary = session.primary
+        for view in session.views.values():
+            if view is primary or not view.available:
+                continue
+            if view.started and view.finished:
+                return True, True, "shadow_finished"
+        return result
+
+    @staticmethod
     def _evaluate(session: _WaitSession) -> tuple[bool, bool, str] | None:
         now = time.monotonic()
         elapsed = now - session.started_at
@@ -639,7 +663,8 @@ class PlaybackEventAdapter:
         elapsed_ms = round((time.monotonic() - session.started_at) * 1000.0, 1)
         primary = session.primary
         if not primary.reason:
-            primary.reason = reason if finished else "no_observation"
+            # 主源没结束而影子兜底成功时，不能把 primary 标成 finished_event。
+            primary.reason = reason if primary.finished else "no_observation"
 
         for view in session.views.values():
             if view.reason:
@@ -654,8 +679,32 @@ class PlaybackEventAdapter:
                 view.reason = "no_observation"
 
         timelines = {source: view.as_dict() for source, view in session.views.items()}
+        completion = primary
+        if not primary.finished:
+            completion = next(
+                (
+                    view
+                    for view in session.views.values()
+                    if view is not primary and view.started and view.finished
+                ),
+                None,
+            )
+        completion_source = completion.source if (finished and completion) else None
+        completion_quality = None
+        if finished:
+            completion_quality = (
+                "strong"
+                if (
+                    completion is not None
+                    and completion.source == "native"
+                    and completion.reason == "finished_event"
+                )
+                else "weak"
+            )
         record = {
             "source": primary.source,
+            "completion_source": completion_source,
+            "completion_quality": completion_quality,
             "finished": finished,
             "started": started,
             "reason": reason,
@@ -724,8 +773,12 @@ class PlaybackEventAdapter:
             started=started,
             reason=reason,
             wait_started_at=session.started_at,
-            started_at_ms=primary.started_at_ms,
-            finished_at_ms=primary.finished_at_ms,
+            started_at_ms=(
+                completion.started_at_ms if completion else primary.started_at_ms
+            ),
+            finished_at_ms=(
+                completion.finished_at_ms if completion else primary.finished_at_ms
+            ),
         )
 
         logger.debug(
@@ -768,6 +821,11 @@ class PlaybackEventAdapter:
                 "native_running": self._native_running(),
                 "native_error": self._native_error,
                 "native_lines": self._native_lines,
+                "native_last_line_age_ms": (
+                    _round((now - self._native_last_line_at) * 1000.0)
+                    if self._native_last_line_at
+                    else None
+                ),
                 "waits": self._waits,
                 "mismatch_count": self._mismatch_count,
                 "shadow_incomplete_count": self._shadow_incomplete_count,
@@ -784,13 +842,27 @@ class PlaybackEventAdapter:
 
     # ---- native 拉流（默认关闭，仅在配置 native_cmd 时启动）----
 
-    async def _ensure_native(self) -> bool:
+    async def prepare(self) -> bool:
+        """起播前预启动 native 流；退避窗口内也允许一次立即尝试。
+
+        只启动子进程，不等待事件；首行/就绪仍由 wait_for_finish 观察。
+        非 native 主源/影子时 no-op。
+        """
+
+        source, shadows = self._resolve_sources()
+        if source != "native" and "native" not in shadows:
+            return False
+        return await self._ensure_native(force=True)
+
+    async def _ensure_native(self, force: bool = False) -> bool:
         cmd = (self.config.native_cmd or "").strip()
         if not cmd:
             return False
         if self._native_running():
             return True
         now = time.monotonic()
+        if force:
+            self._native_retry_at = 0.0
         if now < self._native_retry_at:
             return False
         try:
@@ -820,6 +892,7 @@ class PlaybackEventAdapter:
                 if not line:
                     break
                 self._native_lines += 1
+                self._native_last_line_at = time.monotonic()
                 self.feed_native_line(line.decode("utf-8", "replace"))
         except asyncio.CancelledError:
             raise

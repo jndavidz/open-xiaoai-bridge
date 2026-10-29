@@ -643,6 +643,12 @@ class SpeakerManager:
                             f"(reason={reason!r}, word={word!r})"
                         )
                         raise AnnounceRejected(word)
+                try:
+                    # 起播前预启动 native 事件流：避免首次事件落在流建立之前，
+                    # 也允许在 5s 重连退避窗口内立即重试一次。
+                    await get_playback_events().prepare()
+                except Exception as exc:  # noqa: BLE001 - 预启动失败不影响播报
+                    logger.debug(f"[Speaker] native event prepare failed: {exc}")
                 yield session
                 if wait:
                     finished, started, wait_reason = (

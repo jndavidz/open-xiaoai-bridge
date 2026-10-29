@@ -434,5 +434,45 @@ class SnapshotAndConfigTest(unittest.TestCase):
         self.assertEqual(adapter.config.poll_interval_ms, 7.0)
 
 
+class ShadowFallbackTest(unittest.TestCase):
+    """primary 完全无观测时，影子源的完整 start→idle 不应被判失败。"""
+
+    def test_shadow_finishes_when_primary_no_observation(self) -> None:
+        adapter = make_adapter(
+            source="context",
+            shadows=["client"],
+            reader=SequenceReader([None]),
+        )
+
+        async def scenario():
+            task = asyncio.ensure_future(adapter.wait_for_finish(400))
+            await asyncio.sleep(0.02)
+            adapter.feed_client_status("playing")
+            await asyncio.sleep(0.02)
+            adapter.feed_client_status("idle")
+            return await task
+
+        self.assertEqual(_run(scenario()), (True, True, "shadow_finished"))
+        last = adapter.snapshot()["last_result"]
+        self.assertEqual(last["reason"], "shadow_finished")
+        self.assertEqual(last["completion_source"], "client")
+        self.assertEqual(last["completion_quality"], "weak")
+
+    def test_shadow_without_start_does_not_finish(self) -> None:
+        adapter = make_adapter(
+            source="context",
+            shadows=["client"],
+            reader=SequenceReader([None]),
+        )
+
+        async def scenario():
+            task = asyncio.ensure_future(adapter.wait_for_finish(120))
+            await asyncio.sleep(0.02)
+            adapter.feed_client_status("idle")
+            return await task
+
+        self.assertEqual(_run(scenario()), (False, False, "no_observation"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
