@@ -244,6 +244,15 @@ class ReleaseTest(_Base):
         self.assertEqual("external_takeover", reason)
         self.assertEqual(0, self.player.resumed)
 
+    def test_unknown_state_still_attempts_resume(self) -> None:
+        # TTS 刚结束时 player_context 可能读不到（unknown），不能当外部接管
+        token = self._acquire()
+        self.backend.state_value = "unknown"
+        resumed, reason = self._release(token)
+        self.assertTrue(resumed)
+        self.assertEqual("resumed", reason)
+        self.assertEqual(1, self.player.resumed)
+
     def test_entry_change_invalidates_resume(self) -> None:
         token = self._acquire()
         # 新曲起播（等价于用户点了别的歌）：代次与当前项都变

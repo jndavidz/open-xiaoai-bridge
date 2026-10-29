@@ -171,11 +171,13 @@ class TtsFocus:
         if token.entry_id and (current is None or current.entry_id != token.entry_id):
             return False, "entry_changed"
         backend_now = await self.player.backend.state()
-        if backend_now not in ("paused", "idle"):
-            # 设备在放别的（外部接管）：relinquish，不抢回
+        if backend_now == "playing":
+            # 确认有别的音频在放（外部接管）：relinquish，不抢回
             logger.info(f"[TtsFocus] focus relinquished (state={backend_now})")
             self._set_focus(token.session_id, None)
             return False, "external_takeover"
+        # paused / idle / unknown：一律交给 ensure_resumed 回读验证——
+        # unknown 常见于 TTS 刚结束、player_context 一时读不到，不能当外部接管。
         self._set_focus(token.session_id, None)
         try:
             outcome = await self.player.ensure_resumed(token.session_id)
