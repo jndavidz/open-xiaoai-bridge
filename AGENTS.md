@@ -30,6 +30,7 @@ open-xiaoai-bridge/
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + 只读工具（hass/weather/music/device_status）+ guardrails 四分级护栏 + ir_send C 级工具（P3）
 │   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）+ 文本归一化/别名键 matching（B-31）
+│   ├── music/                     # 托管播放原语（B-04，默认不接管生产流量）：TrackRef/队列项/位置快照 + ManagedStore（SQLite 单事务）+ ManagedExecutor（有界单 worker）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
@@ -597,6 +598,12 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 - `event_plane.source`（context/client/native，默认 context）、`shadow_sources`
   （默认 ["client"]）、`poll_interval_ms`、`start_grace_ms`、`native_cmd`（默认空 =
   不启动 native 源；运行时镜像无 ssh，勿加依赖）。适配器支持热重载。
+- **托管播放原语（B-04，未接线）**：`core/music/` 提供 `TrackRef`/`QueueEntry`/
+  `PositionSnapshot`/`SessionState` + `ManagedStore`（SQLite，`data/managed/state.db`，
+  一次事务写全会话；`restore()` 只还原元数据并把会话置 `recovery_pending`，绝不授予
+  恢复资格）+ `ManagedExecutor`（有界单 worker；`stop` 只改代次不排队；迟到结果 →
+  `UNKNOWN` + 一次补偿 Stop，不重发）。位置快照的 `transport`（dlna/rpc）与
+  `player_backend` 是两个维度，写入时校验一致。生产接线在 B-05，默认不生效。
 - **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
   quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
   亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
@@ -845,4 +852,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**846 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**857 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
