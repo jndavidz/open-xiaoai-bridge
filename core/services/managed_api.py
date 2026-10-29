@@ -46,17 +46,26 @@ class ManagedAPI:
             return header[7:].strip()
         return request.headers.get("X-Music-Token", "")
 
-    def _authorize(self, request: web.Request, target: str):
-        """失败关闭：MusicAuthError 由 `_auth_middleware` 统一转成 JSON 错误。"""
+    def _authorize(self, request: web.Request, target: str, scope: str):
+        """失败关闭：凭据必须同时满足 target 白名单与端点 scope。"""
 
-        return self.auth.authorize(self._token(request), target)
+        grant = self.auth.authorize(self._token(request), target)
+        if not grant.can(scope):
+            raise MusicAuthError(403, f"credential lacks scope {scope!r}")
+        return grant
+
+    @staticmethod
+    def _check_session_target(grant, snapshot: dict, target: str) -> None:
+        session_target = str(snapshot.get("target") or "")
+        if session_target and session_target != target:
+            raise MusicAuthError(403, "target does not match the session")
 
     # ---- 会话 ----
 
     async def create_session(self, request: web.Request) -> web.Response:
         body = await _body(request)
         target = str(body.get("target") or "")
-        grant = self._authorize(request, target)
+        grant = self._authorize(request, target, "command")
         snapshot = self.service.open_session(
             target=target,
             transport=str(body.get("transport") or "dlna"),
@@ -68,9 +77,11 @@ class ManagedAPI:
 
     async def get_session(self, request: web.Request) -> web.Response:
         target = str(request.query.get("target") or "")
-        self._authorize(request, target)
+        grant = self._authorize(request, target, "read")
         try:
-            return _json({"code": 200, "data": self.service.snapshot(request.match_info["sid"])})
+            snapshot = self.service.snapshot(request.match_info["sid"])
+            self._check_session_target(grant, snapshot, target)
+            return _json({"code": 200, "data": snapshot})
         except ManagedError:
             return _reject(404, "unknown session")
 
@@ -79,7 +90,7 @@ class ManagedAPI:
     async def post_command(self, request: web.Request) -> web.Response:
         body = await _body(request)
         target = str(body.get("target") or "")
-        grant = self._authorize(request, target)
+        grant = self._authorize(request, target, "command")
         try:
             receipt = self.service.command(
                 request.match_info["sid"],
@@ -108,9 +119,10 @@ class ManagedAPI:
     async def stream_events(self, request: web.Request) -> web.StreamResponse:
         sid = request.match_info["sid"]
         target = str(request.query.get("target") or "")
-        self._authorize(request, target)
+        grant = self._authorize(request, target, "stream")
         try:
             snapshot = self.service.snapshot(sid)
+            self._check_session_target(grant, snapshot, target)
         except ManagedError:
             return _reject(404, "unknown session")
 
@@ -130,21 +142,28 @@ class ManagedAPI:
         subscription = self.service.bus.subscribe(sid)
         try:
             events, gap = self.service.bus.replay(sid, after)
+            sent_seq = after
             if gap:
-                await _send_reset(response, snapshot, self.service.store.last_event_seq(sid))
+                sent_seq = self.service.store.last_event_seq(sid)
+                await _send_reset(response, snapshot, sent_seq)
             else:
                 for event in events:
                     await _send_event(response, event)
+                    sent_seq = max(sent_seq, int(event.get("seq") or 0))
             while True:
                 event = await subscription.get(timeout=15.0)
                 if event is None:
                     await response.write(b": ping\n\n")
                     continue
                 if event.get("kind") == "reset":
-                    await _send_reset(response, self.service.snapshot(sid),
-                                      self.service.store.last_event_seq(sid))
+                    sent_seq = self.service.store.last_event_seq(sid)
+                    await _send_reset(response, self.service.snapshot(sid), sent_seq)
                     continue
+                seq = int(event.get("seq") or 0)
+                if seq and seq <= sent_seq:
+                    continue   # 先订阅后回放：重复帧在这里丢掉
                 await _send_event(response, event)
+                sent_seq = max(sent_seq, seq)
         except (ConnectionResetError, ConnectionError):
             pass
         finally:

@@ -37,6 +37,7 @@ from core.services.managed_api import ManagedAPI  # noqa: E402
 TOKENS = json.dumps({
     "tok-app": {"name": "songloft", "targets": ["lx06"]},
     "tok-mobile": {"name": "mobile", "targets": ["lx06", "lx06-kitchen"]},
+    "tok-read": {"name": "viewer", "targets": ["lx06"], "scopes": ["read", "stream"]},
 })
 
 
@@ -265,3 +266,24 @@ class ApiAuthTest(unittest.IsolatedAsyncioTestCase):
         sid = (await created.json())["data"]["session_id"]
         resp = await self.client.get(f"/api/music/sessions/{sid}/events?target=lx06")
         self.assertEqual(401, resp.status)
+
+    async def test_scope_limits_endpoints(self) -> None:
+        created = await self._create()
+        sid = (await created.json())["data"]["session_id"]
+        read_headers = {"Authorization": "Bearer tok-read"}
+        ok = await self.client.get(f"/api/music/sessions/{sid}?target=lx06",
+                                   headers=read_headers)
+        self.assertEqual(200, ok.status)
+        denied = await self.client.post(
+            f"/api/music/sessions/{sid}/commands",
+            json={"kind": "pause", "idem_key": "ro-1", "target": "lx06"},
+            headers=read_headers)
+        self.assertEqual(403, denied.status, "read-only 凭据不得下发命令")
+
+    async def test_read_path_is_bound_to_the_session_target(self) -> None:
+        # 另一个会话属于 lx06-kitchen；lx06 凭据读它必须 403
+        created = await self._create(token="tok-mobile", target="lx06-kitchen")
+        sid = (await created.json())["data"]["session_id"]
+        resp = await self.client.get(f"/api/music/sessions/{sid}?target=lx06",
+                                     headers={"Authorization": "Bearer tok-app"})
+        self.assertEqual(403, resp.status)

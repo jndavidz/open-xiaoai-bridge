@@ -487,6 +487,10 @@ HTTP REST API 服务器（aiohttp），端口可配（默认 9092）。
 | `/api/interrupt` | POST | 中断播放 |
 | `/api/health` | GET | 健康检查：默认返回录音帧龄/策略、播放事件面、注入状态；`?probe=1` 额外采集 mediaplayer 存活/内存/麦态/固件白名单字段（总超时 4s；会打设备 RPC，配置 `BRIDGE_API_TOKEN` 时须带 Bearer，未配置时 probe 503） |
 | `/api/tts/doubao` | POST | Doubao TTS 合成 |
+| `/api/music/sessions` | POST | 开托管会话（B-05；`MANAGED_TOKENS` 专用凭据 + target） |
+| `/api/music/sessions/{id}` | GET | 会话快照（含 `last_seq` 游标） |
+| `/api/music/sessions/{id}/commands` | POST | 托管命令（`idem_key` 幂等回执 + `expected_epoch`；202 首执 / 200 重放 / 409 冲突或过期代次） |
+| `/api/music/sessions/{id}/events` | GET | SSE 事件流（`Last-Event-ID` 续传、缺口 `reset`、慢消费者 reset） |
 | `/api/tts/doubao_voices` | GET | 获取音色列表 |
 | `/api/audio_input` | POST | 「停止聆听」恢复通道：`{"mic": "on"/"off"}` 控制 KWS 分析开关（listen_disabled 持久，语音口令自身失效后唯一恢复路径） |
 
@@ -599,12 +603,14 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 - `event_plane.source`（context/client/native，默认 context）、`shadow_sources`
   （默认 ["client"]）、`poll_interval_ms`、`start_grace_ms`、`native_cmd`（默认空 =
   不启动 native 源；运行时镜像无 ssh，勿加依赖）。适配器支持热重载。
-- **托管播放原语（B-04，未接线）**：`core/music/` 提供 `TrackRef`/`QueueEntry`/
+- **托管播放（B-04/B-05，设备执行未接线）**：`core/music/` 提供 `TrackRef`/`QueueEntry`/
   `PositionSnapshot`/`SessionState` + `ManagedStore`（SQLite，`data/managed/state.db`，
   一次事务写全会话；`restore()` 只还原元数据并把会话置 `recovery_pending`，绝不授予
   恢复资格）+ `ManagedExecutor`（有界单 worker；`stop` 只改代次不排队；迟到结果 →
   `UNKNOWN` + 一次补偿 Stop，不重发）。位置快照的 `transport`（dlna/rpc）与
-  `player_backend` 是两个维度，写入时校验一致。生产接线在 B-05，默认不生效。
+  `player_backend` 是两个维度，写入时校验一致。B-05 已提供 `ManagedService`（幂等回执、
+  代次闸门、状态+事件+回执同事务）与 `/api/music/*`（SSE、`MANAGED_TOKENS` 凭据、端点+target
+  scope、失败关闭）；设备执行与旧 `song_request` 迁移在 B-06。
 - **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
   quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
   亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
@@ -853,4 +859,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**874 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 17 项命令/事件/SSE = 874。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**876 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

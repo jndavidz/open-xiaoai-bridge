@@ -481,6 +481,10 @@ class APIServer:
             return await handler(request)
         if path == "/api/admin" or path.startswith("/api/admin/"):
             return await handler(request)
+        # 托管播放面（B-05）有自己的 music-control 凭据（MANAGED_TOKENS），
+        # 与业务 token 完全分离：不能先被 BRIDGE_API_TOKENS 拦掉。
+        if path == "/api/music" or path.startswith("/api/music/"):
+            return await handler(request)
         # 每个请求重新读 env（与单一 token 时代口径一致：零成本、无缓存失效问题）
         decision = authorize(
             path,

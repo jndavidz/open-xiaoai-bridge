@@ -19,11 +19,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.music.events import EventBus
+import sqlite3
+
 from core.music.model import (
     CommandState,
     Intent,
     ManagedError,
     Phase,
+    SessionNotFound,
     SessionState,
     StaleEpoch,
 )
@@ -93,23 +96,23 @@ class ManagedService:
         lease_id: str = "",
         principal: str = "",
     ) -> dict:
-        state = self.store.open_session(
+        state, stored = self.store.create_session(
             transport=transport, player_backend=player_backend,
             lease_id=lease_id, target=target,
+            events=[{"kind": "session_opened", "epoch": None, "principal": principal,
+                     "target": target}],
         )
-        self.store.save_with_events(
-            state,
-            [{"kind": "session_opened", "epoch": state.epoch, "principal": principal,
-              "target": state.target}],
-        )
-        self.bus.publish(state.session_id, {"kind": "session_opened", "epoch": state.epoch})
-        return state.as_dict()
+        for event in stored:
+            self.bus.publish(state.session_id, event)
+        return self.snapshot(state.session_id)
 
     def snapshot(self, session_id: str) -> dict:
         state = self.store.get(session_id)
         if state is None:
-            raise ManagedError(f"unknown session {session_id!r}")
-        return state.as_dict()
+            raise SessionNotFound(session_id)
+        snapshot = state.as_dict()
+        snapshot["last_seq"] = self.store.last_event_seq(session_id)
+        return snapshot
 
     # ---- 命令 ----
 
@@ -132,7 +135,9 @@ class ManagedService:
         payload = dict(payload or {})
 
         existing = self.store.receipt_get(principal, idem_key)
-        digest = _digest(kind, payload, str(target or ""))
+        # 回执键同时绑定会话：同一主体/键在另一个会话上必须重新执行或冲突，
+        # 绝不能把 A 会话的回执当成 B 会话的结果返回。
+        digest = _digest(f"{session_id}:{kind}", payload, str(target or ""))
         if existing is not None:
             if existing["payload_digest"] != digest:
                 raise ConflictError(
@@ -142,7 +147,10 @@ class ManagedService:
 
         state = self.store.get(session_id)
         if state is None:
-            raise ManagedError(f"unknown session {session_id!r}")
+            raise SessionNotFound(session_id)
+        if kind == "seek":
+            # 设备适配（B-06）落地前如实拒绝，不假装接受一个不会执行的能力
+            raise ManagedError("seek is not supported by the managed adapter yet")
         if target is not None and state.target and str(target) != state.target:
             raise TargetMismatch(
                 f"target {target!r} does not match session target {state.target!r}")
@@ -162,13 +170,22 @@ class ManagedService:
                 "state": command_state, "epoch": current.epoch,
             }
 
-        current, stored = self.store.transition(
-            session_id, mutate,
-            events=[{"kind": "command", "command": kind, "state": command_state,
-                     "epoch": None, "receipt_id": receipt_id, "principal": principal}],
-            receipt_factory=receipt_factory,
-            epoch=expected_epoch,
-        )
+        try:
+            current, stored = self.store.transition(
+                session_id, mutate,
+                events=[{"kind": "command", "command": kind, "state": command_state,
+                         "epoch": None, "receipt_id": receipt_id, "principal": principal}],
+                receipt_factory=receipt_factory,
+                epoch=expected_epoch,
+            )
+        except sqlite3.IntegrityError:
+            # 并发同键：回执主键冲突。按「先到者胜」处理，绝不 500。
+            winner = self.store.receipt_get(principal, idem_key)
+            if winner is not None and winner["payload_digest"] == digest:
+                return Receipt(winner["receipt_id"], winner["session_id"], winner["kind"],
+                               winner["state"], winner["epoch"], replayed=True)
+            raise ConflictError(
+                f"idempotency key {idem_key!r} already used with a different payload") from None
         for event in stored:
             self.bus.publish(session_id, event)
         return Receipt(receipt_id, session_id, kind, command_state, current.epoch)
@@ -214,9 +231,4 @@ def _apply(state: SessionState, kind: str, payload: dict) -> None:
             state.current_index = 0
         state.epoch += 1
         state.phase = Phase.PREPARING
-    elif kind == "seek":
-        if state.phase not in (Phase.PLAYING, Phase.PAUSED):
-            raise StaleEpoch("seek requires an active playback")  # 语义拒绝，API 映射 409
-        position = payload.get("position_s")
-        if not isinstance(position, (int, float)) or position < 0:
-            raise ManagedError("seek requires a non-negative position_s")
+    # seek 在设备适配（B-06）落地前由 command() 直接拒绝，不进迁移。

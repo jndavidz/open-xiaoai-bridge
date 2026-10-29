@@ -76,6 +76,24 @@ class ManagedStore:
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
 
+    def create_session(self, *, transport: str = "dlna", player_backend: str = "mediaplayer",
+                       lease_id: str = "", target: str = "", session_id: str | None = None,
+                       events: list[dict] | None = None) -> tuple[SessionState, list[dict]]:
+        """建会话 + 首个事件**同一事务**写入（B-05；open_session 的原子版本）。"""
+
+        state = SessionState(
+            session_id=session_id or f"ms-{uuid.uuid4().hex[:12]}",
+            epoch=1,
+            phase=Phase.PREPARING,
+            intent=Intent.PAUSED,
+            transport=str(transport),
+            player_backend=str(player_backend),
+            lease_id=str(lease_id),
+            target=str(target),
+        )
+        stored = self.save_with_events(state, list(events or []))
+        return state, stored
+
     # ---- 读 ----
 
     def get(self, session_id: str) -> SessionState:
@@ -290,15 +308,18 @@ class ManagedStore:
                 "SELECT MIN(seq), MAX(seq) FROM managed_events WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
+            limit = max(1, int(limit))
             rows = self._conn.execute(
                 "SELECT seq, payload FROM managed_events WHERE session_id = ? AND seq > ? "
                 "ORDER BY seq LIMIT ?",
-                (session_id, int(after_seq), max(1, int(limit))),
+                (session_id, int(after_seq), limit + 1),   # 多取一条判「还有更多」
             ).fetchall()
         oldest, newest = (bounds or (None, None))
+        truncated = len(rows) > limit
+        rows = rows[:limit]
         gap = bool(oldest is not None and after_seq > 0 and after_seq < oldest - 1)
         return ([{"seq": seq, **json.loads(payload)} for seq, payload in rows],
-                gap or (oldest is not None and after_seq > newest))
+                gap or truncated or (oldest is not None and after_seq > newest))
 
     def last_event_seq(self, session_id: str) -> int:
         with self._lock:

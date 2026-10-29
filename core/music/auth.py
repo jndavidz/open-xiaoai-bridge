@@ -25,13 +25,20 @@ class MusicAuthError(Exception):
         self.code, self.msg = int(code), str(msg)
 
 
+SCOPES: frozenset[str] = frozenset({"read", "command", "stream"})
+
+
 @dataclass(frozen=True)
 class MusicGrant:
     principal: str
     targets: frozenset[str]
+    scopes: frozenset[str] = SCOPES
 
     def allows(self, target: str) -> bool:
         return bool(target) and target in self.targets
+
+    def can(self, scope: str) -> bool:
+        return scope in self.scopes
 
 
 def _same(left: str, right: str) -> bool:
@@ -64,8 +71,20 @@ class MusicAuth:
             if not cleaned:
                 self.invalid = True
                 return
+            raw_scopes = entry.get("scopes") if isinstance(entry, dict) else None
+            if raw_scopes is None:
+                scopes = SCOPES
+            elif isinstance(raw_scopes, list) and raw_scopes:
+                scopes = frozenset(str(s) for s in raw_scopes)
+                if not scopes <= SCOPES:
+                    self.invalid = True
+                    return
+            else:
+                self.invalid = True
+                return
             self._grants.append(
-                (str(token), MusicGrant(principal=str(name or "music"), targets=frozenset(cleaned)))
+                (str(token), MusicGrant(principal=str(name or "music"),
+                                        targets=frozenset(cleaned), scopes=scopes))
             )
 
     def authorize(self, token: str, target: str) -> MusicGrant:
