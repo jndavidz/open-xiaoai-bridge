@@ -1,16 +1,17 @@
-"""TTS focus 的生产接线（B-07）：播报与对话回复都要「取得—释放」。
+"""TTS focus 的生产接线（B-07，会话级）。
 
-用现有 announce / 对话轮夹具，focus 桥整体打桩——不连设备、不联网。
-覆盖：
+用现有 announce / 对话夹具，focus 桥打桩——不连设备、不联网。覆盖：
 
-  1. focus_scope：托管关 = 不取不释；托管开 = 正常/异常都释放；
-     不需要 focus 的情形（音乐未在播）静默跳过；required 时拒绝传播。
-  2. `speaker.announce`：取得 focus 后播报，finally 释放并记录结果；异常也释放。
-  3. 对话回复段循环：取得 focus → 逐段播放 → 释放（异常同样释放）。
+  1. 会话级持有：hold 只暂停一次；释放归零后**去抖**恢复；新 hold 取消待恢复；
+     force_release 立即放弃且不自动恢复。
+  2. `speaker.announce`：播报持有/归还一次；暂停确认失败 ⇒ 拒绝播报。
+  3. 连续对话：`start()` 进入即持有，结束时归还（异常同样归还）。
+  4. 唤醒打断：托管模式不得直接停设备音频。
 """
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -33,63 +34,73 @@ def _token(name: str = "f-wire") -> FocusToken:
     return FocusToken(name, "ms-1", 1, "e-1", 12.0, "announce", 0.0)
 
 
-class FocusScopeTest(unittest.IsolatedAsyncioTestCase):
-    async def test_enabled_off_does_nothing(self) -> None:
-        with mock.patch.object(focus_bridge, "enabled", return_value=False), \
-                mock.patch.object(focus_bridge, "acquire", mock.AsyncMock()) as acquire, \
-                mock.patch.object(focus_bridge, "release", mock.AsyncMock()) as release:
-            async with focus_bridge.focus_scope("reply") as token:
-                self.assertIsNone(token)
-        acquire.assert_not_awaited()
-        release.assert_not_awaited()
+class HoldTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        focus_bridge._reset_for_tests()
 
-    async def test_enabled_on_releases_on_normal_and_error_paths(self) -> None:
+    async def test_hold_off_does_nothing(self) -> None:
+        with mock.patch.object(focus_bridge, "enabled", return_value=False), \
+                mock.patch.object(focus_bridge, "acquire", mock.AsyncMock()) as acquire:
+            self.assertFalse(await focus_bridge.hold())
+        acquire.assert_not_awaited()
+
+    async def test_hold_pauses_once_and_debounces_release(self) -> None:
         token = _token()
         with mock.patch.object(focus_bridge, "enabled", return_value=True), \
                 mock.patch.object(focus_bridge, "acquire",
-                                  mock.AsyncMock(return_value=token)), \
+                                  mock.AsyncMock(return_value=token)) as acquire, \
                 mock.patch.object(focus_bridge, "release",
                                   mock.AsyncMock(return_value=(True, "resumed"))) as release:
-            async with focus_bridge.focus_scope("reply") as got:
-                self.assertIs(token, got)
-            with self.assertRaises(RuntimeError):
-                async with focus_bridge.focus_scope("reply"):
-                    raise RuntimeError("boom")
-        self.assertEqual(2, release.await_count, "正常与异常都必须释放")
+            self.assertTrue(await focus_bridge.hold())
+            self.assertTrue(await focus_bridge.hold())      # 引用计数 2
+            await focus_bridge.release_hold(grace_s=0.01)
+            await asyncio.sleep(0.03)
+            release.assert_not_awaited()                   # 还有一层持有
+            await focus_bridge.release_hold(grace_s=0.01)
+            await asyncio.sleep(0.05)
+        self.assertEqual(1, acquire.await_count, "整段会话只暂停一次")
+        self.assertEqual(1, release.await_count, "归零后去抖恢复一次")
 
-    async def test_not_playing_is_not_an_error_unless_required(self) -> None:
-        denied = FocusDenied("music is not playing", code="not_playing")
+    async def test_new_hold_cancels_a_pending_release(self) -> None:
         with mock.patch.object(focus_bridge, "enabled", return_value=True), \
-                mock.patch.object(focus_bridge, "acquire", mock.AsyncMock(side_effect=denied)):
-            async with focus_bridge.focus_scope("reply") as token:
-                self.assertIsNone(token)
-            with self.assertRaises(FocusDenied):
-                async with focus_bridge.focus_scope("announce", required=True):
-                    pass
+                mock.patch.object(focus_bridge, "acquire",
+                                  mock.AsyncMock(return_value=_token())), \
+                mock.patch.object(focus_bridge, "release",
+                                  mock.AsyncMock(return_value=(True, "resumed"))) as release:
+            await focus_bridge.hold()
+            await focus_bridge.release_hold(grace_s=0.05)
+            await focus_bridge.hold()      # 开场白结束→对话开始的缝隙
+            await asyncio.sleep(0.1)
+        release.assert_not_awaited()
+
+    async def test_force_release_drops_without_resuming(self) -> None:
+        with mock.patch.object(focus_bridge, "enabled", return_value=True), \
+                mock.patch.object(focus_bridge, "acquire",
+                                  mock.AsyncMock(return_value=_token())), \
+                mock.patch.object(focus_bridge, "release",
+                                  mock.AsyncMock()) as release:
+            await focus_bridge.hold()
+            await focus_bridge.force_release()
+            await asyncio.sleep(0.02)
+        release.assert_not_awaited()
 
 
 class AnnounceFocusTest(test_announce.AnnounceTestBase):
-    def test_announce_takes_and_releases_focus(self) -> None:
+    def test_announce_holds_and_returns_focus(self) -> None:
         self.device.on("text_to_speech", '{"code": 0}')
         self.device.on("player_get_context", test_announce._context(0))
-        token = _token()
 
         async def scenario():
-            async with self.speaker.announce(text="客厅音响已就绪", reason="t") as session:
+            async with self.speaker.announce(text="客厅音响已就绪", reason="t"):
                 await self.speaker.play(text="客厅音响已就绪", blocking=False)
-            return session
 
-        with mock.patch("core.music.focus_bridge.enabled", return_value=True), \
-                mock.patch("core.music.focus_bridge.acquire",
-                           mock.AsyncMock(return_value=token)) as acquire, \
-                mock.patch("core.music.focus_bridge.release",
-                           mock.AsyncMock(return_value=(True, "resumed"))) as release:
-            session = test_announce._run(scenario())
-
-        acquire.assert_awaited_once()
-        release.assert_awaited_once_with(token)
-        self.assertTrue(session.focus_resumed)
-        self.assertEqual("resumed", session.focus_reason)
+        with mock.patch("core.music.focus_bridge.hold",
+                        mock.AsyncMock(return_value=True)) as hold, \
+                mock.patch("core.music.focus_bridge.release_hold",
+                           mock.AsyncMock()) as release:
+            test_announce._run(scenario())
+        hold.assert_awaited_once()
+        release.assert_awaited_once()
 
     def test_focus_released_even_when_body_raises(self) -> None:
         self.device.on("player_get_context", test_announce._context(0))
@@ -98,11 +109,10 @@ class AnnounceFocusTest(test_announce.AnnounceTestBase):
             async with self.speaker.announce(text="你好", reason="t"):
                 raise RuntimeError("body boom")
 
-        with mock.patch("core.music.focus_bridge.enabled", return_value=True), \
-                mock.patch("core.music.focus_bridge.acquire",
-                           mock.AsyncMock(return_value=_token())), \
-                mock.patch("core.music.focus_bridge.release",
-                           mock.AsyncMock(return_value=(False, "epoch_changed"))) as release:
+        with mock.patch("core.music.focus_bridge.hold",
+                        mock.AsyncMock(return_value=True)), \
+                mock.patch("core.music.focus_bridge.release_hold",
+                           mock.AsyncMock()) as release:
             with self.assertRaises(RuntimeError):
                 test_announce._run(scenario())
         release.assert_awaited_once()
@@ -114,12 +124,34 @@ class AnnounceFocusTest(test_announce.AnnounceTestBase):
             async with self.speaker.announce(text="你好", reason="t"):
                 pass
 
-        with mock.patch("core.music.focus_bridge.enabled", return_value=True), \
-                mock.patch("core.music.focus_bridge.acquire",
-                           mock.AsyncMock(side_effect=FocusDenied("pause not confirmed",
-                                                                  code="pause_unconfirmed"))):
+        with mock.patch("core.music.focus_bridge.hold",
+                        mock.AsyncMock(side_effect=FocusDenied("pause not confirmed",
+                                                               code="pause_unconfirmed"))):
             with self.assertRaises(test_announce.speaker_module.AnnounceRejected):
                 test_announce._run(scenario())
+
+
+class ConversationFocusTest(test_pipeline.ConversationLoopTestBase):
+    async def test_conversation_holds_focus_for_the_whole_session(self) -> None:
+        with mock.patch("core.music.focus_bridge.hold",
+                        mock.AsyncMock(return_value=True)) as hold, \
+                mock.patch("core.music.focus_bridge.release_hold",
+                           mock.AsyncMock()) as release, \
+                mock.patch.object(type(self.controller), "_conversation_loop",
+                                  mock.AsyncMock(return_value=None)):
+            await self.controller.start()
+        hold.assert_awaited_once()
+        release.assert_awaited_once()
+
+    async def test_conversation_releases_focus_on_error(self) -> None:
+        with mock.patch("core.music.focus_bridge.hold",
+                        mock.AsyncMock(return_value=True)), \
+                mock.patch("core.music.focus_bridge.release_hold",
+                           mock.AsyncMock()) as release, \
+                mock.patch.object(type(self.controller), "_conversation_loop",
+                                  mock.AsyncMock(side_effect=RuntimeError("boom"))):
+            await self.controller.start()
+        release.assert_awaited_once()
 
 
 class WakeupManagedAudioTest(unittest.IsolatedAsyncioTestCase):
@@ -163,21 +195,6 @@ class WakeupManagedAudioTest(unittest.IsolatedAsyncioTestCase):
             await manager._interrupt_device_playback()
         stop.assert_not_awaited()
         record.assert_awaited_once()
-
-
-class ConversationFocusTest(test_pipeline.ConversationLoopTestBase):
-    async def test_reply_segments_take_and_release_focus(self) -> None:
-        token = _token("f-reply")
-        with mock.patch("core.music.focus_bridge.acquire",
-                        mock.AsyncMock(return_value=token)) as acquire, \
-                mock.patch("core.music.focus_bridge.release",
-                           mock.AsyncMock(return_value=(True, "resumed"))) as release:
-            played = await self.controller._speak_response_segments(
-                "你好", with_send_sound=False)
-
-        self.assertEqual(["好的"], played)
-        acquire.assert_awaited_once()
-        release.assert_awaited_once_with(token)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,8 @@ class FakePlayer:
         self.resumed = 0
         self.pause_error: Exception | None = None
         self.backend = FakeBackendState()
+        self.fake_no_audio = False
+        self.resume_noop = False
         self.ticks = 0
 
     async def play(self, uri: str) -> bool:
@@ -60,7 +62,32 @@ class FakePlayer:
 
     async def restart(self, session_id: str) -> bool:
         self.restarted += 1
+        self.backend.value = "playing"
         return await self.start(session_id)
+
+    async def ensure_resumed(self, session_id: str, *, verify_timeout_s: float = 0.8) -> str:
+        if self.backend.value == "paused" and not self.fake_no_audio:
+            self.resumed += 1
+            self.backend.value = "playing"
+            return "resumed"
+        await self.restart(session_id)
+        return "restarted"
+
+    async def state(self) -> str:
+        return self.backend.value
+
+    async def resume(self) -> bool:
+        if not self.resume_noop:
+            self.backend.value = "playing"
+        return True
+
+    async def pause(self) -> bool:
+        self.backend.value = "paused"
+        return True
+
+    async def stop(self) -> bool:
+        self.backend.value = "idle"
+        return True
 
     async def pause_backend(self) -> None:
         if self.pause_error:
@@ -69,6 +96,8 @@ class FakePlayer:
 
     async def resume_backend(self) -> None:
         self.resumed += 1
+        if not self.resume_noop:
+            self.backend.value = "playing"
 
     async def tick(self, session_id: str) -> Decision:
         self.ticks += 1
@@ -187,6 +216,28 @@ class SongBridgeTest(unittest.IsolatedAsyncioTestCase):
         resume = await song_bridge.command("resume")
         self.assertIn("resume", resume)
         self.assertEqual(1, self.player.resumed, "暂停态 resume 必须真的恢复播放")
+
+    async def test_resume_verifies_and_restarts_on_fake_success(self) -> None:
+        await song_bridge.play_items(self._items())
+        self.player.fake_no_audio = True       # play 返回成功但没有音频
+        result = await song_bridge.command("resume")
+        self.assertIn("resume", result)
+        self.assertEqual(1, self.player.restarted)
+
+    async def test_player_ensure_resumed_restarts_when_play_is_a_noop(self) -> None:
+        from core.music.player import ManagedQueuePlayer
+
+        async def resolver(entry):
+            return "http://cdn/x.mp3"
+
+        player = ManagedQueuePlayer(self.store, self.player, resolver, clock=lambda: 0.0)
+        sid = self.service.open_session(target="lx06")["session_id"]
+        self.store.append(sid, TrackRef.make("kuwo", "7"), duration_s=10)
+        await player.start(sid)
+        self.player.backend.value = "paused"
+        self.player.resume_noop = True
+        self.assertEqual("restarted", await player.ensure_resumed(sid, verify_timeout_s=0.0))
+        self.assertEqual(2, len(self.player.started), "起播一次 + 重起一次")
 
     async def test_resume_restarts_when_device_context_was_lost(self) -> None:
         await song_bridge.play_items(self._items())

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -263,6 +264,34 @@ class ManagedQueuePlayer:
         return False
 
     # ---- 暂停 / seek / 外部接管 ----
+
+    async def ensure_resumed(self, session_id: str, *, verify_timeout_s: float = 0.8) -> str:
+        """恢复并**回读验证**：设备 play 成功 ≠ 真的在放。
+
+        TTS/唤醒可能已把媒体上下文替换掉，此时 play 是「假成功」（code:0 但无音频）。
+        验证窗口内没回到 playing ⇒ 重新解析并重起当前 entry。
+        """
+
+        state = await self.backend.state()
+        if state == "paused":
+            try:
+                await self.resume_backend()
+            except Unsupported:
+                pass
+        after = await self._wait_backend_state("playing", verify_timeout_s)
+        if after == "playing":
+            self.store.transition(session_id, _mark_resumed, events=[{"kind": "resumed"}])
+            return "resumed"
+        await self.restart(session_id)
+        return "restarted"
+
+    async def _wait_backend_state(self, want: str, timeout_s: float) -> str:
+        deadline = self.clock() + max(0.0, float(timeout_s))
+        state = await self.backend.state()
+        while state != want and self.clock() < deadline:
+            await asyncio.sleep(0.1)
+            state = await self.backend.state()
+        return state
 
     async def restart(self, session_id: str, *, epoch: int | None = None) -> bool:
         """重新起播当前 entry（设备上下文已被 TTS/中断顶掉时的显式恢复）。

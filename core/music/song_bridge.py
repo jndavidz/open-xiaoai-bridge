@@ -108,13 +108,15 @@ async def command(kind: str, **payload) -> str:
             await runtime.player.pause_backend()
             service.observe(receipt.receipt_id)
         elif kind == "resume":
-            backend_state = await runtime.player.backend.state()
-            if backend_state == "paused":
-                await runtime.player.resume_backend()
-            else:
-                # 唤醒/TTS 已把设备媒体上下文顶掉（idle/unknown）：设备控制 CLI 的 play
-                # 对已丢失上下文是无操作，必须显式重新起播当前 entry（用户显式命令，不是偷偷播）。
-                await runtime.player.restart(runtime.session_id)
+            # 用户显式恢复：立即放弃会话级 focus（不再等去抖），再驱动设备恢复。
+            from core.music import focus_bridge
+
+            await focus_bridge.force_release()
+            # 先 resume 再**回读验证**：TTS/唤醒可能已替换媒体上下文，
+            # 此时设备 play 是假成功；验证不到 playing 就重起当前 entry。
+            outcome = await runtime.player.ensure_resumed(runtime.session_id)
+            if outcome not in ("resumed", "restarted"):
+                raise ManagedError(f"resume outcome={outcome}")
             service.observe(receipt.receipt_id)
         elif kind in ("next", "prev"):
             await runtime.player.start(runtime.session_id)
@@ -123,6 +125,9 @@ async def command(kind: str, **payload) -> str:
         service.observe(receipt.receipt_id, state="failed", detail=str(exc)[:160])
         return f"托管命令未能执行（{kind}）：{exc}"
     if kind == "stop":
+        from core.music import focus_bridge
+
+        await focus_bridge.force_release()
         await runtime.stop()
         runtime.bind(None)
     return f"托管命令已受理（{kind}, {receipt.state}）"

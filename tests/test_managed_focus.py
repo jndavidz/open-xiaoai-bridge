@@ -59,6 +59,22 @@ class FakePlayer:
 
         self.store.transition(session_id, mutate)
 
+    async def ensure_resumed(self, session_id: str, *, verify_timeout_s: float = 0.8) -> str:
+        if not self.resume_supported:
+            from core.music.player import Unsupported
+
+            raise Unsupported("no verified resume")
+
+        def mutate(state):
+            state.epoch += 1
+            state.phase = Phase.PLAYING
+            state.intent = Intent.PLAYING
+
+        self.store.transition(session_id, mutate)
+        self.resumed += 1
+        self.backend.state_value = "playing"
+        return "resumed"
+
     async def resume(self, session_id: str) -> None:
         if not self.resume_supported:
             from core.music.player import Unsupported
