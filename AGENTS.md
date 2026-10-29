@@ -30,7 +30,7 @@ open-xiaoai-bridge/
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + 只读工具（hass/weather/music/device_status）+ guardrails 四分级护栏 + ir_send C 级工具（P3）
 │   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）+ 文本归一化/别名键 matching（B-31）
-│   ├── music/                     # 托管播放（B-04…B-06，默认不接管生产流量）：TrackRef/队列项/位置快照 + ManagedStore（SQLite 单事务）+ ManagedExecutor（有界单 worker）+ EventBus/ManagedService（幂等回执、代次闸门、事件同事务）+ auth（music-control 专用凭据）+ player/backends（EOF 判定与 DLNA/RPC 后端，主动 Stop 后推进一次）+ tts_focus/tts_providers（TTS focus、恢复资格与四 provider 独立结果）
+│   ├── music/                     # 托管播放（B-04…B-07，默认不接管生产流量）：TrackRef/队列项/位置快照 + ManagedStore（SQLite 单事务）+ ManagedExecutor（有界单 worker）+ EventBus/ManagedService（幂等回执、代次闸门、事件同事务）+ auth（music-control 专用凭据）+ player/backends（EOF 判定与 DLNA/RPC 后端，主动 Stop 后推进一次）+ tts_focus/tts_providers/focus_bridge（会话级 TTS focus、恢复资格、四 provider 独立结果）+ gena（B-09 可选事件增强，默认关闭、未接线）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
@@ -603,7 +603,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 - `event_plane.source`（context/client/native，默认 context）、`shadow_sources`
   （默认 ["client"]）、`poll_interval_ms`、`start_grace_ms`、`native_cmd`（默认空 =
   不启动 native 源；运行时镜像无 ssh，勿加依赖）。适配器支持热重载。
-- **托管播放（B-04/B-05，设备执行未接线）**：`core/music/` 提供 `TrackRef`/`QueueEntry`/
+- **托管播放（B-04…B-07，已真机验收；开关见 `song_request.managed`）**：`core/music/` 提供 `TrackRef`/`QueueEntry`/
   `PositionSnapshot`/`SessionState` + `ManagedStore`（SQLite，`data/managed/state.db`，
   一次事务写全会话；`restore()` 只还原元数据并把会话置 `recovery_pending`，绝不授予
   恢复资格）+ `ManagedExecutor`（有界单 worker；`stop` 只改代次不排队；迟到结果 →
@@ -622,7 +622,9 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   自动起播下一条）。**迁移开关**：`song_request.managed`（config，默认 false）——
   true 时 `song_request.run()` 走 `core/music/song_bridge.py`（搜索/专辑候选逻辑照旧，
   队列归托管 store、单所有权、无第二自动推进）；false = 旧内存队列（回滚模式）。
-  **仍未完成**：真机 loop 0/1、位置/时长与 Stop 回读验收（B-08）。
+  **真机已验证**（2026-10-29/30，最小音量）：点歌起播、主动 Stop 后回读确认再换 URI、
+  自然播完推进一次（末项停止）、启动只置 `recovery_pending`。**仍未验**：loop 0/1 端到端、
+  位置/时长边界、四 provider 矩阵、可选 GENA 长稳（B-08/B-09，等 Songloft S-07）。
 - **TTS focus（B-07，离线核心）**：`tts_focus.py` 的 `TtsFocus.acquire()` **先暂停并回读确认**
   才发令牌；恢复资格绑定 session/epoch/entry/focus token——用户 pause/stop/next、外部接管、
   代次变化、二次播报换令牌都会让旧令牌失效，`release()` 只给原因（`stopped`/`epoch_changed`/
@@ -641,6 +643,11 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
     **回读验证**，假成功就重起当前 entry）；
   - **唤醒打断**：托管音乐在管时不再 `stop_device_audio`（停了媒体上下文就回不来）；
   - 麦态/KWS/录制的 finally 归还原语义不变（`mic_gate` 按进入时快照恢复，停止聆听保持 off）。
+- **可选 GENA（B-09，默认关闭、未接线）**：`core/music/gena.py` 的 `GenaGate` 只做补充信号，
+  **永不替代** duration/位置/身份/意图（主动 Stop 主路径不依赖它）。按服务器返回有效期续订，
+  仅到期/SID 失效/设备重启才重订阅且恢复先取快照；SID+SEQ 处理重复/乱序/缺口（缺口 ⇒ snapshot），
+  语义幂等按 `(状态|uri 摘要, 播放代次)` 去重、`note_playback_started()` 换代清键（真实重播不被吞）；
+  校验来源白名单/SID/正文上限/解析边界，任何异常都不触发 Stop/推进/恢复。
 - **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
   quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
   亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
@@ -889,4 +896,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**934 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**966 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

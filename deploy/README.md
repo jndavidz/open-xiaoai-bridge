@@ -223,6 +223,27 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 - 4399/9092 仅在局域网（host 网络 + 群晖防火墙），勿做公网端口映射；外网访问走 WireGuard
 - HA Token 只进 `.env`，任何文件不得硬编码
 
+## 8.5 托管播放（managed）开关与回滚
+
+B-01…B-07 的托管队列默认**关闭**，生产语义由 `song_request.managed` 控制（`deploy/config.py`）：
+
+- **打开**：`song_request.managed = True`（`managed_target` 与 `MANAGED_TOKENS` 的 `targets` 一致），
+  且 `.env` 已配 `MANAGED_TOKENS`；改完 `docker compose up -d`（配置是 bind-mount，不重建镜像）。
+  未配令牌时托管面一律 **503 fail-closed**（`music-control auth is not configured`），这不是故障。
+- **行为**（真机已验证）：点歌 = **单轮**（说完即退出对话）；`停止/暂停/继续/上一首/下一首`
+  同属媒体命令，应答后 `suppress_reply` 单轮结束；连续对话 = **会话级 focus**——`start()`
+  即暂停并确认，整段对话保持暂停，退出词/超时/停止聆听后**去抖 5s** 再恢复。
+  唤醒打断**不再停设备音频**（托管在管时只开始录音，暂停/恢复交给 TTS focus）。
+  启动时只置 `recovery_pending`，**绝不起播**。
+- **验收**：`python3 scripts/music_ecosystem.py --lab`（离线，7 case）；
+  真机单侧冒烟 `--device --require-approval --case device-bridge-smoke`
+  （health 200 + 托管面 503；带 `MUSIC_ECOSYSTEM_BRIDGE_TOKEN`/`MUSIC_ECOSYSTEM_SILENT_WAV` 时再验播放与事件）。
+- **回滚**：① `song_request.managed = False` + `docker compose up -d`（最轻，队列回到旧内存实现）；
+  ② 镜像回滚 `docker tag open-xiaoai-bridge:rollback-pre-managed-20261029 open-xiaoai-bridge:home
+  && docker compose up -d --no-build`（上一级 `rollback-pre-ttsfix-20261029`）。
+  每次改开关前先 `cp config.py config.py.bak-<原因>-<日期>`（NAS 上现存 `config.py.bak-managed-verify-20261029`）。
+- **未验（不要当已验收）**：四 provider focus 矩阵、可选 GENA 长稳（见 `ws: .scratch/music-voice-managed-playback/issues/08-*.md`、`09-*.md`）。
+
 ## 模型包
 
 VAD+KWS 模型 release：https://github.com/coderzc/open-xiaoai-bridge/releases/tag/vad-kws-asr-models
