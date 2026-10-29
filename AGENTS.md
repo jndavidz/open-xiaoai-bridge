@@ -610,7 +610,10 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   `UNKNOWN` + 一次补偿 Stop，不重发）。位置快照的 `transport`（dlna/rpc）与
   `player_backend` 是两个维度，写入时校验一致。B-05 已提供 `ManagedService`（幂等回执、
   代次闸门、状态+事件+回执同事务）与 `/api/music/*`（SSE、`MANAGED_TOKENS` 凭据、端点+target
-  scope、失败关闭）。B-06 起 `core/music/player.py` 提供 EOF 判定与队列推进：
+  scope、失败关闭；每次命中最外层持有一条端到端预算 `MANAGED_COMMAND_BUDGET_MS`
+  （子层只能消耗剩余、不得叠加，耗尽 504 `budget_exhausted`）；设备确认后
+  `observe()` 把回执从 accepted 推进到 observed 并写事件；CORS 默认关闭，
+  `MANAGED_CORS_ORIGINS` 白名单才放行预检）。B-06 起 `core/music/player.py` 提供 EOF 判定与队列推进：
   **不依赖自然 STOPPED**——按「可信时长 + 新鲜位置 + 当前意图」到点后主动 Stop 并回读确认，
   再换当前 entry；单条只推进一次，末条停止；暂停冻结计时、位置陈旧 ⇒ stalled、时长未知 ⇒
   unknown；回绕补偿仅限声明支持的 backend 且只一次；外部接管 ⇒ relinquish 不抢回。
@@ -868,4 +871,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**903 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903（含 tick 循环与 flag 路由）。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**909 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

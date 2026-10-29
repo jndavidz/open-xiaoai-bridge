@@ -332,6 +332,27 @@ class ManagedStore:
             ).fetchone()
         return int(row[0] or 0) if row else 0
 
+    def update_receipt_state(self, receipt_id: str, state: str) -> bool:
+        """accepted → observed 等推进（设备回执确认后调用）。"""
+
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE managed_receipts SET state = ? WHERE receipt_id = ?",
+                (str(state), str(receipt_id)),
+            )
+        return cur.rowcount > 0
+
+    def receipt_by_id(self, receipt_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT receipt_id, session_id, kind, state, epoch FROM managed_receipts "
+                "WHERE receipt_id = ?", (str(receipt_id),)
+            ).fetchone()
+        if not row:
+            return None
+        return {"receipt_id": row[0], "session_id": row[1], "kind": row[2],
+                "state": row[3], "epoch": int(row[4])}
+
     def receipt_get(self, principal: str, idem_key: str) -> dict | None:
         with self._lock:
             row = self._conn.execute(

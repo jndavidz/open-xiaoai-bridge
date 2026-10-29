@@ -560,8 +560,15 @@ class APIServer:
             from core.music.service import ManagedService
             from core.services.managed_api import ManagedAPI
 
+            cors = tuple(
+                origin.strip()
+                for origin in os.environ.get("MANAGED_CORS_ORIGINS", "").split(",")
+                if origin.strip()
+            )
             self.managed_api = ManagedAPI(
-                ManagedService(), MusicAuth(os.environ.get("MANAGED_TOKENS", ""))
+                ManagedService(),
+                MusicAuth(os.environ.get("MANAGED_TOKENS", "")),
+                cors_origins=cors,
             )
             self.managed_api.register(self.app)
         except Exception as exc:  # noqa: BLE001 - 托管面失败不得拖垮 bridge

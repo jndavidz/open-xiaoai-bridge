@@ -28,6 +28,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from core.music import events as events_module  # noqa: E402
 from core.music import store as store_module  # noqa: E402
 from core.music.auth import MusicAuth, MusicAuthError  # noqa: E402
+from core.music.budget import BudgetExhausted, RetryBudget  # noqa: E402
 from core.music.events import EventBus  # noqa: E402
 from core.music.model import Intent, ManagedError, Phase, StaleEpoch, TrackRef  # noqa: E402
 from core.music.service import ConflictError, ManagedService  # noqa: E402
@@ -174,6 +175,48 @@ class EventLogTest(_Base):
         self.assertEqual("slow_consumer", marker["reason"])
 
 
+class BudgetTest(_Base):
+    def test_child_budget_shares_the_deadline_instead_of_stacking(self) -> None:
+        now = [0.0]
+        parent = RetryBudget(1000, clock=lambda: now[0])
+        child = parent.child()
+        self.assertEqual(parent.remaining_ms, child.remaining_ms)
+        now[0] = 1.5
+        self.assertTrue(parent.expired)
+        self.assertTrue(child.expired, "子层不得拥有比父层更长的预算")
+
+    def test_expired_budget_rejects_the_command(self) -> None:
+        now = [0.0]
+        budget = RetryBudget(10, clock=lambda: now[0])
+        now[0] = 1.0
+        with self.assertRaises(BudgetExhausted):
+            self.service.command(self.sid, kind="pause", principal="p", idem_key="b1",
+                                 budget=budget)
+
+    def test_receipt_echoes_the_remaining_budget(self) -> None:
+        receipt = self.service.command(self.sid, kind="pause", principal="p",
+                                       idem_key="b2", budget=RetryBudget(5000))
+        self.assertIsNotNone(receipt.budget_remaining_ms)
+        self.assertLessEqual(receipt.budget_remaining_ms, 5000)
+
+
+class ObserveTest(_Base):
+    def test_observed_promotes_the_receipt_and_emits_an_event(self) -> None:
+        self.store.append(self.sid, TrackRef.make("kuwo", "1"))
+        self.store.append(self.sid, TrackRef.make("kuwo", "2"))
+        receipt = self.service.command(self.sid, kind="next", principal="p", idem_key="o1")
+        self.assertEqual("accepted", receipt.state)
+        self.assertTrue(self.service.observe(receipt.receipt_id))
+        stored = self.store.receipt_by_id(receipt.receipt_id)
+        self.assertEqual("observed", stored["state"])
+        events, _ = self.store.events_after(self.sid, 0)
+        observed = [e for e in events if e["kind"] == "command_observed"]
+        self.assertEqual(receipt.receipt_id, observed[-1]["receipt_id"])
+
+    def test_unknown_receipt_is_reported(self) -> None:
+        self.assertFalse(self.service.observe("r-nope"))
+
+
 class ApiAuthTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -279,6 +322,36 @@ class ApiAuthTest(unittest.IsolatedAsyncioTestCase):
             json={"kind": "pause", "idem_key": "ro-1", "target": "lx06"},
             headers=read_headers)
         self.assertEqual(403, denied.status, "read-only 凭据不得下发命令")
+
+    async def test_cors_preflight_and_actual_request(self) -> None:
+        # 单独的 app：白名单只放 http://app.local
+        api = ManagedAPI(self.service, MusicAuth(TOKENS),
+                         cors_origins=("http://app.local",))
+        app = web.Application()
+        api.register(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            ok = await client.options(
+                "/api/music/sessions",
+                headers={"Origin": "http://app.local",
+                         "Access-Control-Request-Method": "POST"})
+            self.assertEqual(204, ok.status)
+            self.assertEqual("http://app.local",
+                             ok.headers.get("Access-Control-Allow-Origin"))
+
+            denied = await client.options(
+                "/api/music/sessions", headers={"Origin": "http://evil.local"})
+            self.assertEqual(204, denied.status)
+            self.assertNotIn("Access-Control-Allow-Origin", denied.headers)
+
+            created = await client.post(
+                "/api/music/sessions", json={"target": "lx06"},
+                headers={"Authorization": "Bearer tok-app", "Origin": "http://app.local"})
+            self.assertEqual("http://app.local",
+                             created.headers.get("Access-Control-Allow-Origin"))
+        finally:
+            await client.close()
 
     async def test_read_path_is_bound_to_the_session_target(self) -> None:
         # 另一个会话属于 lx06-kitchen；lx06 凭据读它必须 403

@@ -96,6 +96,8 @@ async def command(kind: str, **payload) -> str:
     )
     if kind in ("next", "prev"):
         await runtime.player.start(runtime.session_id)
+        # 设备已起播 ⇒ accepted → observed（回执与事件同事务）
+        service.observe(receipt.receipt_id)
     if kind == "stop":
         await runtime.stop()
         runtime.bind(None)

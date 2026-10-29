@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from core.music.budget import RetryBudget
 from core.music.events import EventBus
 import sqlite3
 
@@ -56,6 +57,7 @@ class Receipt:
     state: str
     epoch: int
     replayed: bool = False
+    budget_remaining_ms: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +67,7 @@ class Receipt:
             "state": self.state,
             "epoch": self.epoch,
             "replayed": self.replayed,
+            "budget_remaining_ms": self.budget_remaining_ms,
         }
 
 
@@ -126,7 +129,11 @@ class ManagedService:
         idem_key: str,
         expected_epoch: int | None = None,
         target: str | None = None,
+        budget: RetryBudget | None = None,
     ) -> Receipt:
+        if budget is not None:
+            budget.ensure()   # 预算耗尽：交回最外层，不在这里重试
+        remaining = budget.remaining_ms if budget is not None else None
         kind = str(kind or "").strip().lower()
         if kind not in COMMANDS:
             raise ManagedError(f"unknown command {kind!r}")
@@ -143,7 +150,8 @@ class ManagedService:
                 raise ConflictError(
                     f"idempotency key {idem_key!r} already used with a different payload")
             return Receipt(existing["receipt_id"], existing["session_id"], existing["kind"],
-                           existing["state"], existing["epoch"], replayed=True)
+                           existing["state"], existing["epoch"], replayed=True,
+                           budget_remaining_ms=remaining)
 
         state = self.store.get(session_id)
         if state is None:
@@ -183,12 +191,40 @@ class ManagedService:
             winner = self.store.receipt_get(principal, idem_key)
             if winner is not None and winner["payload_digest"] == digest:
                 return Receipt(winner["receipt_id"], winner["session_id"], winner["kind"],
-                               winner["state"], winner["epoch"], replayed=True)
+                               winner["state"], winner["epoch"], replayed=True,
+                               budget_remaining_ms=remaining)
             raise ConflictError(
                 f"idempotency key {idem_key!r} already used with a different payload") from None
         for event in stored:
             self.bus.publish(session_id, event)
-        return Receipt(receipt_id, session_id, kind, command_state, current.epoch)
+        return Receipt(receipt_id, session_id, kind, command_state, current.epoch,
+                       budget_remaining_ms=remaining)
+
+
+    # ---- 设备回执：accepted → observed ----
+
+    def observe(self, receipt_id: str, *, state: str = CommandState.OBSERVED.value,
+                detail: str = "") -> bool:
+        """设备侧确认后推进回执状态（accepted→observed / failed / unknown）。
+
+        只改回执与事件，不动会话代次；未知回执返回 False（调用方按内部错误处理）。
+        """
+
+        row = self.store.receipt_by_id(receipt_id)
+        if row is None:
+            return False
+        if not self.store.update_receipt_state(receipt_id, state):
+            return False
+        session = self.store.get(row["session_id"])
+        if session is not None:
+            stored = self.store.save_with_events(
+                session,
+                [{"kind": "command_observed", "receipt_id": receipt_id,
+                  "command": row["kind"], "state": state, "detail": detail}],
+            )
+            for event in stored:
+                self.bus.publish(row["session_id"], event)
+        return True
 
 
 def _apply(state: SessionState, kind: str, payload: dict) -> None:

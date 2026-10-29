@@ -13,12 +13,26 @@
 from __future__ import annotations
 
 import json
+import os
 
 from aiohttp import web
 
 from core.music.auth import MusicAuth, MusicAuthError
+from core.music.budget import BudgetExhausted, RetryBudget
 from core.music.model import ManagedError, SessionNotFound, StaleEpoch
 from core.music.service import ConflictError, ManagedService, TargetMismatch
+
+DEFAULT_BUDGET_MS = 15000
+
+
+def _command_budget() -> RetryBudget:
+    """每次命令一条端到端预算（最外层持有；下游只能消耗剩余）。"""
+
+    try:
+        total = float(os.environ.get("MANAGED_COMMAND_BUDGET_MS", DEFAULT_BUDGET_MS))
+    except (TypeError, ValueError):
+        total = DEFAULT_BUDGET_MS
+    return RetryBudget(total)
 
 
 def _json(data, status: int = 200) -> web.Response:
@@ -26,16 +40,29 @@ def _json(data, status: int = 200) -> web.Response:
 
 
 class ManagedAPI:
-    def __init__(self, service: ManagedService, auth: MusicAuth) -> None:
+    def __init__(self, service: ManagedService, auth: MusicAuth,
+                 *, cors_origins: tuple[str, ...] = ()) -> None:
         self.service = service
         self.auth = auth
+        self.cors_origins = tuple(o for o in cors_origins if o)
 
     def register(self, app: web.Application) -> None:
+        # 顺序：CORS 在外、鉴权在内——预检不要求业务凭据，实际请求仍失败关闭。
+        app.middlewares.append(_cors_middleware(self.cors_origins))
         app.middlewares.append(_auth_middleware)
         app.router.add_post("/api/music/sessions", self.create_session)
         app.router.add_get("/api/music/sessions/{sid}", self.get_session)
         app.router.add_post("/api/music/sessions/{sid}/commands", self.post_command)
         app.router.add_get("/api/music/sessions/{sid}/events", self.stream_events)
+        for path in ("/api/music/sessions", "/api/music/sessions/{sid}",
+                     "/api/music/sessions/{sid}/commands",
+                     "/api/music/sessions/{sid}/events"):
+            app.router.add_route("OPTIONS", path, self.preflight)
+
+    async def preflight(self, request: web.Request) -> web.Response:
+        """CORS 预检：仅回 204，是否带上 ACAO 由 CORS 中间件的白名单决定。"""
+
+        return web.Response(status=204)
 
     # ---- 鉴权 ----
 
@@ -100,7 +127,10 @@ class ManagedAPI:
                 idem_key=str(body.get("idem_key") or ""),
                 expected_epoch=body.get("expected_epoch"),
                 target=target or None,
+                budget=_command_budget(),
             )
+        except BudgetExhausted as err:
+            return _reject(504, str(err), code="budget_exhausted")
         except ConflictError as err:
             return _reject(409, str(err), code="idempotency_conflict")
         except TargetMismatch as err:
@@ -169,6 +199,28 @@ class ManagedAPI:
         finally:
             self.service.bus.unsubscribe(subscription)
         return response
+
+
+def _cors_middleware(allowed: tuple[str, ...]):
+    """托管面的 CORS：默认**不放开**（浏览器跨源被拒）；只有白名单 origin 放行。"""
+
+    @web.middleware
+    async def middleware(request: web.Request, handler):
+        try:
+            response = await handler(request)
+        except web.HTTPMethodNotAllowed as err:
+            response = err
+        origin = request.headers.get("Origin", "")
+        if origin and origin in allowed:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Authorization, Content-Type, X-Music-Token, Last-Event-ID")
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Max-Age"] = "600"
+        return response
+
+    return middleware
 
 
 @web.middleware
