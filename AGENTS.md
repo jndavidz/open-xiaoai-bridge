@@ -629,8 +629,12 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   `focus_superseded`/`entry_changed`/`external_takeover`/`resume_unsupported`），绝不偷偷 Play。
   `speak()` 对每个 provider 独立给结果（ok/failed/cancelled/unknown），unknown 或 weak 先做一次
   **安全停止**再交回调用方；`tts_providers.py` 给 doubao/openai/mlx_audio（各自 Rust 播放令牌）
-  与 xiaoai/脚本回退（announce + 停设备音频）的适配。**未接线**：尚未接入对话/播报路径，
-  麦态/KWS/录制归还仍在调用方 finally（B-07 剩余）。
+  与 xiaoai/脚本回退（announce + 停设备音频）的适配。**已接线**（`focus_bridge.py`）：
+  `speaker.announce` 在词表检查通过后取 focus（`required`：音乐在播但暂停确认不了 ⇒
+  `AnnounceRejected`，绝不两路抢设备），finally 先释放 focus 再归还 KWS 闸门（恢复音乐不会
+  落在闸门关闭窗口）；对话回复段（`_speak_response_segments`）取 focus 但**非 required**
+  （focus 失败不阻断回复），异常路径同样释放。麦态/KWS/录制的 finally 归还原语义不变
+  （`mic_gate` 按进入时快照恢复，用户停止聆听保持 off）。
 - **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
   quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
   亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
@@ -879,4 +883,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**927 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**934 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

@@ -24,7 +24,15 @@ from core.music.service import ManagedService
 
 
 class FocusDenied(ManagedError):
-    """无法取得/延续 TTS focus（暂停失败、会话已停止等）。"""
+    """无法取得/延续 TTS focus（暂停失败、会话已停止等）。
+
+    ``code`` 供接入层区分：`not_playing`/`stopped` 表示无需 focus，
+    `pause_unconfirmed` 表示音乐在播但暂停没确认（必须拒绝播报）。
+    """
+
+    def __init__(self, msg: str, code: str = "denied") -> None:
+        super().__init__(msg)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -76,7 +84,7 @@ class TtsFocus:
     async def acquire(self, session_id: str, *, provider: str, reason: str = "tts") -> FocusToken:
         state = self._require(session_id)
         if state.intent == Intent.STOPPED or state.phase == Phase.STOPPED:
-            raise FocusDenied("session is stopped")
+            raise FocusDenied("session is stopped", code="stopped")
         if state.focus_token:
             # 已在 focus 中（连续播报）：复用现有暂停，只换令牌
             entry_id = state.current.entry_id if state.current else None
@@ -84,10 +92,10 @@ class TtsFocus:
             self._set_focus(state.session_id, token.token)
             return token
         if state.phase != Phase.PLAYING:
-            raise FocusDenied("music is not playing; refuse to take focus")
+            raise FocusDenied("music is not playing; refuse to take focus", code="not_playing")
         await self.player.pause(session_id)
         if await self.player.backend.state() != "paused":
-            raise FocusDenied(f"pause not confirmed before {reason}")
+            raise FocusDenied(f"pause not confirmed before {reason}", code="pause_unconfirmed")
         paused = self._require(session_id)          # pause 会 bump epoch
         entry_id = paused.current.entry_id if paused.current else None
         token = self._issue(paused, entry_id, provider)

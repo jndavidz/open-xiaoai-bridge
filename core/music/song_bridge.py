@@ -104,6 +104,26 @@ async def command(kind: str, **payload) -> str:
     return f"托管命令已受理（{kind}, {receipt.state}）"
 
 
+def focus():
+    """当前托管会话的 TTS focus 句柄（无会话时 None）。"""
+
+    runtime = get_runtime()
+    if runtime is None or runtime.service is None or not runtime.session_id:
+        return None
+    handle = getattr(runtime, "_tts_focus", None)
+    if handle is None:
+        from core.music.tts_focus import TtsFocus
+
+        handle = TtsFocus(runtime.service, runtime.player)
+        runtime._tts_focus = handle
+    return handle
+
+
+def active_session() -> str | None:
+    runtime = get_runtime()
+    return runtime.session_id if runtime is not None else None
+
+
 async def status() -> dict | None:
     runtime = get_runtime()
     if runtime is None or not runtime.session_id:

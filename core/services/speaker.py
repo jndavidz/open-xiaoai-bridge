@@ -141,7 +141,7 @@ class _AnnounceSession:
     """一次 announce 的观测句柄：等待完成的结局（测试与调用方可读）。"""
 
     __slots__ = ("wait_finished", "wait_started", "wait_reason",
-                 "wait_quality", "wait_source")
+                 "wait_quality", "wait_source", "focus_resumed", "focus_reason")
 
     def __init__(self) -> None:
         self.wait_finished: bool | None = None
@@ -149,6 +149,8 @@ class _AnnounceSession:
         self.wait_reason: str | None = None
         self.wait_quality: str | None = None
         self.wait_source: str | None = None
+        self.focus_resumed: bool | None = None
+        self.focus_reason: str | None = None
 
 
 class SpeakerManager:
@@ -653,6 +655,7 @@ class SpeakerManager:
             wait_budget_ms = estimate_playback_budget_ms(text or "", None) + 5_000.0
         session = _AnnounceSession()
         kws = get_kws()
+        focus_token = None
         async with self.mic_gate(reason, max_seconds=gate_seconds):
             token = self._gate_kws(kws, reason, gate_seconds)
             try:
@@ -664,6 +667,15 @@ class SpeakerManager:
                             f"(reason={reason!r}, word={word!r})"
                         )
                         raise AnnounceRejected(word)
+                # TTS focus（B-07）：托管音乐在播时先暂停并确认，播完再按资格恢复。
+                # 暂停确认不了 ⇒ 拒绝播报（required），不让两路音频抢同一设备。
+                from core.music import focus_bridge
+
+                try:
+                    focus_token = await focus_bridge.acquire("announce")
+                except Exception as exc:  # noqa: BLE001 - 焦点失败即拒绝播报
+                    logger.warning(f"[Speaker] TTS focus denied ({reason}): {exc}")
+                    raise AnnounceRejected(f"focus:{exc}") from exc
                 try:
                     # 起播前预启动 native 事件流：避免首次事件落在流建立之前，
                     # 也允许在 5s 重连退避窗口内立即重试一次。
@@ -699,6 +711,17 @@ class SpeakerManager:
                         # 但显式标注，不能让长文本播报冒充「完整播完」。
                         _log_completion_evidence(reason, done)
             finally:
+                # 先按资格恢复音乐（同一 focus 且位置可恢复才继续），再归还闸门：
+                # 顺序反了会让恢复后的音乐在 KWS 闸门关闭的窗口里响一声。
+                if focus_token is not None:
+                    try:
+                        from core.music import focus_bridge
+
+                        session.focus_resumed, session.focus_reason = (
+                            await focus_bridge.release(focus_token)
+                        )
+                    except Exception as exc:  # noqa: BLE001 - finally 不得抛
+                        logger.debug(f"[Speaker] TTS focus release failed: {exc}")
                 self._ungate_kws(kws, token)
 
     async def reconcile_mic_state(self) -> bool:

@@ -491,6 +491,15 @@ class ExternalConversationController:
         pump = asyncio.ensure_future(_pump())
         played: list[str] = []
         channel_ctx = None
+        # TTS focus（B-07）：托管音乐在播时先暂停，本轮回复播完再按资格恢复。
+        # 对话优先：focus 失败只记日志，不阻断回复（非 required）。
+        focus_token = None
+        try:
+            from core.music import focus_bridge
+
+            focus_token = await focus_bridge.acquire("reply")
+        except Exception as exc:  # noqa: BLE001 - 不影响回复
+            logger.debug(f"[Conversation] TTS focus unavailable: {exc}")
         try:
             if with_send_sound:
                 # 「咻」在断录前播（既有设计）：保 LLM 等待期 KWS/打断可用。
@@ -557,6 +566,13 @@ class ExternalConversationController:
                 await generator.aclose()
             except Exception:
                 pass
+            if focus_token is not None:
+                try:
+                    from core.music import focus_bridge
+
+                    await focus_bridge.release(focus_token)
+                except Exception as exc:  # noqa: BLE001 - finally 不得抛
+                    logger.debug(f"[Conversation] TTS focus release failed: {exc}")
         return played
 
     # _play_segment_tts 已迁入 SpeakingSession.play_segment_tts（B-29 步 2：
