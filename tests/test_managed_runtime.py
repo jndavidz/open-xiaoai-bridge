@@ -1,0 +1,185 @@
+"""托管运行期 tick 与 song_request 迁移桥（B-06 接线）测试。
+
+fake player/service：不连设备、不联网。覆盖：
+
+  1. tick 到点推进后自动起播下一条；末条不再起播。
+  2. 循环 start/stop 幂等，异常不杀循环。
+  3. song_request flag：关 = 走旧路径（不建托管会话）；开 = 建会话、入队、起播当前项。
+  4. 托管命令 next/stop 落到同一会话；stop 同时停循环并解绑。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.music import song_bridge  # noqa: E402
+from core.music.model import Intent, Phase, TrackRef  # noqa: E402
+from core.music.player import Decision  # noqa: E402
+from core.music.runtime import ManagedRuntime, get_runtime, set_runtime  # noqa: E402
+from core.music.service import ManagedService  # noqa: E402
+from core.music.store import ManagedStore  # noqa: E402
+
+
+class FakePlayer:
+    def __init__(self, decisions: list[Decision]):
+        self.decisions = decisions
+        self.started: list[str] = []
+        self.ticks = 0
+
+    async def start(self, session_id: str) -> bool:
+        self.started.append(session_id)
+        return True
+
+    async def tick(self, session_id: str) -> Decision:
+        self.ticks += 1
+        return self.decisions.pop(0) if self.decisions else Decision.WAIT
+
+
+class RuntimeTickTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tick_advances_and_starts_next_entry(self) -> None:
+        player = FakePlayer([Decision.ADVANCE])
+        runtime = ManagedRuntime(player)
+        runtime.bind("ms-1")
+        self.assertEqual(Decision.ADVANCE, await runtime.tick_once())
+        self.assertEqual(["ms-1"], player.started, "推进后必须起播下一条")
+
+    async def test_wait_does_not_start(self) -> None:
+        player = FakePlayer([Decision.WAIT])
+        runtime = ManagedRuntime(player)
+        runtime.bind("ms-1")
+        self.assertEqual(Decision.WAIT, await runtime.tick_once())
+        self.assertEqual([], player.started)
+
+    async def test_unbound_runtime_is_a_noop(self) -> None:
+        player = FakePlayer([Decision.ADVANCE])
+        runtime = ManagedRuntime(player)
+        self.assertIsNone(await runtime.tick_once())
+        self.assertEqual(0, player.ticks)
+
+    async def test_loop_starts_and_stops_idempotently(self) -> None:
+        player = FakePlayer([])
+        runtime = ManagedRuntime(player, interval_s=0.01)
+        runtime.bind("ms-1")
+        await runtime.start()
+        await runtime.start()          # 幂等
+        await asyncio.sleep(0.05)
+        self.assertTrue(runtime.ticks >= 1)
+        await runtime.stop()
+        await runtime.stop()
+        self.assertFalse(runtime.running)
+
+    async def test_tick_errors_do_not_kill_the_loop(self) -> None:
+        class Boom(FakePlayer):
+            async def tick(self, session_id):
+                self.ticks += 1
+                if self.ticks == 1:
+                    raise RuntimeError("boom")
+                return Decision.WAIT
+
+        player = Boom([])
+        runtime = ManagedRuntime(player, interval_s=0.01)
+        runtime.bind("ms-1")
+        await runtime.start()
+        await asyncio.sleep(0.06)
+        await runtime.stop()
+        self.assertGreaterEqual(player.ticks, 2)
+
+
+class SongBridgeTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = ManagedStore(Path(self._tmp.name) / "b.db")
+        self.service = ManagedService(store=self.store)
+        self.player = FakePlayer([])
+        self.runtime = ManagedRuntime(self.player, service=self.service, interval_s=10.0)
+        set_runtime(self.runtime)
+
+    def tearDown(self) -> None:
+        set_runtime(None)
+        self.store.close()
+        self._tmp.cleanup()
+
+    def _items(self):
+        return [
+            {"id": "a", "source": "kuwo", "name": "A", "duration_s": 200},
+            {"id": "b", "source": "kuwo", "name": "B", "duration_s": 180},
+        ]
+
+    async def test_flag_off_keeps_legacy_path(self) -> None:
+        with mock.patch.object(song_bridge._sr, "_cfg", lambda key, default=None: False):
+            self.assertFalse(song_bridge.managed_enabled())
+
+    async def test_play_items_creates_session_queue_and_starts(self) -> None:
+        result = await song_bridge.play_items(self._items())
+        self.assertIn("托管队列", result)
+        sid = self.runtime.session_id
+        self.assertIsNotNone(sid)
+        state = self.store.get(sid)
+        self.assertEqual(2, len(state.entries))
+        self.assertEqual(200.0, state.entries[0].duration_s)
+        self.assertEqual(0, state.current_index)
+        self.assertEqual([sid], self.player.started)
+        self.assertTrue(self.runtime.running)
+
+    async def test_next_command_moves_and_starts_next(self) -> None:
+        await song_bridge.play_items(self._items())
+        sid = self.runtime.session_id
+        await song_bridge.command("next")
+        self.assertEqual(1, self.store.get(sid).current_index)
+        self.assertEqual([sid, sid], self.player.started)
+
+    async def test_stop_command_clears_intent_and_unbinds(self) -> None:
+        await song_bridge.play_items(self._items())
+        sid = self.runtime.session_id
+        await song_bridge.command("stop")
+        self.assertEqual(Intent.STOPPED, self.store.get(sid).intent)
+        self.assertIsNone(self.runtime.session_id)
+        self.assertFalse(self.runtime.running)
+
+    async def test_commands_without_a_session_are_explicit(self) -> None:
+        self.assertEqual("托管队列还没有内容", await song_bridge.command("pause"))
+
+    async def test_play_items_without_candidates_is_rejected(self) -> None:
+        self.assertEqual("没有可播放的曲目", await song_bridge.play_items([]))
+
+
+class SongRequestDispatchTest(unittest.IsolatedAsyncioTestCase):
+    """flag 决定 run() 走托管还是旧队列（回滚模式）。"""
+
+    async def test_managed_flag_routes_run_to_the_bridge(self) -> None:
+        from core.tools import song_request as sr
+
+        collect = mock.AsyncMock(return_value=[{"id": "a", "source": "kuwo"}])
+        play = mock.AsyncMock(return_value="托管队列已接管（1 首）")
+        with mock.patch.object(sr, "_cfg", lambda key, default=None: True), \
+                mock.patch.object(sr, "_managed_collect", collect), \
+                mock.patch("core.music.song_bridge.managed_enabled", return_value=True), \
+                mock.patch("core.music.song_bridge.play_items", play):
+            result = await sr.run({"action": "play", "query": "晴天"})
+        self.assertIn("托管队列", result)
+        collect.assert_awaited_once()
+        play.assert_awaited_once()
+
+    async def test_flag_off_uses_the_legacy_queue(self) -> None:
+        from core.tools import song_request as sr
+
+        legacy = mock.AsyncMock(return_value="legacy-ok")
+        with mock.patch.object(sr, "_cfg", lambda key, default=None: True), \
+                mock.patch.object(sr, "_do_play", legacy), \
+                mock.patch("core.music.song_bridge.managed_enabled", return_value=False):
+            result = await sr.run({"action": "play", "query": "晴天"})
+        self.assertEqual("legacy-ok", result)
+        legacy.assert_awaited_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

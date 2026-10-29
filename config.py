@@ -233,6 +233,11 @@ APP_CONFIG = {
         # 专辑端点的源策略（action=album）：目前仅 netease 接入，其余源 501。
         "album_sources": ["netease"],
         # 音质固定 320k（消费铁律 ≤320k mp3，代码常量 _QUALITY 不可配）
+        # B-06 迁移开关：true = 队列归托管 store（ManagedService/ManagedQueuePlayer），
+        # false = 旧内存队列（回滚模式，默认）。打开前先确认 ManagedRuntime 已随起播启动。
+        "managed": False,
+        # 托管会话的 target（与 MANAGED_TOKENS 的 targets 白名单一致）
+        "managed_target": "lx06",
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）

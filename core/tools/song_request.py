@@ -132,6 +132,8 @@ async def run(args: dict) -> str:
         return "在线点歌功能未启用（song_request.enabled），请在配置中打开后再用"
 
     action = str(args.get("action") or "").strip().lower()
+    if _managed_mode():
+        return await _run_managed(action, args)
     if action == "stop":
         return await _do_stop()
     if action == "pause":
@@ -149,6 +151,55 @@ async def run(args: dict) -> str:
             str(args.get("artist") or "").strip(),
         )
     return await _do_play(str(args.get("query") or "").strip(), args.get("source"))
+
+
+# ---- 托管队列迁移（B-06）：flag 打开后队列归 ManagedStore，旧 _state 不再维护 ----
+
+def _managed_mode() -> bool:
+    from core.music import song_bridge
+
+    return song_bridge.managed_enabled()
+
+
+async def _managed_collect(query: str, requested_source, *, artist: str = "",
+                           album: bool = False) -> list[dict]:
+    """复用既有搜索/专辑候选逻辑，只把「队列归属」换到托管面。"""
+
+    sources = _sources(requested_source)
+    if not sources:
+        return []
+    async with aiohttp.ClientSession() as session:
+        for source in sources:
+            if album:
+                items = await _album(session, source, query, artist)
+            else:
+                items = _dedupe_items(
+                    _drop_query_variants(await _search(session, source, query), query)
+                )
+            if items:
+                return items
+    return []
+
+
+async def _run_managed(action: str, args: dict) -> str:
+    from core.music import song_bridge
+
+    if action in ("stop", "pause", "resume", "next", "prev"):
+        return await song_bridge.command(action)
+    query = str(args.get("query") or "").strip()
+    items = await _managed_collect(
+        query,
+        args.get("source"),
+        artist=str(args.get("artist") or "").strip(),
+        album=(action == "album"),
+    )
+    if not items:
+        return f"没有找到能播放的曲目《{query}》"
+    result = await song_bridge.play_items(items, album=(action == "album"))
+    from core.tools.registry import suppress_reply
+
+    suppress_reply()   # 音乐已起播：本轮收尾 TTS 不得顶掉它
+    return result
 
 
 # ---- HTTP 两跳（kw-qq-api envelope 契约，事实源 musicdl API-REFERENCE §3/§4） ----

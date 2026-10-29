@@ -615,8 +615,11 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   再换当前 entry；单条只推进一次，末条停止；暂停冻结计时、位置陈旧 ⇒ stalled、时长未知 ⇒
   unknown；回绕补偿仅限声明支持的 backend 且只一次；外部接管 ⇒ relinquish 不抢回。
   `backends.py` 的 DLNA（主）与 RPC（降级）各自声明 position/seek/resume/stop 能力，
-  未验证的一律 `Unsupported`。**仍未接线**：周期 tick 驱动、旧 `song_request` 迁移与真机
-  loop 0/1 验收（B-06 剩余）。
+  未验证的一律 `Unsupported`。`runtime.py` 的 `ManagedRuntime` 按间隔驱动 tick（推进后
+  自动起播下一条）。**迁移开关**：`song_request.managed`（config，默认 false）——
+  true 时 `song_request.run()` 走 `core/music/song_bridge.py`（搜索/专辑候选逻辑照旧，
+  队列归托管 store、单所有权、无第二自动推进）；false = 旧内存队列（回滚模式）。
+  **仍未完成**：真机 loop 0/1、位置/时长与 Stop 回读验收（B-08）。
 - **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
   quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
   亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
@@ -865,4 +868,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**890 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 14 项 EOF/后端矩阵 = 890。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**903 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903（含 tick 循环与 flag 路由）。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
