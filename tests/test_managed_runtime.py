@@ -320,6 +320,18 @@ class SongRequestDispatchTest(unittest.IsolatedAsyncioTestCase):
         collect.assert_awaited_once()
         play.assert_awaited_once()
 
+    async def test_managed_stop_ends_the_conversation_turn(self) -> None:
+        from core.tools import song_request as sr
+
+        with mock.patch.object(sr, "_cfg", lambda key, default=None: True), \
+                mock.patch("core.music.song_bridge.managed_enabled", return_value=True), \
+                mock.patch("core.music.song_bridge.command",
+                           mock.AsyncMock(return_value="托管命令已受理（stop, applied）")), \
+                mock.patch("core.tools.registry.suppress_reply") as suppress:
+            result = await sr.run({"action": "stop"})
+        self.assertIn("stop", result)
+        suppress.assert_called_once()
+
     async def test_managed_resume_ends_the_conversation_turn(self) -> None:
         from core.tools import song_request as sr
 

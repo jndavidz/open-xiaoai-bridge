@@ -186,9 +186,9 @@ async def _run_managed(action: str, args: dict) -> str:
 
     if action in ("stop", "pause", "resume", "next", "prev"):
         result = await song_bridge.command(action)
-        if action in ("resume", "next", "prev"):
-            # 音乐重新接管音频：结束本轮连续对话（单轮语义），否则麦克风继续开着，
-            # 音乐会 VAD 当成说话，下一轮 TTS 又把音乐暂停。
+        if action in ("stop", "resume", "next", "prev"):
+            # 单轮语义（与旧 _do_stop 一致）：停止/恢复/切歌都是媒体命令，
+            # 完成后结束本轮对话——避免音乐被 VAD 当成说话，或停播后还空等 10–20s。
             from core.tools.registry import suppress_reply
 
             suppress_reply()
