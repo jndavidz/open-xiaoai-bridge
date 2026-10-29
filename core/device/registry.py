@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -642,6 +643,7 @@ FORBIDDEN_METHODS: tuple[tuple[str, str], ...] = (
     ("player_event", "player_event（写播放事件总线）"),
     ("notify", "notify 整对象（假成功通道，create 不入队/不发声）"),
     ("mediaplayer.set_dlna_status", "DLNA 开启（局域网无鉴权可控）"),
+    ("player_set_loop", "播放循环写入（首版不新增；需具名能力 + 参数校验后另行启用）"),
 )
 
 _FORBIDDEN_SCRIPT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -696,9 +698,59 @@ def resolve_capability(name: str) -> CapabilitySpec:
     return spec
 
 
+_LOOP_WRITE_RE = re.compile(
+    r"(?:^|[;&|]\s*)ubus\s+call\s+mediaplayer\s+[\"']?player_set_loop[\"']?(?![\w])(.*)", re.S
+)
+"""只在命令位匹配（行首或 `;&|` 之后），避免把 TTS 文本里出现的同样字面量当调用。"""
+
+# 事实层（docs/devices/lx06/mediaplayer-api.md §3）：type:INT32 ∈ {0,1,2,3}，
+# media:STRING 必填——**缺 media 会让 mediaplayer 打崩重启**（约 5s 自愈）。
+LOOP_TYPE_RANGE = (0, 1, 2, 3)
+
+
+def _loop_write_detail(script: str) -> str | None:
+    """通用 shell 里的 `player_set_loop`：按具名参数口径指出具体缺陷。
+
+    该能力首版不启用（写入会影响托管队列推进），但错误信息仍要能区分
+    「缺 media / 类型错 / 越界 / 不是 JSON」，否则排障只能靠猜。
+    """
+
+    match = _LOOP_WRITE_RE.search(script)
+    if match is None:
+        return None
+    rest = match.group(1)
+    start, end = rest.find("{"), rest.rfind("}")
+    payload = None
+    if start != -1 and end > start:
+        try:
+            payload = json.loads(rest[start : end + 1])
+        except ValueError:
+            payload = None
+    if not isinstance(payload, dict):
+        return "payload 不是 JSON 对象"
+    if "media" not in payload:
+        return "缺少 media（缺参会打崩 mediaplayer）"
+    media = payload.get("media")
+    if not isinstance(media, str) or not media.strip():
+        return f"media 必须是字符串（如 \"mediaplayer\"，收到 {type(media).__name__}）"
+    if "type" not in payload:
+        return "缺少 type"
+    loop_type = payload.get("type")
+    if isinstance(loop_type, bool) or not isinstance(loop_type, int):
+        return f"type 必须是 int（收到 {type(loop_type).__name__}）"
+    if loop_type not in LOOP_TYPE_RANGE:
+        return f"type 越界（只接受 0/1/2/3，收到 {loop_type}）"
+    return "参数合法但能力未登记"
+
+
 def ensure_script_allowed(script: str) -> None:
     """拒绝包含禁区对象的 shell 脚本（能力层最后一道闸门）。"""
 
+    loop_detail = _loop_write_detail(script)
+    if loop_detail is not None:
+        raise ForbiddenCapabilityError(
+            f"脚本触达禁区（player_set_loop 属具名能力写操作，首版不启用：{loop_detail}）：{script}"
+        )
     for pattern, reason in _FORBIDDEN_SCRIPT_PATTERNS:
         if pattern.search(script):
             raise ForbiddenCapabilityError(f"脚本触达禁区（{reason}）：{script}")

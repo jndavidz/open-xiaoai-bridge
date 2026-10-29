@@ -355,7 +355,7 @@ class DeviceCapabilities:
 
     async def service_status(self, name: str = "mediaplayer") -> CapabilityResult:
         spec = resolve_capability("service_status")
-        script = f"ubus call service list '{_json_payload({'name': name})}'"
+        script = f"ubus call service list {_shell_quote(_json_payload({'name': name}))}"
         res = await self._invoke(spec, script)
         data = _json_obj(res.stdout) if res.request is not None else None
         if data is None:
@@ -465,7 +465,7 @@ class DeviceCapabilities:
         if effect not in LED_EFFECT_WHITELIST:
             raise ValueError(f"led effect {effect} not in whitelist (0-7/9-16)")
         spec = resolve_capability("led_effect")
-        script = f"ubus call led show '{_json_payload({'L': effect})}'"
+        script = f"ubus call led show {_shell_quote(_json_payload({'L': effect}))}"
         return await self._invoke(spec, script)
 
     async def led_clear_effect(self) -> CapabilityResult:
@@ -552,7 +552,7 @@ class DeviceCapabilities:
         payload: dict[str, Any] = {"volume": target, "media": "mediaplayer"}
         script = (
             "ubus call mediaplayer player_set_continuous_volume "
-            f"'{_json_payload(payload)}'"
+            f"{_shell_quote(_json_payload(payload))}"
         )
         return await self._invoke(
             spec,
@@ -578,9 +578,11 @@ class DeviceCapabilities:
         self, url: str, timeout_ms: float | None = None
     ) -> CapabilityResult:
         spec = resolve_capability("play_url")
+        # 先序列化完整 JSON，再对整体做 shell 引用（顺序不可反：URL 里的引号
+        # 一旦漏出单引号就会切断 payload 并追加命令）。
         script = (
             "ubus call mediaplayer player_play_url "
-            f"'{_json_payload({'url': url, 'type': 1})}'"
+            f"{_shell_quote(_json_payload({'url': url, 'type': 1}))}"
         )
         return await self._invoke(
             spec, script, timeout_ms=timeout_ms, readback_fn=self.player_context
@@ -629,7 +631,7 @@ class DeviceCapabilities:
         spec = resolve_capability("tts_speak")
         script = (
             "ubus call mibrain text_to_speech "
-            f"'{_json_payload({'text': text or '你好', 'save': 0})}'"
+            f"{_shell_quote(_json_payload({'text': text or '你好', 'save': 0}))}"
         )
         return await self._invoke(spec, script, timeout_ms=timeout_ms)
 
@@ -639,7 +641,7 @@ class DeviceCapabilities:
         spec = resolve_capability("tts_synthesize")
         script = (
             "ubus call mibrain text_to_speech "
-            f"'{_json_payload({'text': text, 'save': 1, 'play': 0})}'"
+            f"{_shell_quote(_json_payload({'text': text, 'save': 1, 'play': 0}))}"
         )
         res = await self._invoke(spec, script, timeout_ms=timeout_ms)
         path = _decode_info(res.request).get("path")
@@ -710,7 +712,7 @@ class DeviceCapabilities:
         if not silent:
             data["tts"] = 1
         return await self._invoke(
-            spec, f"ubus call mibrain ai_service '{_json_payload(data)}'"
+            spec, f"ubus call mibrain ai_service {_shell_quote(_json_payload(data))}"
         )
 
     async def restart_xiaoai_service(self) -> CapabilityResult:

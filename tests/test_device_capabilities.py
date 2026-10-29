@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,6 +31,7 @@ speaker_module = load_speaker_module()
 
 from core import device, ref  # noqa: E402
 from core.device import registry  # noqa: E402
+from core.utils.base import json_encode  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -581,6 +584,169 @@ class SpeakerFacadeTest(_Base):
         self.assertNotIn('"code": 0', source)
         self.assertNotIn("in res.stdout", source)
         self.assertNotIn("in (res.stderr", source)
+
+
+class ShellQuotingTest(_Base):
+    """B-02：设备命令必须「先序列化完整 JSON，再对整体做 shell 引用」。
+
+    判据是**真 shell 解析**：把下发脚本里的实参交给 /bin/sh，看设备侧实际
+    收到的字节是否与序列化结果逐字相同；顺带断言恶意 payload 不能追加命令。
+    """
+
+    # 引号 / 反斜杠 / 换行 / 命令替换 / 后台与重定向：全部塞进同一个 URL
+    NASTY_TEMPLATE = "a'b\"c\\d$(touch {marker})\n下一行; `touch {marker}` & | > <"
+
+    def _shell_parsed(self, quoted: str) -> str:
+        proc = subprocess.run(["sh", "-c", f"printf '%s' {quoted}"], capture_output=True,
+                              text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def _payload_of(self, script: str, prefix: str) -> str:
+        self.assertTrue(script.startswith(prefix), script)
+        return self._shell_parsed(script[len(prefix):])
+
+    def test_play_url_roundtrips_through_a_real_shell(self) -> None:
+        self.device.on("player_play_url", '{"code":0}')
+        self.device.on("player_get_context", _context(status=1))
+        url = "http://nas/a.mp3?x='1'&y=\"2\"\\z\nline2"
+        _run(self.caps.play_url(url))
+        parsed = self._payload_of(self.device.calls[0][0],
+                                  "ubus call mediaplayer player_play_url ")
+        self.assertEqual(json_encode({"url": url, "type": 1}), parsed)
+
+    def test_tts_text_roundtrips_through_a_real_shell(self) -> None:
+        self.device.on("text_to_speech", '{"code": 0}')
+        text = "他说：'你好'\n换行\\结尾"
+        _run(self.caps.tts_speak(text))
+        parsed = self._payload_of(self.device.calls[0][0],
+                                  "ubus call mibrain text_to_speech ")
+        self.assertEqual(json_encode({"text": text, "save": 0}), parsed)
+
+    def test_ask_xiaoai_roundtrips_through_a_real_shell(self) -> None:
+        self.device.on("ai_service", '{"code": 0}')
+        text = "打开'客厅'灯\n并\\关窗帘"
+        _run(self.caps.ask_xiaoai(text, silent=False))
+        parsed = self._payload_of(self.device.calls[0][0],
+                                  "ubus call mibrain ai_service ")
+        self.assertEqual(json_encode({"nlp": 1, "nlp_text": text, "tts": 1}), parsed)
+
+    def test_tts_synthesize_roundtrips_through_a_real_shell(self) -> None:
+        self.device.on("text_to_speech", _tts_response())
+        self.device.on("[ -f", "yes")
+        _run(self.caps.tts_synthesize("静默'测试'\n"))
+        parsed = self._payload_of(self.device.calls[0][0],
+                                  "ubus call mibrain text_to_speech ")
+        self.assertEqual(json_encode({"text": "静默'测试'\n", "save": 1, "play": 0}), parsed)
+
+    def test_payload_cannot_append_commands(self) -> None:
+        marker = Path(tempfile.gettempdir()) / "bridge_shell_injection_marker"
+        marker.unlink(missing_ok=True)
+        self.device.on("player_play_url", '{"code":0}')
+        self.device.on("player_get_context", _context(status=1))
+        url = "http://nas/a.mp3?q=" + self.NASTY_TEMPLATE.format(marker=marker)
+        _run(self.caps.play_url(url))
+        parsed = self._payload_of(self.device.calls[0][0],
+                                  "ubus call mediaplayer player_play_url ")
+        self.assertEqual(json_encode({"url": url, "type": 1}), parsed)
+        self.assertFalse(marker.exists(), "恶意 payload 执行了追加命令")
+
+    def test_service_status_roundtrips_through_a_real_shell(self) -> None:
+        self.device.on("service list", json.dumps({"running": True}))
+        _run(self.caps.service_status("media'player"))
+        parsed = self._payload_of(self.device.calls[0][0], "ubus call service list ")
+        self.assertEqual(json_encode({"name": "media'player"}), parsed)
+
+    def test_led_effect_roundtrips_through_a_real_shell(self) -> None:
+        self.device.on("led show", "")
+        _run(self.caps.led_effect(3))
+        parsed = self._payload_of(self.device.calls[0][0], "ubus call led show ")
+        self.assertEqual(json_encode({"L": 3}), parsed)
+
+    def test_volume_set_roundtrips_through_a_real_shell(self) -> None:
+        self.device.on("player_set_continuous_volume", '{"code":0}')
+        self.device.on("player_get_context", _context(volume=35))
+        _run(self.caps.volume_set(35))
+        parsed = self._payload_of(
+            self.device.calls[0][0], "ubus call mediaplayer player_set_continuous_volume ")
+        self.assertEqual(json_encode({"volume": 35, "media": "mediaplayer"}), parsed)
+
+    def test_play_text_blocking_keeps_json_then_shell_order(self) -> None:
+        # 兜底脚本把 $1 直接插进 {"text":"$1"}：外壳解析后的实参必须是
+        # JSON 转义后的正文，再包回对象能还原原文（顺序反了会被破坏）
+        self.device.on("tts_play.sh", "", exit_code=1)
+        text = "他说：\"你好\"\n结尾\\"
+        _run(self.caps.play_text_blocking(text))
+        script = self.device.calls[0][0]
+        prefix = "/usr/sbin/tts_play.sh "
+        body = self._shell_parsed(script[len(prefix):])
+        self.assertEqual(text, json.loads('{"text": "' + body + '"}')["text"])
+
+
+class LoopWriteGuardTest(_Base):
+    """B-02：`player_set_loop` 属具名能力写操作，首版不启用；通用 shell 必须拒绝。"""
+
+    def test_generic_shell_rejects_the_verified_safe_loop_payload(self) -> None:
+        # 事实层 §3：全参写法是 {"type":0,"media":"mediaplayer"}——参数本身合法，
+        # 但能力首版未登记，仍必须拒绝（且不得下发）
+        with self.assertRaises(registry.ForbiddenCapabilityError) as ctx:
+            _run(self.caps.shell(
+                "ubus call mediaplayer player_set_loop '{\"type\":0,\"media\":\"mediaplayer\"}'"))
+        self.assertIn("参数合法但能力未登记", str(ctx.exception))
+        self.assertEqual([], self.device.calls)
+
+    def test_generic_shell_reports_missing_or_wrong_media(self) -> None:
+        for payload, needle in (('{}', "缺少 media"),
+                                ('{"type":0}', "缺少 media"),
+                                ('{"type":0,"media":0}', "media 必须是字符串")):
+            with self.assertRaises(registry.ForbiddenCapabilityError) as ctx:
+                _run(self.caps.shell(f"ubus call mediaplayer player_set_loop '{payload}'"))
+            self.assertIn(needle, str(ctx.exception), payload)
+
+    def test_generic_shell_reports_bad_type(self) -> None:
+        for payload, needle in (('{"media":"mediaplayer"}', "缺少 type"),
+                                ('{"type":"0","media":"mediaplayer"}', "type 必须是 int"),
+                                ('{"type":9,"media":"mediaplayer"}', "type 越界")):
+            with self.assertRaises(registry.ForbiddenCapabilityError) as ctx:
+                _run(self.caps.shell(f"ubus call mediaplayer player_set_loop '{payload}'"))
+            self.assertIn(needle, str(ctx.exception), payload)
+        self.assertEqual([], self.device.calls)
+
+    def test_quoted_method_name_is_still_blocked(self) -> None:
+        with self.assertRaises(registry.ForbiddenCapabilityError) as ctx:
+            _run(self.caps.shell(
+                'ubus call mediaplayer "player_set_loop" \'{"type":0,"media":"mediaplayer"}\''))
+        self.assertIn("player_set_loop", str(ctx.exception))
+        self.assertEqual([], self.device.calls)
+
+    def test_loop_phrase_inside_a_tts_text_is_not_mistaken_for_a_call(self) -> None:
+        self.device.on("text_to_speech", '{"code": 0}')
+        text = "请执行 ubus call mediaplayer player_set_loop 开关循环"
+        res = _run(self.caps.tts_speak(text))
+        self.assertTrue(res.ok)
+
+    def test_loop_write_is_not_a_named_capability(self) -> None:
+        with self.assertRaises(registry.ForbiddenCapabilityError):
+            _run(self.caps.execute("player_set_loop", media=0))
+        self.assertEqual([], self.device.calls)
+
+
+class NamedParamValidationTest(_Base):
+    """B-02：具名执行入口按能力表校验参数（缺失 / 类型 / 未知键）。"""
+
+    def test_missing_required_param_is_rejected(self) -> None:
+        with self.assertRaises(TypeError) as ctx:
+            _run(self.caps.execute("play_url"))
+        self.assertIn("缺少参数：url", str(ctx.exception))
+
+    def test_wrong_type_is_rejected(self) -> None:
+        with self.assertRaises(TypeError):
+            _run(self.caps.execute("play_url", url=123))
+
+    def test_unknown_param_is_rejected(self) -> None:
+        with self.assertRaises(TypeError):
+            _run(self.caps.execute("play_url", url="http://x", media=0))
+        self.assertEqual([], self.device.calls)
 
 
 if __name__ == "__main__":

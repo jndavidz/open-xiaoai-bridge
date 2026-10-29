@@ -99,6 +99,10 @@ class SegmentBackend:
     def current_session_key(self):
         return ""
 
+    def note_raw_turn_text(self, text: str) -> None:
+        """票 05 新增的控制器→后端登记点（真实实现见 BackendManagerBase）。"""
+        self.raw_turn_text = text
+
     def __init__(self, segments: list[str]):
         self.segments = list(segments)
         self.sent: list[str] = []

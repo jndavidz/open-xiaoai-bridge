@@ -372,7 +372,7 @@ ubus 解析失败（`exit 1`）或文本被静默截断。
 |---|---|---|---|---|
 | **1** | **红外发射**（控空调/电视/机顶盒） | `ir_agent play '{"async":0,"freq":38000,"code":"<base64>","head":""}'` | ✅ **真机已验**；🟢 **P3 票 04 已收编**（B-27：`ir_send` 能力行 sysfs 直写 + C 级工具；网络前置复验过——NAS→LX06 ssh echo + P0.5 常驻连接 ESTABLISHED，旧「跨机不可达」记录 2026-10-20 已自愈；语音端到端已真机验证——2026-10-26：说出指令 → 复述确认 → 应答 → 发射，内核 `[ir_tx] send finished` 留证；真实设备码值待用户配，台账 `ws: docs/plan/pending-followups.md` §1） | 全新维度；固件内**无本地码库**，码值需外部提供（`ir.codes` 配置表）。<br>bridge 走的是 sysfs 直写：`echo "<µs序列>" > /sys/ir_tx_gpio/ir_data`（**不需 daemon、不需 heatshrink**）。<br>内核语义已解出：**偶数索引=载波（`val/26.4` 周期）、奇数索引=静默** ⇒ 任意 IR 协议可直接由规格生成，**无需码值库**。⚠ 发送期间关中断 ⇒ 须串行化、限长、不与播放/TTS 并发（均已落：串行锁 + 512 项/300ms 限长 + speaking 态拒绝）。详见 [`../docs/devices/lx06/kernel-surface.md`](../docs/devices/lx06/kernel-surface.md) §4 |
 | **2** | 音量直控 | `mediaplayer player_set_volume '{"volume":35}'` | ✅ **真机已验** | 现走 `ai_crontab`/`ask_xiaoai` 绕路，可直接调。**43 个方法与参数类型全表见[`../docs/devices/lx06/mediaplayer-api.md`](../docs/devices/lx06/mediaplayer-api.md)** |
-| **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop`；上一首/下一首走 `mphelper iot_next` / `iot_prev` | ✅ 上一首/下一首已入表（B-35，`playback_next/prev`，脚本层判据核对、**真机待验**）；进度/循环 ⚠️ 静态解出 | ⚠️ **`code:0` ≠ 播放成功**；DLNA 投送态队列归投送方，设备 next 无效 |
+| **3** | 播放控制（上一首/进度/循环） | `media_control` / `player_set_positon` / `player_set_loop`；上一首/下一首走 `mphelper iot_next` / `iot_prev` | ✅ 上一首/下一首已入表（B-35，`playback_next/prev`，脚本层判据核对、**真机待验**）；进度/循环 ⚠️ 静态解出，且 **`player_set_loop` 首版禁止**（B-02：通用 shell 闸门拒绝 + 未登记能力，缺 `media` 会打崩 mediaplayer） | ⚠️ **`code:0` ≠ 播放成功**；DLNA 投送态队列归投送方，设备 next 无效 |
 | **4** | 离线本地指令（断网可用） | `ai_crontab new` | ✅ 真机已验 | ⚠️ ubus 是 **root-only**；`duration` **实测无效** |
 | **5** | 闹钟/提醒（断电持久） | `alarm` 25 方法 | 部分已验 | ⚠️ `chime_hourly_set` 的 `OFF` 返回 `code:0` 但**不写** |
 | **6** | ⭐ **播放完成回调**（免轮询） | `ubus listen` → `play_status_broadcast_event`（`status:1` 开始 / `0` 结束） | ✅ **2026-10-20 真机已验** | 🔴 **推翻** `api_server.py:247`「无完成回调」的注释。⚠️ **不带 id ⇒ 并发不可用（只适合串行）**；⚠️ **HTTP 源不可达时只发 `status:1` ⇒ 必须保留超时兜底**。详见 [`../docs/devices/lx06/ubus-events-play-status.md`](../docs/devices/lx06/ubus-events-play-status.md) |
@@ -836,4 +836,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**706 tests OK (skipped=3)**（2026-10-27，B-31/B-32 批后；B-30 批后 689，B-31 +9 = 匹配归一化/别名键，B-32 +4 = TurnTrace 落盘，B-30 review 修复 +2）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**828 tests OK (skipped=3)**（2026-10-29）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 参数闸门用例 = 828。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
