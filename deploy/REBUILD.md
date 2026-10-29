@@ -37,6 +37,8 @@ cd /mnt/d/_work/repos/open-xiaoai/bridge
 # 沙箱/受限环境：docker CLI 需写 ~/.docker，用 DOCKER_CONFIG 重定向到可写位置
 export DOCKER_CONFIG=/tmp/docker-config
 
+# 门禁已内建为 Dockerfile 早层（`RUN uv lock --check`，在 COPY native/ 之前）：
+# lock 与索引不匹配时 ~1s 失败，不会等 Rust 编译 8 分钟后才崩。
 docker build -t open-xiaoai-bridge:home .
 # 产物约 400–600MB（随依赖演进）；成功标志 = 末尾 "#n naming to docker.io/library/open-xiaoai-bridge:home done"
 ```
@@ -44,8 +46,8 @@ docker build -t open-xiaoai-bridge:home .
 **WSL 路径踩坑实录**：
 - `mkdir ~/.docker: permission denied` → 加 `DOCKER_CONFIG=/tmp/docker-config`（见上）；
 - `sh.rustup.rs` 偶发 DNS 解析失败（`curl exit 6`）→ **重试即过**，非持久故障；
-- `COPY --from=ghcr.io/astral-sh/uv:0.7` 直连超时（ghcr 被墙）→ Dockerfile 已改为
-  **`ghcr.nju.edu.cn/astral-sh/uv:0.7`**（提交 `e3d7df3`），无需再动。
+- `COPY --from=ghcr.io/astral-sh/uv:*` 直连超时（ghcr 被墙）→ Dockerfile 已改为
+  **`ghcr.nju.edu.cn/astral-sh/uv:<版本>`**（提交 `e3d7df3`），无需再动；换版本只改 tag+digest（现 `0.12.10`）。
 
 推送到群晖（SSH 流式，免 scp 中转）：
 
@@ -78,19 +80,36 @@ DOCKER_CONFIG=/tmp/docker-config \
 | 项 | 做法 |
 |---|---|
 | 基础镜像 | `python:3.12-slim@sha256:a0f57064…`（manifest digest 钉死，两 stage 同）；升级=手工换 digest |
-| uv 工具镜像 | `ghcr.nju.edu.cn/astral-sh/uv:0.7@sha256:62924083…` |
+| uv 工具镜像 | `ghcr.nju.edu.cn/astral-sh/uv:0.12.10@sha256:2bb3ebca…`（2026-10-29 对齐宿主机 WSL 0.12.10 / 家庭 Win 0.12.10；0.7 亦可过 `--check`，改版不承重） |
 | 平台 | 两 stage 显式 `--platform=linux/amd64`（BuildKit 会 WARN 常量 platform，属预期） |
 | Rust | `rustup -y --default-toolchain 1.99.1 --profile minimal`（`RUST_TOOLCHAIN` env，升级手工改） |
 | Rust 依赖 | `native/Cargo.lock` 入库（210 项，git 依赖 `open-xiaoai` 钉 `14e1034b`） |
-| Python 依赖 | `uv.lock` + `uv sync --locked` |
+| Python 依赖 | `uv.lock` + `uv sync --locked`；索引单一声明在 `pyproject.toml` 的 `[[tool.uv.index]]`，Dockerfile **不设** `UV_DEFAULT_INDEX` |
 | 缓存 | BuildKit cache mount：`/root/.cargo/{registry,git}`、`/root/.cache/uv`、`/app/native/target`（不进层、跨构建复用） |
 | 扩展安装 | maturin **构建后端**经 `uv sync --locked --no-editable` 单次编译并装入 `.venv`；已废除 `uv run maturin build` + `uv remove maturin`（后者层内改写锁文件且重复编译——9.5min 超时的根因） |
 
 实测（WSL，2026-10-24）：全清缓存（`docker builder prune -af`）干净构建 **469s**；紧接第二次构建 2s（层全命中），
 两次 RootFS 层 diffID **逐层一致**；`import open_xiaoai_server` 验证通过。
 
-⚠️ **在宿主机跑 `uv lock` 必须带与镜像一致的源**，否则 lock 会被整体改写成另一 registry 的 URL：
-`UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple uv lock`（WSL 默认 uv.toml 是 aliyun，勿裸跑）。
+⚠️ **`uv.lock` 为每个包记录 `source = { registry = "<索引 URL>" }` 与绝对下载 URL；生效索引与之不逐字相等，uv 即判整份 lock 过期**（`--check`/`--locked` 报 needs update）。
+（2026-10-29 更正：早前本行写「宿主机跑 `uv lock` 必须带 tsinghua 与镜像一致」，方向已随提交 `82e7b43` 反了，现口径如下。）
+
+- **索引只有一个真源**：`pyproject.toml` 的 `[[tool.uv.index]]`（aliyun）。优先级 `UV_DEFAULT_INDEX` env > `pyproject [tool.uv]` > 各机用户级 `uv.toml`——
+  故 Dockerfile 不得再设该 ENV（设了就压过 pyproject，两机个人源一旦不同即整份改写），宿主机若设了 env 必须与 aliyun 逐字相同。
+- **改依赖时在钉定容器内出锁**，避免宿主机解释器漂移（家庭 Win 的 `UV_PYTHON` 指 3.14.7，而构建镜像内是 3.12.15）。
+  uv 工具镜像是 distroless（**无 `sh`**，不能 `--entrypoint sh`），二进制只能 `docker create` + `docker cp` 取出：
+  ```bash
+  VI=ghcr.nju.edu.cn/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500
+  BASE=python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+  mkdir -p /tmp/uvbin
+  docker create --name uvt "$VI" true && docker cp uvt:/uv /tmp/uvbin/uv && docker rm uvt
+  # 二进制与仓库分别挂进同一容器；仓库内 uv.lock 被就地重写
+  docker run --rm -v /tmp/uvbin:/uvbin -v "$PWD":/w -w /w "$BASE" /uvbin/uv lock
+  git diff --stat uv.lock   # 只应出现依赖变更行；若整份 registry URL 被改写说明索引不一致
+  ```
+- **验收判据**（2026-10-29 实测）：补丁后的 `pyproject.toml` + `uv.lock`（`dde3b6d9…`）在 `python:3.12-slim@sha256:a0f57064…`（Python 3.12.15）+ uv 0.12.10 下
+  `uv lock --check` **RC=0**，容器内 `uv lock` 重出后 **`diff` 0 行**（幂等）；把 env 改成 tsinghua 则 RC=1（负例保留，证明门禁有效）。
+- 官方 PyPI 出锁不可行：办公室到 `pypi.org`/`files.pythonhosted.org` 实测超时。
 
 ## 2. 部署 / 重建容器
 

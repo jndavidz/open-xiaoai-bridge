@@ -38,3 +38,9 @@ cache-keys = [
     { file = "native/Cargo.toml" },
     { file = "native/src/**/*.rs" },
 ]
+
+# uv.lock 为每个包记录 registry URL；生效索引与 lock 记录不等时 uv 判定整份过期。
+# 索引一律在此单一声明（压过各机个人 uv.toml），Dockerfile 不得再设 UV_DEFAULT_INDEX 覆盖。
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true

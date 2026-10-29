@@ -12,9 +12,10 @@ FROM --platform=linux/amd64 python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237a
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# 国内加速：apt 源 / uv(pypi) / rustup / cargo crates
+# 国内加速：apt 源 / rustup / cargo crates
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
-ENV UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+# pypi 索引**不在此设**：ENV UV_DEFAULT_INDEX 优先级高于 pyproject 的 [[tool.uv.index]]，
+# 一旦此处与 uv.lock 记录的 registry 不一致，`uv sync --locked` 即判 lock 过期（82e7b43 后曾踩）。
 ENV RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 # 钉版（ticket 14）：升级需手工改此值；生成时实测 stable = 1.99.1（2026-10-13）
 ENV RUST_TOOLCHAIN=1.99.1
@@ -29,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN" --profile minimal
 
 # 安装 uv（digest 钉版）
-COPY --from=ghcr.nju.edu.cn/astral-sh/uv:0.7@sha256:629240833dd25d03949509fc01ceff56ae74f5e5f0fd264da634dd2f70e9cc70 /uv /uvx /bin/
+COPY --from=ghcr.nju.edu.cn/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500 /uv /uvx /bin/
 
 # 设置环境变量
 ENV BASH_ENV=/root/.bash_env
@@ -45,6 +46,10 @@ WORKDIR /app
 # cargo/uv 缓存经 cache mount 跨构建复用，一改不再全量重编
 # ① 依赖清单（uv.lock 锁定全部版本与 git 依赖 commit）
 COPY pyproject.toml uv.lock ./
+
+# ①' 门禁：lock 记录的 registry 必须等于生效索引，否则后面的 `uv sync --locked`
+#         必然报 needs update——在此 1 秒失败，不要等 Rust 编译 8 分钟后才崩。
+RUN uv lock --check
 
 # ② Rust 源（maturin 后端编译所需；Cargo.lock 随目录进入）
 COPY native/ ./native/
