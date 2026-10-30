@@ -246,6 +246,9 @@ class ManagedQueuePlayer:
         """
 
         state = self._require(session_id)
+        if state.phase is Phase.STOPPED or state.intent is Intent.STOPPED:
+            # 用户已 stop / 会话已结束：解析失败不能把它重新拉回 preparing
+            return False
         failed = state.current.entry_id if state.current else None
         has_next = state.current_index + 1 < len(state.entries)
         self._detector = None
@@ -272,14 +275,18 @@ class ManagedQueuePlayer:
             return decision
         if state.intent is not Intent.PLAYING:
             return Decision.WAIT
+        # 入场时快照：Device Stop 是 await 点，期间另一个 tick 可能已推进并
+        # 把 self._entry_id 换成新 entry——拿它做比较会恒等，必须用快照。
+        tracked = self._entry_id
         # 主动 Stop 并确认（不等自然 STOPPED，也不用设备 Next 冒充队列推进）
         if not await self._stop_and_confirm():
             return Decision.UNKNOWN
-        # 并发/陈旧 tick 防护：Device Stop 是 await 点，另一个 tick 可能已推进过。
-        # 只有在「当前 entry 仍是我们正在跟踪的那条」时才允许推进——否则只清检测器。
         state = self._require(session_id)
-        if (state.current.entry_id if state.current else None) != self._entry_id:
-            self._detector = None
+        current = state.current.entry_id if state.current else None
+        if self._entry_id != tracked or current != tracked:
+            # 只有当检测器仍对应被跟踪的那条时才清；否则那是别人的新检测器。
+            if self._entry_id == tracked:
+                self._detector = None
             return Decision.WAIT
         detector.mark_advanced()
         index = state.current_index

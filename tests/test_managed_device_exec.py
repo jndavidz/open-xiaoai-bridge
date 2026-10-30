@@ -144,6 +144,29 @@ class ApplyCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.session_id)
         self.assertEqual(self._receipt_state(rid), "observed")
 
+    async def test_stop_during_slow_play_leaves_no_ghost_session(self) -> None:
+        # play 的解析/准备可能几十秒；期间的 stop 必须串行等待，不能出现
+        # 「stop 先解绑、play 后 start」的幽灵会话（设备在响但运行期未绑定）。
+        self._enqueue()
+        gate = asyncio.Event()
+        original_start = self.player.start
+
+        async def slow_start(session_id: str, **kwargs):
+            await gate.wait()
+            return await original_start(session_id, **kwargs)
+
+        self.player.start = slow_start  # type: ignore[assignment]
+        rid_play = self._receipt("play")
+        play_task = asyncio.ensure_future(song_bridge.apply_command(self.sid, "play", rid_play))
+        await asyncio.sleep(0.01)
+        rid_stop = self._receipt("stop")
+        stop_task = asyncio.ensure_future(song_bridge.apply_command(self.sid, "stop", rid_stop))
+        await asyncio.sleep(0.01)
+        gate.set()
+        await asyncio.gather(play_task, stop_task)
+        self.assertIsNone(self.runtime.session_id, "stop 之后不得留下已起播但未绑定的会话")
+        self.assertEqual("stopped", self.service.snapshot(self.sid)["phase"])
+
     async def test_switching_session_stops_previous_runtime(self) -> None:
         self._enqueue()
         other = self.service.open_session(target="lx06", transport="rpc",

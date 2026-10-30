@@ -189,6 +189,27 @@ class AdvanceFailureTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.running)
 
 
+class LoopFailureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_loop_stops_itself_after_last_entry_start_failure(self) -> None:
+        # 走真实 _loop：末条起播失败必须让循环自行退出（不能在任务内 await self.stop()
+        # 取消自己，那会留下“_task=None 但旧任务仍活着”的双循环）。
+        player = FakePlayer([])
+        player.start_failures = 99
+        player.has_next_after_skip = False
+
+        async def tick(session_id):
+            player.ticks += 1
+            return Decision.ADVANCE
+
+        player.tick = tick  # type: ignore[assignment]
+        runtime = ManagedRuntime(player, interval_s=0.01)
+        runtime.bind("ms-1")
+        await runtime.start()
+        await asyncio.sleep(0.12)
+        self.assertFalse(runtime.running, "末条失败后运行期必须自行停止")
+        self.assertIsNone(runtime.session_id)
+
+
 class SongBridgeTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

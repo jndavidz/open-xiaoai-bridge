@@ -136,6 +136,19 @@ async def command(kind: str, **payload) -> str:
 
 DEVICE_COMMANDS = ("play", "pause", "resume", "next", "prev", "stop")
 
+# 设备动作必须串行：play 的解析/准备可能几十秒，期间的 stop/pause 若并行执行，
+# 会出现「stop 先解绑、play 后 start」的幽灵会话（设备在响但运行期没绑定）。
+_DEVICE_LOCK: "asyncio.Lock | None" = None
+
+
+def _device_lock() -> "asyncio.Lock":
+    global _DEVICE_LOCK
+    import asyncio
+
+    if _DEVICE_LOCK is None:
+        _DEVICE_LOCK = asyncio.Lock()
+    return _DEVICE_LOCK
+
 
 async def apply_command(session_id: str, kind: str, receipt_id: str) -> None:
     """HTTP/App 命令的设备执行侧（B-08）：与语音路径共用同一 runtime 与 store。
@@ -146,6 +159,12 @@ async def apply_command(session_id: str, kind: str, receipt_id: str) -> None:
 
     runtime = build_runtime()
     service: ManagedService = runtime.service
+    async with _device_lock():
+        await _apply_locked(runtime, service, session_id, kind, receipt_id)
+
+
+async def _apply_locked(runtime, service: ManagedService, session_id: str,
+                        kind: str, receipt_id: str) -> None:
     if kind != "play" and runtime.session_id != session_id:
         service.observe(receipt_id, state="failed",
                         detail="session is not bound to the device")
@@ -192,8 +211,9 @@ async def apply_command(session_id: str, kind: str, receipt_id: str) -> None:
             from core.music import focus_bridge
 
             await focus_bridge.force_release()
-            await runtime.stop()
-            runtime.bind(None)
+            if runtime.session_id == session_id:
+                await runtime.stop()
+                runtime.bind(None)
         else:
             raise ManagedError(f"unknown device command {kind!r}")
     except Exception as exc:  # noqa: BLE001 - 设备拒绝如实回报

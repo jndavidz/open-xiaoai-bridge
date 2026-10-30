@@ -153,6 +153,17 @@ class AdvanceOnceTest(_Base):
         self.assertEqual(Intent.STOPPED, state.intent)
         self.assertEqual("advance_failed", state.stop_reason)
 
+    async def test_skip_failed_ignored_after_user_stop(self) -> None:
+        # 解析期间用户 stop：失败不能把已停止的会话重新拉回 preparing
+        self._append("a", 10)
+        self._append("b", 10)
+        player = self._player(FakeBackend())
+        self.store.transition(self.sid, lambda s: setattr(s, "intent", Intent.STOPPED))
+        self.assertFalse(player.skip_failed(self.sid, "prepare failed"))
+        state = self.store.get(self.sid)
+        self.assertEqual(Intent.STOPPED, state.intent)
+        self.assertEqual(0, state.current_index)
+
     async def test_resolver_supplied_duration_enables_advance(self) -> None:
         # HTTP/App 入队不带 duration：解析器（Songloft 准备链）返回验证时长后，
         # EOF 判定必须有可信时长并可推进——否则播完永远停在原曲。

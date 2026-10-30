@@ -70,16 +70,19 @@ class ManagedRuntime:
             except Exception as exc:  # noqa: BLE001 - 单条失败不能让会话静默卡死
                 logger.warning(f"[ManagedRuntime] start failed: {type(exc).__name__}: {exc}")
                 if not self.player.skip_failed(self.session_id, str(exc)):
-                    await self.stop()
+                    # 只解绑：在 _loop 任务内部 await self.stop() 会取消并等待自身
+                    # （Task cannot await on itself），随后被 except 吞掉，留下
+                    # “_task=None 但旧任务还活着”的双循环隐患。
                     self.bind(None)
                     return Decision.FINISH
-        await self.stop()
         self.bind(None)
         return Decision.FINISH
 
     async def _loop(self) -> None:
-        while True:
+        while self.session_id:
             await asyncio.sleep(self.interval_s)
+            if not self.session_id:
+                break
             try:
                 await self.tick_once()
             except Exception as exc:  # noqa: BLE001 - 运行期异常不得杀循环
