@@ -225,24 +225,36 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 
 ## 8.5 托管播放（managed）开关与回滚
 
-B-01…B-07 的托管队列默认**关闭**，生产语义由 `song_request.managed` 控制（`deploy/config.py`）：
+**现网状态（2026-10-30）**：`song_request.managed = True`、`managed_media_resolver = "songloft"`，
+`MANAGED_TOKENS` 与 `SONGLOFT_PASSWORD` 已注入容器；镜像 `5fdbd365f545`
+（回滚 tag `rollback-pre-b08-20261030`）。生产配置以 `deploy/config.py` 为权威（根 `config.py`
+是开发基线，**勿再整份覆盖到 NAS**——2026-10-30 曾因此丢掉 personas/唤醒词，备份
+`config.py.bak-devconfig-20261030`）。
 
-- **打开**：`song_request.managed = True`（`managed_target` 与 `MANAGED_TOKENS` 的 `targets` 一致），
-  且 `.env` 已配 `MANAGED_TOKENS`；改完 `docker compose up -d`（配置是 bind-mount，不重建镜像）。
-  未配令牌时托管面一律 **503 fail-closed**（`music-control auth is not configured`），这不是故障。
+- **开关**：`song_request.managed`（`managed_target` 与 `MANAGED_TOKENS.targets` 一致），
+  `managed_media_resolver` 选 `songloft`（经 Songloft 准备链拿票据 URL）或 `kwqq`（回滚模式）；
+  改完 `docker compose up -d`（配置是 bind-mount，不重建镜像）。
+  未配 `MANAGED_TOKENS` 时托管面一律 **503 fail-closed**；配了但无凭据 **401**——都不是故障。
 - **行为**（真机已验证）：点歌 = **单轮**（说完即退出对话）；`停止/暂停/继续/上一首/下一首`
   同属媒体命令，应答后 `suppress_reply` 单轮结束；连续对话 = **会话级 focus**——`start()`
   即暂停并确认，整段对话保持暂停，退出词/超时/停止聆听后**去抖 5s** 再恢复。
   唤醒打断**不再停设备音频**（托管在管时只开始录音，暂停/恢复交给 TTS focus）。
   启动时只置 `recovery_pending`，**绝不起播**。
-- **验收**：`python3 scripts/music_ecosystem.py --lab`（离线，7 case）；
-  真机单侧冒烟 `--device --require-approval --case device-bridge-smoke`
-  （health 200 + 托管面 503；带 `MUSIC_ECOSYSTEM_BRIDGE_TOKEN`/`MUSIC_ECOSYSTEM_SILENT_WAV` 时再验播放与事件）。
-- **回滚**：① `song_request.managed = False` + `docker compose up -d`（最轻，队列回到旧内存实现）；
-  ② 镜像回滚 `docker tag open-xiaoai-bridge:rollback-pre-managed-20261029 open-xiaoai-bridge:home
-  && docker compose up -d --no-build`（上一级 `rollback-pre-ttsfix-20261029`）。
-  每次改开关前先 `cp config.py config.py.bak-<原因>-<日期>`（NAS 上现存 `config.py.bak-managed-verify-20261029`）。
-- **未验（不要当已验收）**：四 provider focus 矩阵、可选 GENA 长稳（见 `ws: .scratch/music-voice-managed-playback/issues/08-*.md`、`09-*.md`）。
+- **HTTP/App 入口**：`POST /api/music/sessions` → `.../queue`（只发 TrackRef）→ `.../commands`
+  （`play/pause/resume/next/prev/stop`）。命令先落回执（202），设备动作由
+  `song_bridge.apply_command` 异步执行并把回执推进到 `observed/failed`；
+  API 与语音路径**共用同一 runtime/store**。
+- **验收**：`python3 scripts/music_ecosystem.py --lab`（离线）；
+  真机 `--device --require-approval`（8 case，2026-10-30 全 PASS）：
+  `device-full-chain` 覆盖 会话→入队→play（Songloft prepare→票据→LX06 拉 `/media` 206）
+  →pause/resume→TTS 焦点→next→seek 400→SSE 回放→stop。
+- **回滚**：① `song_request.managed = False`（或 `managed_media_resolver = "kwqq"`）+ `docker compose up -d`
+  （最轻，队列回内存实现 / 回 bridge 自查解析）；② 镜像回滚
+  `docker tag open-xiaoai-bridge:rollback-pre-b08-20261030 open-xiaoai-bridge:home && docker compose up -d --no-build`
+  （更早：`rollback-pre-managed-20261029`、`rollback-pre-ttsfix-20261029`）。
+  每次改开关前先 `cp config.py config.py.bak-<原因>-<日期>`。
+- **未验（不要当已验收）**：E6 外部接管、E7 Hi-Fi 隔离、E8 双客户端、E9 长稳、四 provider focus 矩阵、
+  shadow/native 全断、loop 0/1 端到端、可选 GENA 长稳（见 `ws: .scratch/music-voice-managed-playback/issues/08-*.md`、`09-*.md`）。
 
 ## 模型包
 
