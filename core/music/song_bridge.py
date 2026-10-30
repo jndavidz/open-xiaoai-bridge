@@ -66,6 +66,12 @@ async def play_items(items: list[dict], *, start_index: int = 0, album: bool = F
 
     if not items:
         return "没有可播放的曲目"
+    async with _device_lock():
+        return await _play_items_locked(items, start_index=start_index, album=album)
+
+
+async def _play_items_locked(items: list[dict], *, start_index: int = 0,
+                              album: bool = False) -> str:
     runtime = build_runtime()
     service: ManagedService = runtime.service
     store = service.store
@@ -94,6 +100,11 @@ async def play_items(items: list[dict], *, start_index: int = 0, album: bool = F
 
 
 async def command(kind: str, **payload) -> str:
+    async with _device_lock():
+        return await _command_locked(kind, **payload)
+
+
+async def _command_locked(kind: str, **payload) -> str:
     runtime = get_runtime()
     if runtime is None or not runtime.session_id:
         return "托管队列还没有内容"
@@ -255,7 +266,9 @@ def _is_active_managed(session_id: str | None) -> bool:
 
 
 def _reset_for_tests() -> None:
+    global _DEVICE_LOCK
     set_runtime(None)
+    _DEVICE_LOCK = None
 
 
 # ---------- B-08：Songloft 托管准备链解析器 ----------

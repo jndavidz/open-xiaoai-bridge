@@ -57,25 +57,29 @@ class ManagedRuntime:
         `stop_reason=advance_failed` 可见停止。跳过的条数不超过队列长度。
         """
 
-        if not self.session_id:
+        sid = self.session_id
+        if not sid:
             return None
         self.ticks += 1
-        decision = await self.player.tick(self.session_id)
+        decision = await self.player.tick(sid)
         if decision is not Decision.ADVANCE:
             return decision
         for _ in range(self.max_start_attempts):
             try:
-                await self.player.start(self.session_id)
+                await self.player.start(sid)
                 return decision
             except Exception as exc:  # noqa: BLE001 - 单条失败不能让会话静默卡死
                 logger.warning(f"[ManagedRuntime] start failed: {type(exc).__name__}: {exc}")
-                if not self.player.skip_failed(self.session_id, str(exc)):
+                if not self.player.skip_failed(sid, str(exc)):
                     # 只解绑：在 _loop 任务内部 await self.stop() 会取消并等待自身
                     # （Task cannot await on itself），随后被 except 吞掉，留下
                     # “_task=None 但旧任务还活着”的双循环隐患。
-                    self.bind(None)
+                    # 只解绑**本 tick 开始时那个会话**：期间可能已切到新会话。
+                    if self.session_id == sid:
+                        self.bind(None)
                     return Decision.FINISH
-        self.bind(None)
+        if self.session_id == sid:
+            self.bind(None)
         return Decision.FINISH
 
     async def _loop(self) -> None:
