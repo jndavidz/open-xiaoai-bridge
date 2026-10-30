@@ -90,6 +90,7 @@ async def hold(reason: str = "conversation", *, required: bool = False) -> bool:
         if _hold_token is None:
             return False
     _hold_count += 1
+    logger.debug(f"[TtsFocus] hold acquired reason={reason} count={_hold_count}")
     return True
 
 
@@ -100,6 +101,7 @@ async def release_hold(*, grace_s: float = RELEASE_GRACE_S) -> None:
     if _hold_count == 0:
         return
     _hold_count -= 1
+    logger.debug(f"[TtsFocus] hold released count={_hold_count}")
     if _hold_count > 0:
         return
     _pending_release = asyncio.ensure_future(_finish_release(grace_s))
@@ -120,9 +122,9 @@ async def _finish_release(grace_s: float) -> None:
             if resumed:
                 logger.debug(f"[TtsFocus] music resumed after conversation ({why})")
             else:
-                logger.info(f"[TtsFocus] music not resumed after conversation ({why})")
+                logger.warning(f"[TtsFocus] music not resumed after conversation ({why})")
         except Exception as exc:  # noqa: BLE001 - 释放失败不得杀会话
-            logger.debug(f"[TtsFocus] release failed: {exc}")
+            logger.warning(f"[TtsFocus] release failed: {type(exc).__name__}: {exc}")
 
 
 async def force_release(*, resume: bool = False) -> None:

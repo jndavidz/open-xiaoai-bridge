@@ -160,6 +160,10 @@ class TtsFocus:
         state = self.store.get(token.session_id)
         if state is None:
             return False, "session_gone"
+        logger.debug(
+            f"[TtsFocus] release start phase={state.phase.value} intent={state.intent.value} "
+            f"epoch={state.epoch}/{token.epoch} focus_match={state.focus_token == token.token}"
+        )
         # 先给最有信息量的拒绝原因，再做令牌/代次比对
         if state.intent == Intent.STOPPED or state.phase == Phase.STOPPED:
             return False, "stopped"
