@@ -196,6 +196,37 @@ class RunStepsContractTest(unittest.TestCase):
         self.assertEqual(callable_calls, [speaker])
 
 
+# ---------------------------------------------------------------- 纯动作提示音（§1.5）
+
+
+class AckSoundTest(unittest.TestCase):
+    """纯动作序列补「收到」提示音；带文案的序列不补。"""
+
+    def _run_with_ack(self, steps, *, enabled=True):
+        speaker = FakeSpeaker()
+        acked: list[object] = []
+
+        async def _fake_ack(sp):
+            acked.append(sp)
+
+        with mock.patch("core.commands.executor.ack_enabled", lambda: enabled), \
+                mock.patch("core.commands.executor.play_ack", _fake_ack):
+            _run(run_steps(speaker, steps))
+        return speaker, acked
+
+    def test_pure_action_sequence_plays_ack(self) -> None:
+        speaker, acked = self._run_with_ack([("ha", "script", "turn_on", {})])
+        self.assertEqual(acked, [speaker])
+
+    def test_text_sequence_does_not_play_ack(self) -> None:
+        _, acked = self._run_with_ack(["正在准备客厅音响", ("ha", "script", "turn_on", {})])
+        self.assertEqual(acked, [])
+
+    def test_ack_disabled_by_config(self) -> None:
+        _, acked = self._run_with_ack([("ha", "script", "turn_on", {})], enabled=False)
+        self.assertEqual(acked, [])
+
+
 # ---------------------------------------------------------------- 路由契约
 
 

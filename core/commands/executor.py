@@ -7,6 +7,7 @@ P0 ticket 03 起 `str` 播报走 `speaker.announce`（双闸门 + 词表安全�
 """
 
 from core.commands import hass
+from core.commands.ack import ack_enabled, play_ack
 
 
 async def run_steps(speaker, steps):
@@ -14,6 +15,9 @@ async def run_steps(speaker, steps):
 
     步骤按声明顺序执行；str 步骤经 announce 双闸门，词表命中或播放失败
     即异常上抛、后续步骤不执行（默认拒绝）；HA 调用失败只记日志、不中断序列。
+
+    序列里**没有任何文本步骤**时（停止/暂停/上下首/音量这类纯动作），末尾补一声
+    短提示音表示「收到」——否则说完没有任何反馈，观感等同没响应（§1.5 裁决）。
     """
     for step in steps:
         if isinstance(step, str):
@@ -28,3 +32,5 @@ async def run_steps(speaker, steps):
             await hass.hass_action(step[1], step[2], step[3] if len(step) > 3 else None)
         elif callable(step):
             await step(speaker)
+    if steps and not any(isinstance(step, str) for step in steps) and ack_enabled():
+        await play_ack(speaker)
