@@ -117,6 +117,26 @@ class AdvanceOnceTest(_Base):
         self.assertEqual(2, len(self.resolved), "换曲后只准备新的当前 entry")
         self.assertEqual(["http://cdn/a.mp3", "http://cdn/b.mp3"], backend.played)
 
+    async def test_skip_failed_moves_on_and_marks_event(self) -> None:
+        self._append("a", 10)
+        self._append("b", 10)
+        player = self._player(FakeBackend())
+        self.assertTrue(player.skip_failed(self.sid, "kwqq resolve: http=415"))
+        state = self.store.get(self.sid)
+        self.assertEqual(1, state.current_index)
+        self.assertEqual(Phase.PREPARING, state.phase)
+        kinds = [row["kind"] for row in self.store.events_after(self.sid, 0)[0]]
+        self.assertIn("advance_failed", kinds)
+
+    async def test_skip_failed_on_last_entry_stops_visibly(self) -> None:
+        self._append("only", 10)
+        player = self._player(FakeBackend())
+        self.assertFalse(player.skip_failed(self.sid, "kwqq resolve: http=415"))
+        state = self.store.get(self.sid)
+        self.assertEqual(Phase.STOPPED, state.phase)
+        self.assertEqual(Intent.STOPPED, state.intent)
+        self.assertEqual("advance_failed", state.stop_reason)
+
     async def test_resolver_supplied_duration_enables_advance(self) -> None:
         # HTTP/App 入队不带 duration：解析器（Songloft 准备链）返回验证时长后，
         # EOF 判定必须有可信时长并可推进——否则播完永远停在原曲。

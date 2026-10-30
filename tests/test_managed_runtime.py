@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.music import song_bridge  # noqa: E402
-from core.music.model import Intent, Phase, TrackRef  # noqa: E402
+from core.music.model import Intent, ManagedError, Phase, TrackRef  # noqa: E402
 from core.music.player import RPC, Decision  # noqa: E402
 from core.music.runtime import ManagedRuntime, get_runtime, set_runtime  # noqa: E402
 from core.music.service import ManagedService  # noqa: E402
@@ -51,14 +51,24 @@ class FakePlayer:
         self.fake_no_audio = False
         self.resume_noop = False
         self.ticks = 0
+        self.start_failures = 0      # 前 N 次 start 抛 ManagedError
+        self.skip_calls: list[str] = []
+        self.has_next_after_skip = False
 
     async def play(self, uri: str) -> bool:
         self.started.append(uri)
         return True
 
     async def start(self, session_id: str) -> bool:
+        if self.start_failures > 0:
+            self.start_failures -= 1
+            raise ManagedError("songloft prepare failed: kwqq resolve: http=415")
         self.started.append(session_id)
         return True
+
+    def skip_failed(self, session_id: str, reason: str) -> bool:
+        self.skip_calls.append(reason)
+        return self.has_next_after_skip
 
     async def restart(self, session_id: str) -> bool:
         self.restarted += 1
@@ -152,6 +162,31 @@ class RuntimeTickTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.06)
         await runtime.stop()
         self.assertGreaterEqual(player.ticks, 2)
+
+
+class AdvanceFailureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_start_failure_skips_to_next_entry(self) -> None:
+        player = FakePlayer([Decision.ADVANCE])
+        player.start_failures = 1
+        player.has_next_after_skip = True
+        runtime = ManagedRuntime(player, interval_s=10.0)
+        runtime.bind("ms-1")
+        self.assertEqual(Decision.ADVANCE, await runtime.tick_once())
+        self.assertEqual(1, len(player.skip_calls))
+        self.assertEqual(["ms-1"], player.started, "跳过失败条后应继续起播下一条")
+        self.assertEqual("ms-1", runtime.session_id)
+
+    async def test_start_failure_on_last_entry_stops_visibly(self) -> None:
+        player = FakePlayer([Decision.ADVANCE])
+        player.start_failures = 1
+        player.has_next_after_skip = False
+        runtime = ManagedRuntime(player, interval_s=10.0)
+        runtime.bind("ms-1")
+        self.assertEqual(Decision.FINISH, await runtime.tick_once())
+        self.assertEqual(1, len(player.skip_calls))
+        self.assertEqual([], player.started)
+        self.assertIsNone(runtime.session_id, "末条失败必须解绑，不得留在 preparing")
+        self.assertFalse(runtime.running)
 
 
 class SongBridgeTest(unittest.IsolatedAsyncioTestCase):

@@ -18,10 +18,11 @@ _RUNTIME: "ManagedRuntime | None" = None
 
 class ManagedRuntime:
     def __init__(self, player: ManagedQueuePlayer, *, service=None,
-                 interval_s: float = 1.0) -> None:
+                 interval_s: float = 1.0, max_start_attempts: int = 8) -> None:
         self.player = player
         self.service = service
         self.interval_s = max(0.001, float(interval_s))
+        self.max_start_attempts = max(1, int(max_start_attempts))
         self.session_id: str | None = None
         self._task: asyncio.Task | None = None
         self.ticks = 0
@@ -49,15 +50,32 @@ class ManagedRuntime:
             pass
 
     async def tick_once(self) -> Decision | None:
-        """驱动一次；推进后立刻起播下一条（末条则由 player 自己置 stopped）。"""
+        """驱动一次；推进后立刻起播下一条（末条则由 player 自己置 stopped）。
+
+        起播失败（解析 415/准备失败/设备拒绝）**不得卡在 preparing**：
+        记录 `advance_failed` 事件→跳过该条继续；没有下一条就以
+        `stop_reason=advance_failed` 可见停止。跳过的条数不超过队列长度。
+        """
 
         if not self.session_id:
             return None
         self.ticks += 1
         decision = await self.player.tick(self.session_id)
-        if decision is Decision.ADVANCE:
-            await self.player.start(self.session_id)
-        return decision
+        if decision is not Decision.ADVANCE:
+            return decision
+        for _ in range(self.max_start_attempts):
+            try:
+                await self.player.start(self.session_id)
+                return decision
+            except Exception as exc:  # noqa: BLE001 - 单条失败不能让会话静默卡死
+                logger.warning(f"[ManagedRuntime] start failed: {type(exc).__name__}: {exc}")
+                if not self.player.skip_failed(self.session_id, str(exc)):
+                    await self.stop()
+                    self.bind(None)
+                    return Decision.FINISH
+        await self.stop()
+        self.bind(None)
+        return Decision.FINISH
 
     async def _loop(self) -> None:
         while True:

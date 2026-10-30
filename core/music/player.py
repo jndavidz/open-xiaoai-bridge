@@ -238,6 +238,28 @@ class ManagedQueuePlayer:
         )
         return True
 
+    def skip_failed(self, session_id: str, reason: str) -> bool:
+        """起播失败（解析/准备/设备拒绝）后跳过当前项，返回是否还有下一项。
+
+        失败必须可见：写 `advance_failed` 事件；末项失败即置 stopped，
+        **绝不停留在 preparing**（运行期会一直 WAIT，用户看到「没有播放」却无原因）。
+        """
+
+        state = self._require(session_id)
+        failed = state.current.entry_id if state.current else None
+        has_next = state.current_index + 1 < len(state.entries)
+        self._detector = None
+        self._prepared_uri = None
+        self._prepared_entry = None
+        self._prepared_duration = 0.0
+        self.store.transition(
+            session_id,
+            _skip_to_next if has_next else _mark_advance_failed,
+            events=[{"kind": "advance_failed", "entry_id": failed,
+                     "detail": str(reason)[:160]}],
+        )
+        return has_next
+
     # ---- 推进 / 结束 ----
 
     async def tick(self, session_id: str, *, epoch: int | None = None) -> Decision:
@@ -380,6 +402,22 @@ class ManagedQueuePlayer:
         if state is None:
             raise ManagedError(f"unknown session {session_id!r}")
         return state
+
+
+def _skip_to_next(state: SessionState) -> None:
+    state.epoch += 1
+    state.current_index = min(state.current_index + 1, len(state.entries) - 1)
+    state.phase = Phase.PREPARING
+    state.intent = Intent.PLAYING
+    state.auto_advance = True
+
+
+def _mark_advance_failed(state: SessionState) -> None:
+    state.epoch += 1
+    state.phase = Phase.STOPPED
+    state.intent = Intent.STOPPED
+    state.auto_advance = False
+    state.stop_reason = "advance_failed"
 
 
 def _set_entry_duration(state: SessionState, entry_id: str, duration_s: float) -> None:
