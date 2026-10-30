@@ -41,7 +41,8 @@ def _build_runtime() -> ManagedRuntime:
     service = ManagedService(store=store)
     # 设备通道是 mediaplayer 的 player_play_url（RPC），不是 DLNA SOAP；
     # 它已验证 pause/play（设备播放控制 CLI），所以用 RpcBackend 的能力矩阵。
-    player = ManagedQueuePlayer(store, RpcBackend(), _default_resolver)
+    resolver = _songloft_resolver if str(_sr._cfg("managed_media_resolver", "kwqq")) == "songloft" else _default_resolver
+    player = ManagedQueuePlayer(store, RpcBackend(), resolver)
     runtime = ManagedRuntime(player, service=service)
     set_runtime(runtime)
     return runtime
@@ -167,3 +168,97 @@ def _is_active_managed(session_id: str | None) -> bool:
 
 def _reset_for_tests() -> None:
     set_runtime(None)
+
+
+# ---------- B-08：Songloft 托管准备链解析器 ----------
+#
+# "managed_media_resolver": "songloft" 时，托管队列当前曲不经 bridge 自查
+# kwqq 两跳，而是驱动 Songloft 的 prepare→验证→票据链：
+#   POST /api/v1/managed/prepare（202）→ 轮询 GET .../prepare（ready/failed）
+#   → 返回票据化 /media?media_ticket=... 绝对 URL（设备直接拉流）。
+# 媒体授权与网络控制分离：bridge 拿到的是短期可撤销票据 URL，不是管理员凭证。
+
+_songloft_token_cache: dict = {}
+
+
+def _songloft_cfg(key: str, default=None):
+    import os
+
+    val = _sr._cfg(key, default)
+    if key == "songloft_password" and not val:
+        val = os.environ.get("SONGLOFT_PASSWORD", "")
+    return val
+
+
+async def _songloft_token(base: str, http) -> str:
+    """登录并缓存 JWT（7 天有效期，按过期时间提前 60s 刷新）。"""
+    import time as _time
+
+    cached = _songloft_token_cache.get("token")
+    exp = _songloft_token_cache.get("exp", 0)
+    if cached and _time.time() < exp - 60:
+        return cached
+    user = str(_songloft_cfg("songloft_user", "admin"))
+    password = str(_songloft_cfg("songloft_password", ""))
+    if not password:
+        raise ManagedError("songloft resolver: SONGLOFT_PASSWORD not configured")
+    async with http.post(
+        f"{base}/api/v1/auth/login",
+        json={"username": user, "password": password},
+    ) as resp:
+        if resp.status != 200:
+            raise ManagedError(f"songloft login: http {resp.status}")
+        data = await resp.json()
+    token = str((data or {}).get("access_token") or "")
+    if not token:
+        raise ManagedError("songloft login: no access_token")
+    _songloft_token_cache["token"] = token
+    _songloft_token_cache["exp"] = _time.time() + 6.5 * 24 * 3600
+    return token
+
+
+async def _songloft_resolver(entry):
+    """经 Songloft 托管准备链解析当前曲，返回票据化媒体绝对 URL。"""
+    import asyncio
+
+    import aiohttp
+
+    base = str(_songloft_cfg("songloft_base", "") or "").rstrip("/")
+    if not base:
+        raise ManagedError("songloft resolver: songloft_base not configured")
+    headers = {"Content-Type": "application/json"}
+    session_id = "bridge-lx06"     # 桥接域固定会话；entry_id 区分出现
+    epoch = 1                      # Songloft 侧换代由其自身代次管理
+    entry_id = entry.entry_id
+
+    async with aiohttp.ClientSession() as http:
+        token = await _songloft_token(base, http)
+        headers["Authorization"] = f"Bearer {token}"
+
+        body = {"session": session_id, "epoch": epoch, "entry": entry_id,
+                "ref": {"source": entry.ref.source, "id": entry.ref.id,
+                        "extra": entry.ref.extra_dict}}
+        async with http.post(f"{base}/api/v1/managed/prepare",
+                             json=body, headers=headers) as resp:
+            if resp.status != 202:
+                raise ManagedError(f"songloft prepare: http {resp.status}")
+
+        deadline = asyncio.get_event_loop().time() + 120
+        while True:
+            await asyncio.sleep(2)
+            qs = f"session={session_id}&epoch={epoch}&entry={entry_id}"
+            async with http.get(f"{base}/api/v1/managed/prepare?{qs}",
+                                headers=headers) as resp:
+                if resp.status != 200:
+                    raise ManagedError(f"songloft prepare poll: http {resp.status}")
+                data = await resp.json()
+            state = str(data.get("state") or "")
+            if state == "ready":
+                media = str(data.get("media_url") or "")
+                if not media:
+                    raise ManagedError("songloft ready without media_url")
+                return base + media
+            if state == "failed":
+                raise ManagedError(f"songloft prepare failed: {data.get('error')}")
+            if asyncio.get_event_loop().time() > deadline:
+                raise ManagedError("songloft prepare timeout")

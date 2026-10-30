@@ -238,6 +238,13 @@ APP_CONFIG = {
         "managed": False,
         # 托管会话的 target（与 MANAGED_TOKENS 的 targets 白名单一致）
         "managed_target": "lx06",
+        # B-08：托管队列当前曲的媒体解析器。"kwqq" = bridge 自查 kwqq v1 两跳（回滚模式）；
+        # "songloft" = 经 Songloft 托管准备链（prepare→验证→票据 URL，媒体由 58091 出）。
+        "managed_media_resolver": "kwqq",
+        "songloft_base": "http://10.10.10.2:58091",
+        "songloft_user": "admin",
+        # songloft_password 缺省回落环境变量 SONGLOFT_PASSWORD（NAS compose 注入，不入库）
+        "songloft_password": "",
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）
