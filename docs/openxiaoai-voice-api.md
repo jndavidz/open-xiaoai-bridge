@@ -362,6 +362,25 @@ curl http://{host}:9092/api/tts/doubao_voices?version=1.0
 
 ---
 
+## 托管播放（/api/music/*）与探针
+
+托管播放接口需要 **music-control 专用凭据**（`MANAGED_TOKENS`，与业务 `BRIDGE_API_TOKENS`
+完全分离；未配置时整组 503，缺凭据 401）：
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/music/sessions` | POST | 开会话（`target` 必须命中凭据 targets） |
+| `/api/music/sessions/{id}` | GET | 会话快照（`phase/index/epoch/entries[].duration_s/last_seq`） |
+| `/api/music/sessions/{id}/queue` | POST | 入队一条 TrackRef（只发身份，不发 URL） |
+| `/api/music/sessions/{id}/commands` | POST | `play/pause/resume/next/prev/stop`；幂等 `idem_key`，202 首执 / 200 重放 |
+| `/api/music/sessions/{id}/events` | GET | SSE（`Last-Event-ID`，seq 严格递增） |
+
+探针（无需鉴权，与 `/api/*` 鉴权中间件解耦）：
+
+- `GET /livez`：进程存活（不碰设备），200 `{"status":"alive"}`
+- `GET /readyz`：能否承接语音命令；speaker 未就绪或用户「停止聆听」时 **503**（`reasons` 给出原因）
+- 所有请求可带 W3C `traceparent`：合法时原样回显，trace id 记入调试日志
+
 ## 错误码
 
 | HTTP Status | 说明 |
