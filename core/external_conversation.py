@@ -274,8 +274,9 @@ class ExternalConversationController:
     async def _run_one_turn(self) -> str:
         """单轮固定编排（B-28 票 03 轮模板，收敛自双写的 _run_one_turn_with_*）：
 
-        取文本 → 取消检查点① → C/B 应答拦截 → exit 关键词 → 检查点②/processing
-        → 句段流播报 → 无回复降级播报 → notify → 开录（→ VAD 链路等静音）。
+        取文本 → 取消检查点① → C/B 应答拦截 → exit 关键词 → 媒体命令
+        → 检查点②/processing → 句段流播报 → 无回复降级播报 → notify → 开录
+        （→ VAD 链路等静音）。
 
         输入链路差异只存在于 _acquire_user_text()（策略点）；编排语义改动一律
         落在本方法单点，不再双写。返回值契约：
@@ -310,6 +311,13 @@ class ExternalConversationController:
                 # TurnTrace（ticket 11）：退出轮没有 LLM/TTS，立即收尾为 incomplete。
                 turn_trace.abandon_turn()
                 return "exit"
+
+        # 3.4 对话轮内媒体命令：「继续播放/暂停/停止播放/下一首/上一首」
+        # 在 exit 之后、LLM 之前——媒体命令绝不发给模型当聊天（真机 2026-10-30：
+        # 对话态裸说「继续播放」无反应）；无音乐时照常走 LLM，不吞普通对话。
+        media_result = await self._try_handle_media_command(text)
+        if media_result is not None:
+            return media_result
 
         # 3.5 「换个话题」暗号（spec topic-switch-and-memory 票 03）：exit 之后、
         # processing 之前——命中则后端原子完成「清历史 + 置信令 + 播过渡语」，
@@ -368,6 +376,47 @@ class ExternalConversationController:
     async def _maybe_handle_new_topic(self, text: str) -> bool:
         """换话题暗号钩子（B-30 票 03）：默认不识别；OpenAI 控制器覆写。"""
         return False
+
+    async def _try_handle_media_command(self, text: str) -> str | None:
+        """对话轮内媒体命令：裸说「继续播放/暂停/停止播放/下一首/上一首」。
+
+        真机 2026-10-30：连续对话期间 KWS 已暂停，裸说的媒体命令只会被当成
+        聊天发给 LLM（口头答应、设备不动）。这里在 ASR 定稿后、发请求前直接
+        执行（`song_request` 的 action 分发），绝不把这类文本交给模型。
+
+        只在媒体相关状态拦截（`core.commands.media.media_active`：托管会话在管
+        / 旧队列有当前曲，含暂停态）——没有音乐时「继续播放」照常走 LLM。
+
+        返回值：
+            None              - 未命中媒体命令或当前无媒体（本轮照常发 LLM）
+            "continue"        - 已执行且音乐仍静默（暂停）：提示音后回到聆听
+            "exit_keep_audio" - 已执行且音频所有权已交接（继续/切歌/停止）：
+                                单轮收束会话，不停设备播放
+        """
+        from core.commands.media import (
+            execute_media_command,
+            hands_over_audio,
+            match_media_command,
+            media_active,
+        )
+
+        action = match_media_command(text)
+        if action is None or not media_active():
+            return None
+
+        # 本轮没有 LLM/TTS 句段：TurnTrace 立即收尾为 incomplete（拦截轮口径）。
+        turn_trace.abandon_turn()
+        result = await execute_media_command(action)
+        logger.info(
+            f"media command in turn: action={action} result={result!r}",
+            module=self.LOG_MODULE,
+        )
+        if hands_over_audio(action):
+            return "exit_keep_audio"
+        # 暂停不交接音频：音乐保持静默，提示音后继续听下一轮（多轮语义不变）
+        await self._begin_speaking()
+        await self._notify_and_resume_listening()
+        return "continue"
 
     def _with_rule_prompt(self, text: str) -> str:
         """拼连续对话轮的输出纪律 prompt（走公开访问器，不直访私有属性）。"""

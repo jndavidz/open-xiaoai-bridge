@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -351,6 +352,161 @@ class RouterContractTest(unittest.TestCase):
         result = self._route("任意文本", "xiaozhi")
         self.assertIsNone(result)
         self.assertEqual(self.speaker.calls, [])
+
+
+# ---------------------------------------------------------------- 对话轮内媒体命令
+#
+# 连续对话期间 KWS 已暂停、原生词表到不了对话轮，用户裸说「继续播放/暂停/
+# 停止播放/下一首/上一首」只会被当成聊天发给 LLM。识别口径 = matching 的
+# 整句归一化精确命中；执行口径 = song_request 的 action 分发（不另造一套）。
+
+
+class MediaCommandMatchTest(unittest.TestCase):
+    """「这句话是不是媒体命令」：只认整句，不认子串/模糊（宁可少截）。"""
+
+    def test_required_phrases_map_to_song_request_actions(self) -> None:
+        from core.commands.media import match_media_command
+
+        cases = {
+            "继续播放": "resume",
+            "播放": "resume",
+            "继续": "resume",
+            "暂停": "pause",
+            "停止播放": "stop",
+            "停止音乐": "stop",
+            "下一首": "next",
+            "切歌": "next",
+            "上一首": "prev",
+        }
+        for text, action in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(action, match_media_command(text))
+
+    def test_normalization_matches_asr_noise(self) -> None:
+        """复用 B-31 归一化：标点/空白/全角不改变命中（ASR 常带句号）。"""
+        from core.commands.media import match_media_command
+
+        self.assertEqual("resume", match_media_command("继续播放。"))
+        self.assertEqual("resume", match_media_command(" 继续，播放 "))
+        self.assertEqual("next", match_media_command("下一首！"))
+        self.assertEqual("stop", match_media_command("停止音乐."))
+        self.assertEqual("pause", match_media_command("暂停 "))
+
+    def test_ordinary_chat_is_not_a_media_command(self) -> None:
+        from core.commands.media import match_media_command
+
+        for text in ("现在几点了", "讲个故事", "继续播放这首歌好听吗", "", None):
+            with self.subTest(text=text):
+                self.assertIsNone(match_media_command(text))
+
+    def test_all_table_actions_are_accepted_by_song_request(self) -> None:
+        """表值必须是 song_request 认识的 action——否则命令层「命中即执行」也执行不了。"""
+        from core.commands.media import MEDIA_COMMAND_ACTIONS
+
+        sys.modules.setdefault("open_xiaoai_server", types.SimpleNamespace())
+        from core.tools import song_request
+
+        for phrase, action in MEDIA_COMMAND_ACTIONS.items():
+            with self.subTest(phrase=phrase):
+                self.assertIsNone(song_request.validate({"action": action}))
+                self.assertIn(action, ("resume", "pause", "stop", "next", "prev"))
+
+    def test_handover_actions_cover_everything_but_pause(self) -> None:
+        """只有「暂停」不交接音频：其余动作要么音乐在播、要么队列已清。"""
+        from core.commands.media import hands_over_audio
+
+        for action in ("resume", "next", "prev", "stop"):
+            self.assertTrue(hands_over_audio(action), action)
+        self.assertFalse(hands_over_audio("pause"))
+
+
+class MediaStateGateTest(unittest.TestCase):
+    """「现在该不该截」：只在媒体相关状态（托管会话在管 / 旧队列有当前曲）。"""
+
+    def setUp(self) -> None:
+        sys.modules.setdefault("open_xiaoai_server", types.SimpleNamespace())
+        from core.tools import song_request
+
+        self.song_request = song_request
+        self._saved_state = dict(song_request._state)
+        self._clear_queue()
+        self.addCleanup(lambda: song_request._state.update(self._saved_state))
+
+    def _clear_queue(self) -> None:
+        self.song_request._state.update(
+            {
+                "current": None,
+                "candidates": [],
+                "index": -1,
+                "history": [],
+                "album": False,
+                "started_at": 0.0,
+                "play_seq": 0,
+            }
+        )
+
+    def test_no_music_is_not_media_state(self) -> None:
+        from core.commands import media
+
+        with mock.patch("core.music.song_bridge.active_session", return_value=None):
+            self.assertFalse(media.media_active())
+
+    def test_legacy_queue_counts_as_media_state(self) -> None:
+        from core.commands import media
+
+        self.song_request._state.update(
+            {"current": {"name": "晴天", "singer": "周杰伦"}, "index": 0}
+        )
+        with mock.patch("core.music.song_bridge.active_session", return_value=None):
+            self.assertTrue(media.media_active())
+
+    def test_managed_session_counts_as_media_state(self) -> None:
+        """托管模式不维护旧 _state：会话在管（含暂停态）也算媒体态。"""
+        from core.commands import media
+
+        with mock.patch("core.music.song_bridge.active_session", return_value="sess-1"):
+            self.assertTrue(media.media_active())
+
+    def test_managed_lookup_failure_falls_back_to_legacy_queue(self) -> None:
+        from core.commands import media
+
+        self.song_request._state.update(
+            {"current": {"name": "晴天", "singer": "周杰伦"}, "index": 0}
+        )
+        with mock.patch(
+            "core.music.song_bridge.active_session", side_effect=RuntimeError("boom")
+        ):
+            self.assertTrue(media.media_active())
+
+
+class MediaCommandExecutionTest(unittest.TestCase):
+    """执行口径：复用 song_request.run 的 action 分发，并按轮复位免播标记。"""
+
+    def setUp(self) -> None:
+        sys.modules.setdefault("open_xiaoai_server", types.SimpleNamespace())
+        from core.tools import registry, song_request
+
+        self.registry = registry
+        self.song_request = song_request
+
+    def test_execute_delegates_to_song_request_run(self) -> None:
+        from core.commands.media import execute_media_command
+
+        with mock.patch.object(
+            self.song_request, "run", mock.AsyncMock(return_value="已暂停")
+        ) as run, mock.patch.object(self.registry, "reset_reply_suppression") as reset:
+            self.assertEqual("已暂停", _run(execute_media_command("pause")))
+        run.assert_awaited_once_with({"action": "pause"})
+        reset.assert_called_once()
+
+    def test_execute_failure_returns_text_and_does_not_raise(self) -> None:
+        from core.commands.media import execute_media_command
+
+        with mock.patch.object(
+            self.song_request, "run", mock.AsyncMock(side_effect=RuntimeError("boom"))
+        ):
+            result = _run(execute_media_command("next"))
+        self.assertIn("next", result)
 
 
 # ---------------------------------------------------------------- deploy/config.py 数据面契约

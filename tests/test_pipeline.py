@@ -582,6 +582,200 @@ class XiaoaiAsrTurnTest(ConversationLoopTestBase):
         )
 
 
+class MediaCommandTurnTest(ConversationLoopTestBase):
+    """对话轮内媒体命令：裸说不带唤醒词也生效。
+
+    真机缺口（2026-10-30）：播放中问「现在几点」后保持对话态（LED 琥珀），
+    裸说「继续播放」无反应——连续对话期间 KWS 已暂停，这句只会被当成聊天
+    发给 LLM。期望：ASR 定稿后、发给 LLM 之前识别并直接执行（song_request
+    的 action 分发），媒体命令 = 单轮；无音乐时同样文本照常进 LLM（不吞
+    普通对话），「停止」也不得因此退出会话（exit_keywords 不含「停止」）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        from core.tools import song_request
+
+        self.song_request = song_request
+        self._saved_state = dict(song_request._state)
+        self._clear_queue()
+        self.addCleanup(lambda: song_request._state.update(self._saved_state))
+        self.media_run = mock.AsyncMock(return_value="已执行")
+        patch = mock.patch.object(song_request, "run", self.media_run)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    # ---- 夹具 ----
+
+    def _clear_queue(self) -> None:
+        self.song_request._state.update(
+            {
+                "current": None,
+                "candidates": [],
+                "index": -1,
+                "history": [],
+                "album": False,
+                "started_at": 0.0,
+                "play_seq": 0,
+            }
+        )
+
+    def _seed_queue(self) -> None:
+        self.song_request._state.update(
+            {"current": {"name": "晴天", "singer": "周杰伦"}, "index": 0}
+        )
+
+    def _patch_asr(self, text: str) -> None:
+        patch = mock.patch(
+            "core.services.audio.asr.service.ASRService",
+            **{"asr.return_value": text},
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    # ---- 用例 ----
+
+    async def test_resume_in_conversation_runs_resume_and_ends_the_turn(self):
+        from core.commands import media
+
+        self._seed_queue()
+        self._patch_asr("继续播放")
+        with mock.patch.object(media, "media_active", return_value=True):
+            task = self._start_loop()
+            await self._drive_speech()
+            # 媒体命令 = 单轮：命令完成后本轮收束（不留在对话态等下一句）
+            await asyncio.wait_for(task, timeout=3)
+
+        self.media_run.assert_awaited_once_with({"action": "resume"})
+        self.assertEqual([], self.backend.sent, "媒体命令绝不发给 LLM")
+        self.assertEqual([], self.backend.played, "不插语音播报：音乐自身即反馈")
+
+    async def test_resume_without_music_still_goes_to_llm(self):
+        from core.commands import media
+
+        self._patch_asr("继续播放")
+        with mock.patch.object(media, "media_active", return_value=False):
+            task = self._start_loop()
+            await self._drive_speech(speech_round=1)
+            ok = await _wait_until(lambda: len(self.backend.played) == 1)
+            self.assertTrue(ok, "无音乐时「继续播放」不得被拦截（普通对话照旧）")
+            self.assertFalse(task.done(), "无音乐时不得结束会话")
+            self._patch_asr("再见")
+            await self._drive_speech(speech_round=2)
+            await asyncio.wait_for(task, timeout=3)
+
+        self.media_run.assert_not_awaited()
+        self.assertEqual(["继续播放"], self.backend.sent)
+
+    async def test_next_in_conversation_runs_next(self):
+        from core.commands import media
+
+        self._seed_queue()
+        self._patch_asr("下一首")
+        with mock.patch.object(media, "media_active", return_value=True):
+            task = self._start_loop()
+            await self._drive_speech()
+            await asyncio.wait_for(task, timeout=3)
+
+        self.media_run.assert_awaited_once_with({"action": "next"})
+        self.assertEqual([], self.backend.sent)
+
+    async def test_prev_in_conversation_runs_prev(self):
+        from core.commands import media
+
+        self._seed_queue()
+        self._patch_asr("上一首")
+        with mock.patch.object(media, "media_active", return_value=True):
+            task = self._start_loop()
+            await self._drive_speech()
+            await asyncio.wait_for(task, timeout=3)
+
+        self.media_run.assert_awaited_once_with({"action": "prev"})
+        self.assertEqual([], self.backend.sent)
+
+    async def test_stop_in_conversation_stops_without_exit_keyword(self):
+        """「停止播放」= 媒体命令（单轮收束），不是退出词——不得走 exit 分支。"""
+        from core.commands import media
+
+        self._seed_queue()
+        self._patch_asr("停止播放")
+        with mock.patch.object(media, "media_active", return_value=True):
+            with mock.patch.object(pipeline_module.logger, "info") as info:
+                task = self._start_loop()
+                await self._drive_speech()
+                await asyncio.wait_for(task, timeout=3)
+
+        self.media_run.assert_awaited_once_with({"action": "stop"})
+        self.assertEqual([], self.backend.sent)
+        lines = [str(call.args[0]) for call in info.call_args_list]
+        self.assertTrue(
+            any("outcome=exit_keep_audio" in line for line in lines), lines
+        )
+        self.assertFalse(any("Exit keyword" in line for line in lines), lines)
+
+    async def test_stop_without_music_is_neither_intercepted_nor_an_exit(self):
+        from core.commands import media
+
+        self._patch_asr("停止播放")
+        with mock.patch.object(media, "media_active", return_value=False):
+            task = self._start_loop()
+            await self._drive_speech(speech_round=1)
+            ok = await _wait_until(lambda: len(self.backend.played) == 1)
+            self.assertTrue(ok, "无音乐时「停止播放」必须照常走 LLM")
+            self.assertFalse(task.done(), "无音乐时不得因「停止」退出对话")
+            self._patch_asr("再见")
+            await self._drive_speech(speech_round=2)
+            await asyncio.wait_for(task, timeout=3)
+
+        self.media_run.assert_not_awaited()
+        self.assertEqual(["停止播放"], self.backend.sent)
+
+    async def test_pause_in_conversation_keeps_listening(self):
+        """暂停不交接音频：命令执行后回到下一轮聆听（多轮语义不变）。"""
+        from core.commands import media
+
+        self._seed_queue()
+        self._patch_asr("暂停")
+        with mock.patch.object(media, "media_active", return_value=True):
+            task = self._start_loop()
+            await self._drive_speech(speech_round=1)
+            ok = await _wait_until(
+                lambda: self.vad.modes.count(("resume", "speech")) >= 2, timeout=5
+            )
+            self.assertTrue(ok, "「暂停」后必须回到下一轮聆听")
+            self.media_run.assert_awaited_once_with({"action": "pause"})
+            self.assertEqual([], self.backend.sent)
+            self._patch_asr("再见")
+            await self._drive_speech(speech_round=2)
+            await asyncio.wait_for(task, timeout=3)
+
+    async def test_native_asr_resume_in_conversation(self):
+        """生产输入链路（xiaoai_asr）同样生效：只退聆听会话，不停设备播放。"""
+        from core.commands import media
+
+        # core.xiaoai 的类体在首次 import 时构造 SpeakerManager 并把自己写进
+        # ref（本文件单独运行时晚于 setUp 的同名写入）——此处显式复位到 fake。
+        ref.set_speaker(self.speaker)
+        self._seed_queue()
+        with mock.patch.object(
+            self.controller, "uses_xiaoai_asr", return_value=True
+        ), mock.patch.object(media, "media_active", return_value=True):
+            task = self._start_loop()
+            ok = await _wait_until(
+                lambda: ("wake_up", True, True) in self.speaker.calls
+            )
+            self.assertTrue(ok, "loop did not trigger native listening")
+            self.controller.consume_xiaoai_recognize_result(
+                "d1", "继续播放", True, False
+            )
+            await asyncio.wait_for(task, timeout=3)
+
+        self.media_run.assert_awaited_once_with({"action": "resume"})
+        self.assertEqual([], self.backend.sent)
+        self.assertIn(("wake_up", False, False), self.speaker.calls)
+        self.assertNotIn(("stop_device_audio",), self.speaker.calls)
+
+
 class InterruptWiringTest(unittest.TestCase):
     """on_interrupt / reset_all_sessions 的取消置位（新增面）。
 
