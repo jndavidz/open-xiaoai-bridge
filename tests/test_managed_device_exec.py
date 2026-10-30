@@ -146,11 +146,17 @@ class ApplyCommandTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_switching_session_stops_previous_runtime(self) -> None:
         self._enqueue()
-        self.runtime.session_id = "other-session"
+        other = self.service.open_session(target="lx06", transport="rpc",
+                                          player_backend="mediaplayer",
+                                          principal="other-client")["session_id"]
+        self.runtime.session_id = other
         rid = self._receipt("play")
         await song_bridge.apply_command(self.sid, "play", rid)
         self.assertEqual(self.runtime.stopped, 1)
         self.assertEqual(self.runtime.session_id, self.sid)
+        # 旧会话必须落 stopped：否则旧客户端一直显示 playing 而设备已被接管
+        self.assertEqual(self.service.snapshot(other)["phase"], "stopped")
+        self.assertNotEqual(self.service.snapshot(self.sid)["phase"], "stopped")
 
 
 class ScheduleDeviceTest(unittest.IsolatedAsyncioTestCase):

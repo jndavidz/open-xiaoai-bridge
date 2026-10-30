@@ -152,8 +152,19 @@ async def apply_command(session_id: str, kind: str, receipt_id: str) -> None:
         return
     try:
         if runtime.session_id not in (None, session_id):
-            # 单设备语义：换会话即接管，旧会话先停，绝不并联出声
+            # 单设备语义：换会话即接管——旧会话先停 tick，并**落 stopped**，
+            # 否则旧客户端会一直看到「playing」而设备其实已被别人播。
+            previous = runtime.session_id
             await runtime.stop()
+            try:
+                service.command(
+                    previous, kind="stop", payload={"reason": "taken_over"},
+                    principal="song_bridge",
+                    idem_key=f"takeover-{previous}-{service.store.get(previous).epoch}",
+                    target=target(),
+                )
+            except Exception:  # noqa: BLE001 - 旧会话已失效时不影响新会话
+                pass
         if kind == "play":
             state = service.store.get(session_id)
             if state is None or not state.entries:
