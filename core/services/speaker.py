@@ -32,6 +32,11 @@ __all__ = [
 # 合成超时：真机实测 < 1s/段，留足余量但不占用播放预算。
 _TTS_SYNTHESIS_TIMEOUT_MS = 6_000
 
+# 长播报的完成质量门（§7.1.6）：文本达到这个长度就不再接受「宽限/超时」当作成功。
+# 60 字 ≈ 13.3s 语速（句读在 ≥12 字弱标点 / ≥20 字处切段，必然多段），单段预算
+# = max(8s, 字数/4.5s + 6s)、封顶 120s；此长度以下仍按原语义（短音频宽限兜底）。
+_LONG_ANNOUNCE_CHARS = 60
+
 # 麦克风闸门默认持有的上限（超过即告警并强制恢复快照）。
 _MIC_GATE_MAX_SECONDS = 300.0
 
@@ -311,14 +316,18 @@ class SpeakerManager:
         语义与 ticket 03 一致：
           - 观察到 playing 后转空闲 ⇒ 已播完；
           - 从未观察到 playing 但已空闲 ⇒ 1s 宽限后按「短音频已播完」处理；
-          - 只观察到 playing、没有结束 ⇒ 超时兜底，仍算完成（不是失败）；
+          - 只观察到 playing、没有结束 ⇒ 超时兜底：**短文本**仍算完成（不是失败）；
           - 整个等待期间读不到状态 ⇒ 判失败，不能确认完成。
+          - **长文本（≥ `_LONG_ANNOUNCE_CHARS`）只认 strong**：宽限/超时一律返回
+            False 并记 `unknown`——§7.1.6「长文本必须完整完成或进 unknown，不能只因
+            idle_grace／timeout 返回业务成功」，否则长播报被截尾也报成功。
         """
 
         budget_ms = estimate_playback_budget_ms(text, timeout_ms)
         done = await get_playback_events().wait_for_finish(
             budget_ms, since_seq=since_seq
         )
+        chars = len((text or "").strip())
         if not done.finished:
             logger.warning(
                 "[Speaker] playback status readback failed, cannot confirm "
@@ -331,6 +340,13 @@ class SpeakerManager:
             )
         elif not done.is_strong:
             _log_completion_evidence(text, done)
+        if done.finished and chars >= _LONG_ANNOUNCE_CHARS and not done.is_strong:
+            logger.warning(
+                "[Speaker] long announce completion unknown "
+                f"(chars={chars}, reason={done.reason}, quality={done.quality}, "
+                f"started={done.started}) — 不按成功返回（§7.1.6）"
+            )
+            return False
         return done.finished
 
     async def _cleanup_tts_file(self, path: str) -> None:

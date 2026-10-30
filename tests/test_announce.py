@@ -291,6 +291,55 @@ class BlockingPlaybackGenerationTest(AnnounceTestBase):
         self.assertFalse(completion.started)
 
 
+class LongAnnounceGateTest(AnnounceTestBase):
+    """§7.1.6：长文本（≥60 字）不得把「宽限/超时」当成功。
+
+    长播报被截尾却报 success 会让调用方（/api/play/text、persona 开场）失去失败信号；
+    短文本仍保留「短音频宽限兜底」的原语义（已有用例覆盖）。
+    """
+
+    LONG = "今天客厅的湿度比昨天高了一些，" * 4  # ≥60 字，句读必然切多段
+
+    def _wire_file_play(self) -> None:
+        self.device.on("text_to_speech", _synth())
+        self.device.on("[ -f", "yes")
+        self.device.on("player_play_url", '{"code": 0}')
+
+    def test_long_text_idle_grace_is_not_success(self) -> None:
+        self._wire_file_play()
+        self.device.on("player_get_context", _context(0))  # 从未观察到起播 → 宽限兜底 weak
+
+        self.assertFalse(_run(self.speaker.play(text=self.LONG, blocking=True, timeout=1500)))
+
+    def test_long_text_timeout_is_not_success(self) -> None:
+        self._wire_file_play()
+        self.device.on("player_get_context", _context(1))  # 一直 playing，永不结束 → 超时
+
+        self.assertFalse(_run(self.speaker.play(text=self.LONG, blocking=True, timeout=1500)))
+
+    def test_long_text_strong_completion_is_success(self) -> None:
+        self._wire_file_play()
+        self.adapter.configure(source="client", poll_interval_ms=2, start_grace_ms=10)
+
+        async def scenario():
+            task = asyncio.ensure_future(
+                self.speaker.play(text=self.LONG, blocking=True, timeout=5000)
+            )
+            await asyncio.sleep(0.01)
+            self.adapter.feed_client_status("playing")
+            await asyncio.sleep(0.01)
+            self.adapter.feed_client_status("idle")
+            return await task
+
+        self.assertTrue(_run(scenario()))
+
+    def test_short_text_keeps_grace_fallback(self) -> None:
+        self._wire_file_play()
+        self.device.on("player_get_context", _context(0))
+
+        self.assertTrue(_run(self.speaker.play(text="你好", blocking=True, timeout=1500)))
+
+
 class AnnounceWordListTest(AnnounceTestBase):
     def test_word_hit_rejects_without_playing_and_returns_gates(self) -> None:
         p1, p2 = self._blocked()
