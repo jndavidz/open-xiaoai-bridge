@@ -106,7 +106,8 @@ class IrSendToolTest(_Base):
         return default
 
     def test_risk_declaration_and_registration(self) -> None:
-        self.assertEqual("c", guardrails.module_risk(ir_tool))
+        # 2026-10-30 裁决：家电控制属常规操作，A 级（复述即执行、不等应答）
+        self.assertEqual("a", guardrails.module_risk(ir_tool))
         self.assertIn("ir_send", tools_registry._REGISTRY)
         names = [t["function"]["name"] for t in tools_registry.get_all_tools()]
         self.assertIn("ir_send", names)  # C 级对模型可见（D 级才隐藏）
@@ -140,33 +141,29 @@ class IrSendToolTest(_Base):
         self.assertIn("正在播放", result)
         self.assertEqual(0, len(self.device.calls))
 
-    def test_c_level_guarded_flow(self) -> None:
-        """经 execute_guarded：首次不执行（复述请求），确认后执行。"""
+    def test_a_level_guarded_flow(self) -> None:
+        """经 execute_guarded（A 级）：复述后**直接执行**，不登记 pending。"""
         self.device.on(contains="ir_tx_gpio", stdout="")
         manager = guardrails.ConfirmationManager(ttl_seconds=60)
+        recited: list[str] = []
 
-        first = _run(
+        async def _announce(text: str) -> None:
+            recited.append(text)
+
+        result = _run(
             guardrails.execute_guarded(
                 ir_tool,
                 {"device": "ac", "action": "on"},
                 action_id="ir:1",
                 confirmation=manager,
+                announcement=_announce,
             )
         )
-        self.assertIn("需要确认", first)
-        self.assertEqual(0, len(self.device.calls))
-
-        second = _run(
-            guardrails.execute_guarded(
-                ir_tool,
-                {"device": "ac", "action": "on"},
-                action_id="ir:1",
-                confirmation=manager,
-                confirm_utterance="确认",
-            )
-        )
-        self.assertIn("已发射", second)
+        self.assertNotIn("需要确认", result)
+        self.assertIn("已发射", result)
+        self.assertTrue(recited, "A 级必须先复述再执行")
         self.device.assert_called("ir_tx_gpio")
+        self.assertEqual({}, manager._pending, "A 级不得登记待确认动作")
 
 
 if __name__ == "__main__":

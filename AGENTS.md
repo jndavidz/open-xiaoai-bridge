@@ -575,12 +575,12 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | `music.py` | LMS 播放状态查询（只读，RISK=read） |
 | `song_request.py` | 在线点歌 + 整张专辑（**RISK=a**，B-33/B-35）：kwqq-api `search`/`album` → `song/url`（320k）→ 设备播放；内存队列 next/prev/stop，桥队列为空时回落设备自身队列；`enabled` dev 默认关 / deploy 开 |
 | `device_status.py` | 音箱自身状态聚合（播放/音量/麦/内存/夜间模式，只读，P3 票 01；miot 周边发现不可达 MIO-6，家庭其他设备走 hass） |
-| `ir_send.py` | 红外发射（**RISK=c**，P3 票 04）：LLM 只传 device/action，码值查 `ir.codes` 配置表（外部提供）；幻觉 pattern 被忽略；speaking 态拒绝 + 串行锁（关中断纪律） |
+| `ir_send.py` | 红外发射（**RISK=a**，P3 票 04；2026-10-30 用户裁决「家电控制不需确认」，由 c 降为 a：复述即执行、不登记 pending）：LLM 只传 device/action，码值查 `ir.codes` 配置表（外部提供）；幻觉 pattern 被忽略；speaking 态拒绝 + 串行锁（关中断纪律） |
 
 **接线位置与硬约束** (`core/openai.py`):
 - `tools` 注入仅 **chat_completions 风格**；回环深度 `_max_tool_rounds=3`（配置项 `max_tool_rounds`），总开关 `tool_calls_enabled`（默认开）
 - ⚠ **reasoning_content 条件回传**：thinking 模式带 `tools` 时，后续每轮必须完整回传 assistant 的 `reasoning_content`（缺失直接 400）；仅当响应携带时才回传（非 thinking 模型无此字段，天然无影响）——改消息组装前先读官方 thinking_mode 文档
-- **写操作分级纪律（P3 票 03 起）**：新增工具必须声明 `RISK`（read/a/b/c/d），否则拒绝注册；B/C 级必须经 `guardrails.execute_guarded` 的显式应答流程；D 级永不开放（模型不可见 + 调用拒绝）；复述文案过 `sanitize_for_speech` 后才能进 TTS/announce
+- **写操作分级纪律（P3 票 03 起）**：新增工具必须声明 `RISK`（read/a/b/c/d），否则拒绝注册；**A/B/C 级一律经 `guardrails.execute_guarded`**（A 复述即执行、B/C 复述+应答，家电控制归 A）；D 级永不开放（模型不可见 + 调用拒绝）；复述文案过 `sanitize_for_speech` 后才能进 TTS/announce
 - **流式响应通道（P1 ticket 03）**：`stream_response_segments`（基类默认 = 非流式「单句序列」退化；OpenAI 子类在 `openai.stream` 配置开 + chat_completions 风格下走 SSE）；**工具轮探测降级**——带 tools 的流式请求首见 tool_calls 增量且未产出句段即转非流式回环（回环路径与改前逐字一致），模型不调工具的终答轮流式到底；已产出句段后到达的 tool_calls 增量丢弃（按纯文本终答，WARNING）；上游异常吞错降级不杀会话（与非流式同口径，仅完整回复入历史）；开关默认关，面板 `openai.stream` 热切换即回退
 
 ### 音频处理链
@@ -913,4 +913,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**1029 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020，命令路径首次起播失败可见停止 +2 = 1022，长播报质量门（§15 #10，§7.1.6）+4 = 1026，纯动作提示音（§1.5）+3 = 1029。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**1034 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020，命令路径首次起播失败可见停止 +2 = 1022，长播报质量门（§15 #10，§7.1.6）+4 = 1026，纯动作提示音（§1.5）+3 = 1029，对话内裸媒体命令提示音（stop/pause）+5 = 1034。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

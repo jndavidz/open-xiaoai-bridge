@@ -227,6 +227,49 @@ class AckSoundTest(unittest.TestCase):
         self.assertEqual(acked, [])
 
 
+# ---------------------------------------------------------------- 媒体命令提示音（§1.5）
+
+
+class MediaCommandAckTest(unittest.TestCase):
+    """停止/暂停落静音 ⇒ 补提示音；切歌/继续由音乐本身反馈，不叠。"""
+
+    def _run_media(self, action, result="已受理", *, enabled=True):
+        from core.commands.media import execute_media_command
+
+        acked: list[object] = []
+        speaker = FakeSpeaker()
+
+        async def _fake_ack(sp):
+            acked.append(sp)
+
+        async def _fake_run(args):
+            return result
+
+        with mock.patch("core.tools.song_request.run", _fake_run),                 mock.patch("core.commands.ack.ack_enabled", lambda: enabled),                 mock.patch("core.commands.ack.play_ack", _fake_ack),                 mock.patch("core.ref.get_speaker", lambda: speaker):
+            out = _run(execute_media_command(action))
+        return out, acked
+
+    def test_stop_plays_ack(self) -> None:
+        _, acked = self._run_media("stop")
+        self.assertEqual(len(acked), 1)
+
+    def test_pause_plays_ack(self) -> None:
+        _, acked = self._run_media("pause")
+        self.assertEqual(len(acked), 1)
+
+    def test_next_does_not_play_ack(self) -> None:
+        _, acked = self._run_media("next")
+        self.assertEqual(acked, [])
+
+    def test_failed_stop_does_not_play_ack(self) -> None:
+        _, acked = self._run_media("stop", result="媒体命令没能执行（stop）")
+        self.assertEqual(acked, [])
+
+    def test_ack_disabled(self) -> None:
+        _, acked = self._run_media("stop", enabled=False)
+        self.assertEqual(acked, [])
+
+
 # ---------------------------------------------------------------- 路由契约
 
 

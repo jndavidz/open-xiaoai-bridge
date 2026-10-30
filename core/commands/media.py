@@ -74,6 +74,10 @@ MEDIA_COMMAND_ACTIONS: dict[str, str] = {
 # 对话循环必须单轮收束，不得继续听（否则会把音乐当说话喂回 VAD/ASR）。
 _AUDIO_HANDOVER_ACTIONS = frozenset({"resume", "next", "prev", "stop"})
 
+# 落静音的动作补「收到」提示音（§1.5）：停止/暂停说完后没有任何声音反馈；
+# 切歌/继续由音乐本身反馈，不叠提示音。
+_ACK_ACTIONS = frozenset({"stop", "pause"})
+
 
 def match_media_command(text) -> str | None:
     """整句是否媒体命令；命中返回 song_request action，否则 None。"""
@@ -122,4 +126,14 @@ async def execute_media_command(action: str) -> str:
         logger.warning(f"[commands] media command {action} failed: {exc}")
         return f"媒体命令没能执行（{action}）"
     logger.info(f"[commands] media command in conversation: {action} -> {result!r}")
+    if action in _ACK_ACTIONS and "没能执行" not in result:
+        try:
+            from core.commands.ack import ack_enabled, play_ack
+            from core.ref import get_speaker
+
+            speaker = get_speaker()
+            if speaker and ack_enabled():
+                await play_ack(speaker)
+        except Exception as exc:  # noqa: BLE001 - 提示音失败不影响命令结果
+            logger.debug(f"[commands] ack after {action} failed: {exc}")
     return result
