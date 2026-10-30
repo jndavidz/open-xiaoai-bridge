@@ -19,7 +19,7 @@ from aiohttp import web
 
 from core.music.auth import MusicAuth, MusicAuthError
 from core.music.budget import BudgetExhausted, RetryBudget
-from core.music.model import ManagedError, SessionNotFound, StaleEpoch
+from core.music.model import ManagedError, SessionNotFound, StaleEpoch, TrackRef
 from core.music.service import ConflictError, ManagedService, TargetMismatch
 
 DEFAULT_BUDGET_MS = 15000
@@ -52,9 +52,11 @@ class ManagedAPI:
         app.middlewares.append(_auth_middleware)
         app.router.add_post("/api/music/sessions", self.create_session)
         app.router.add_get("/api/music/sessions/{sid}", self.get_session)
+        app.router.add_post("/api/music/sessions/{sid}/queue", self.post_queue)
         app.router.add_post("/api/music/sessions/{sid}/commands", self.post_command)
         app.router.add_get("/api/music/sessions/{sid}/events", self.stream_events)
         for path in ("/api/music/sessions", "/api/music/sessions/{sid}",
+                     "/api/music/sessions/{sid}/queue",
                      "/api/music/sessions/{sid}/commands",
                      "/api/music/sessions/{sid}/events"):
             app.router.add_route("OPTIONS", path, self.preflight)
@@ -101,6 +103,32 @@ class ManagedAPI:
             principal=grant.principal,
         )
         return _json({"code": 200, "data": snapshot}, 201)
+
+    async def post_queue(self, request: web.Request) -> web.Response:
+        """入队一条 TrackRef（B-08/S-06：手机与桥接域都只发身份，不发 URL）。"""
+        body = await _body(request)
+        target = str(body.get("target") or "")
+        grant = self._authorize(request, target, "command")
+        ref = (body.get("ref") or {})
+        try:
+            track_ref = TrackRef.make(
+                str(ref.get("source") or ""),
+                str(ref.get("id") or ""),
+                ref.get("extra") or {},
+            )
+            entry = self.service.queue_add(
+                request.match_info["sid"],
+                track_ref,
+                quality=str(body.get("quality") or "320k"),
+                principal=grant.principal,
+                expected_epoch=body.get("expected_epoch"),
+            )
+        except StaleEpoch as err:
+            return _reject(409, str(err), code="stale_epoch")
+        except ManagedError as err:
+            return _reject(400, str(err))
+        return _json({"code": 200, "data": {"entry_id": entry.entry_id,
+                                            "quality": entry.quality}}, 200)
 
     async def get_session(self, request: web.Request) -> web.Response:
         target = str(request.query.get("target") or "")

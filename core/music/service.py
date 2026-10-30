@@ -204,6 +204,24 @@ class ManagedService:
 
     # ---- 设备回执：accepted → observed ----
 
+    def queue_add(
+        self,
+        session_id: str,
+        ref: TrackRef,
+        *,
+        quality: str = "320k",
+        principal: str = "",
+        expected_epoch: int | None = None,
+    ):
+        """入队一条 TrackRef（B-08）：队列编辑在任何阶段允许，编辑≠建立第二队列。"""
+        entry = self.store.append(session_id, ref, quality=quality,
+                                  epoch=expected_epoch)
+        self.bus.publish(session_id, {
+            "kind": "queue_added", "principal": principal,
+            "entry_id": entry.entry_id, "ref_source": entry.ref.source,
+        })
+        return entry
+
     def observe(self, receipt_id: str, *, state: str = CommandState.OBSERVED.value,
                 detail: str = "") -> bool:
         """设备侧确认后推进回执状态（accepted→observed / failed / unknown）。

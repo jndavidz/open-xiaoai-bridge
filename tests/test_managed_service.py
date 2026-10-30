@@ -362,3 +362,44 @@ class ApiAuthTest(unittest.IsolatedAsyncioTestCase):
         resp = await self.client.get(f"/api/music/sessions/{sid}?target=lx06",
                                      headers={"Authorization": "Bearer tok-app"})
         self.assertEqual(403, resp.status)
+
+
+class QueueEndpointTest(unittest.IsolatedAsyncioTestCase):
+    """POST /api/music/sessions/{sid}/queue：TrackRef 入队（B-08）。"""
+
+    async def test_queue_add_and_snapshot(self):
+        store = ManagedStore()
+        service = ManagedService(store=store)
+        app = web.Application()
+        api = ManagedAPI(service, MusicAuth(TOKENS), cors_origins=())
+        api.register(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer tok-app"}
+        try:
+            resp = await client.post("/api/music/sessions", headers=headers,
+                                     json={"target": "lx06"})
+            sid = (await resp.json())["data"]["session_id"]
+
+            resp = await client.post(
+                f"/api/music/sessions/{sid}/queue", headers=headers,
+                json={"target": "lx06", "expected_epoch": 1,
+                      "ref": {"source": "kuwo", "id": "228908", "extra": {}}})
+            self.assertEqual(resp.status, 200)
+            data = (await resp.json())["data"]
+            self.assertTrue(data["entry_id"])
+
+            snap = (await (await client.get(
+                f"/api/music/sessions/{sid}?target=lx06",
+                headers=headers)).json())["data"]
+            self.assertEqual(len(snap["entries"]), 1)
+            self.assertEqual(snap["entries"][0]["ref"]["source"], "kuwo")
+
+            # 空 source/id 拒绝（TrackRef.make → 400；migu 缺 copyrightId 的
+            # 强校验在 kwqq v2 resolve 时失败关闭，bridge 层身份宽容）
+            resp = await client.post(
+                f"/api/music/sessions/{sid}/queue", headers=headers,
+                json={"target": "lx06", "ref": {"source": "", "id": "x"}})
+            self.assertEqual(resp.status, 400)
+        finally:
+            await client.close()
