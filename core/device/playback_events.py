@@ -422,7 +422,9 @@ class PlaybackEventAdapter:
         """起播前取事件序号；把返回值传给 `wait_for_finish(since_seq=...)`。
 
         语义：序号之前的事件属于上一段播放，不能用来证明/结束本次播放。
-        阻塞播报没有这个痛点（起播与等待同一调用栈），可不传。
+        「起播与等待在同一调用栈」不构成豁免理由——`_new_view` 读的是跨调用缓存的
+        最近状态，阻塞播报同样会把上一段的 playing 预成本段的起播，所以
+        所有播报/播放入口都在下发命令前取号（speaker 的两条阻塞路径与 announce 一致）。
         """
 
         with self._state_lock:

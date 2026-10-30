@@ -205,6 +205,92 @@ class AnnounceNormalPathTest(AnnounceTestBase):
         self.assertIsNone(session.wait_finished, "wait=False 不得再做第二次等待")
 
 
+class BlockingPlaybackGenerationTest(AnnounceTestBase):
+    """§15 #9：阻塞播报的两条路径同样要在下发播放命令**之前**取起播序号。
+
+    缺序号时 `_new_view` 会把缓存里上一段的 playing 预成本段「已在播放」，
+    于是「旧 playing + 新 idle」拼成一次假完成：临时文件被提前删、焦点提前归还。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.adapter.configure(source="client", poll_interval_ms=2, start_grace_ms=10)
+
+    def _spy(self) -> list:
+        seen: list = []
+        original = self.adapter.wait_for_finish
+
+        async def spy(
+            timeout_ms,
+            start_grace_ms=None,
+            *,
+            poll_interval_ms=None,
+            since_seq=None,
+        ):
+            completion = await original(
+                timeout_ms,
+                start_grace_ms,
+                poll_interval_ms=poll_interval_ms,
+                since_seq=since_seq,
+            )
+            seen.append((since_seq, completion))
+            return completion
+
+        mock.patch.object(self.adapter, "wait_for_finish", spy).start()
+        self.addCleanup(mock.patch.stopall)
+        return seen
+
+    def test_file_playback_binds_seq_before_play_url(self) -> None:
+        self.device.on("text_to_speech", _synth())
+        self.device.on("[ -f", "yes")
+        self.device.on("player_play_url", '{"code": 0}')
+
+        self.adapter.feed_client_status("playing")  # 上一段播放残留
+        expected_seq = self.adapter.begin_playback()
+        seen = self._spy()
+
+        async def scenario():
+            task = asyncio.ensure_future(
+                self.speaker.play(text="客厅音响已就绪", blocking=True, timeout=2000)
+            )
+            await asyncio.sleep(0.01)
+            self.adapter.feed_client_status("idle")
+            return await task
+
+        self.assertTrue(_run(scenario()))
+        self.assertEqual(1, len(seen))
+        since_seq, completion = seen[0]
+        self.assertEqual(
+            expected_seq,
+            since_seq,
+            "序号必须在 player_play_url 之前取，否则旧事件会给本段背书",
+        )
+        self.assertFalse(completion.started, "旧段的 playing 不得预成本段起播")
+        self.assertEqual("weak", completion.quality)
+
+    def test_script_fallback_binds_seq_too(self) -> None:
+        self.device.on("text_to_speech", '{"code": 1}')  # 合成失败 → 脚本兜底
+        self.device.on("tts_play.sh", "", exit_code=1)
+
+        self.adapter.feed_client_status("playing")
+        seen = self._spy()
+
+        async def scenario():
+            task = asyncio.ensure_future(
+                self.speaker.play(text="你好", blocking=True, timeout=2000)
+            )
+            await asyncio.sleep(0.01)
+            self.adapter.feed_client_status("idle")
+            return await task
+
+        self.assertTrue(_run(scenario()))
+        self.device.assert_called("tts_play.sh")
+        self.assertEqual(1, len(seen))
+        since_seq, completion = seen[0]
+        self.assertIsNotNone(since_seq, "脚本兜底路径同样要绑定起播代次")
+        self.assertFalse(completion.started)
+
+
 class AnnounceWordListTest(AnnounceTestBase):
     def test_word_hit_rejects_without_playing_and_returns_gates(self) -> None:
         p1, p2 = self._blocked()

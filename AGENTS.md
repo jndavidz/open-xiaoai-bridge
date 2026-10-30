@@ -662,6 +662,10 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   `context` 的 status=2 按**暂停**（不是空闲）处理，暂停后未恢复的 idle 不算播完。
   跨曲排除旧事件：在**下发播放命令之前**取 `begin_playback()` 并把序号传给
   `wait_for_finish(since_seq=...)`（选曲播报在 URL 起播前取号，播报自身事件不计入）；
+  **所有播报路径都取号**——`announce`（`announce_seq`）、`_play_text_blocking`（`play_seq`，
+  在 `player_play_url` 之前）、脚本回退 `_play_text_via_script`（`script_seq`）三处一致，
+  「阻塞播报起播与等待同调用栈所以可不传」的旧结论已作废：`_new_view` 读的是跨调用缓存的
+  最近状态，不取号就会把上一段的 playing 预成本段起播而造出假完成（提前删临时文件、提前归还焦点）。
   旧 `paused` 不再给「已在播放」背书。native：`prepare()` 做有界就绪确认（进程存活），
   零行退出按 5s→10s→…（上限 60s）退避，每个退避窗口最多强制重启一次。
 - `inject.enabled`（默认 false）或环境变量 `INJECT_ENABLE`：关闭时不监听 `:9093`，
@@ -903,4 +907,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**1018 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**1020 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

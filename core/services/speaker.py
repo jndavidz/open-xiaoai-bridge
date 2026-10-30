@@ -264,6 +264,10 @@ class SpeakerManager:
             )
             return await self._play_text_via_script(content, timeout_ms)
 
+        # 起播序号在**下发播放命令之前**取：上一段播放残留的 playing 不能给本次
+        # 播报当起播证据（B-03；无序号时近期 playing 会被预置成 started，
+        # 造出「播完即删文件 + 焦点提前归还」的假完成）。
+        play_seq = get_playback_events().begin_playback()
         play = await self.device.play_url(f"file://{path}")
         turn_trace.note_play_url(bool(play.ok))
         # 播放起点链（ticket 02）：调用返回时刻戳（含拒绝轮的请求耗时）——
@@ -277,7 +281,9 @@ class SpeakerManager:
             return False
 
         try:
-            return await self._wait_playback_done(content, timeout_ms)
+            return await self._wait_playback_done(
+                content, timeout_ms, since_seq=play_seq
+            )
         finally:
             await self._cleanup_tts_file(path)
 
@@ -285,6 +291,7 @@ class SpeakerManager:
         """兜底路径：设备阻塞 TTS 脚本。判据由能力层登记（EXIT_CODE_IN +
         stderr 解析错误检查），业务层只读结构化 `ok`。"""
 
+        script_seq = get_playback_events().begin_playback()
         res = await self.device.play_text_blocking(text, timeout_ms=timeout_ms)
         if not res.ok:
             logger.warning(
@@ -293,10 +300,13 @@ class SpeakerManager:
                 f"stderr={res.stderr.strip()!r})"
             )
             return False
-        return await self._wait_playback_done(text, timeout_ms)
+        return await self._wait_playback_done(text, timeout_ms, since_seq=script_seq)
 
-    async def _wait_playback_done(self, text, timeout_ms) -> bool:
+    async def _wait_playback_done(self, text, timeout_ms, *, since_seq) -> bool:
         """等待播放完成（事件适配器，ticket 05），保留超时兜底。
+
+        `since_seq` 由调用方在下发播放命令之前取得（B-03）：序号之前的事件属于
+        上一段播放，既不能证明本次已起播，也不能用来结束本次播放。
 
         语义与 ticket 03 一致：
           - 观察到 playing 后转空闲 ⇒ 已播完；
@@ -306,7 +316,9 @@ class SpeakerManager:
         """
 
         budget_ms = estimate_playback_budget_ms(text, timeout_ms)
-        done = await get_playback_events().wait_for_finish(budget_ms)
+        done = await get_playback_events().wait_for_finish(
+            budget_ms, since_seq=since_seq
+        )
         if not done.finished:
             logger.warning(
                 "[Speaker] playback status readback failed, cannot confirm "
