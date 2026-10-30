@@ -245,7 +245,7 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   `song_bridge.apply_command` 异步执行并把回执推进到 `observed/failed`；
   API 与语音路径**共用同一 runtime/store**。
 - **验收**：`python3 scripts/music_ecosystem.py --lab`（离线）；
-  真机 `--device --require-approval`（8 case，2026-10-30 全 PASS）：
+  真机 `--device --require-approval`（12 case，2026-10-30 全 PASS）：
   `device-full-chain` 覆盖 会话→入队→play（Songloft prepare→票据→LX06 拉 `/media` 206）
   →pause/resume→TTS 焦点→next→seek 400→SSE 回放→stop。
 - **回滚**：① `song_request.managed = False`（或 `managed_media_resolver = "kwqq"`）+ `docker compose up -d`
@@ -253,8 +253,10 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   `docker tag open-xiaoai-bridge:rollback-pre-b08-20261030 open-xiaoai-bridge:home && docker compose up -d --no-build`
   （更早：`rollback-pre-managed-20261029`、`rollback-pre-ttsfix-20261029`）。
   每次改开关前先 `cp config.py config.py.bak-<原因>-<日期>`。
-- **未验（不要当已验收）**：E6 外部接管、E7 Hi-Fi 隔离、E8 双客户端、E9 长稳、四 provider focus 矩阵、
-  shadow/native 全断、loop 0/1 端到端、可选 GENA 长稳（见 `ws: .scratch/music-voice-managed-playback/issues/08-*.md`、`09-*.md`）。
+- **未验（不要当已验收）**：E6 外部接管（设备无媒体身份）、E9 长稳、位置/时长边界、真实磁盘满/编码槽满
+  （E7/E8/loop 0/1/断 WireGuard 已 PASS；四 provider focus 与 GENA 按用户决定收口。见
+  `ws: docs/plan/music-managed-playback-acceptance-20261030.md` §3/§6、
+  `ws: .scratch/music-voice-managed-playback/issues/08-*.md`、`09-*.md`）。
 
 ## 模型包
 
