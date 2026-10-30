@@ -275,6 +275,12 @@ class ManagedQueuePlayer:
         # 主动 Stop 并确认（不等自然 STOPPED，也不用设备 Next 冒充队列推进）
         if not await self._stop_and_confirm():
             return Decision.UNKNOWN
+        # 并发/陈旧 tick 防护：Device Stop 是 await 点，另一个 tick 可能已推进过。
+        # 只有在「当前 entry 仍是我们正在跟踪的那条」时才允许推进——否则只清检测器。
+        state = self._require(session_id)
+        if (state.current.entry_id if state.current else None) != self._entry_id:
+            self._detector = None
+            return Decision.WAIT
         detector.mark_advanced()
         index = state.current_index
         if index + 1 >= len(state.entries):

@@ -12,6 +12,7 @@ fake clock + fake backend，纯内存/临时 SQLite：不连设备、不联网�
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -116,6 +117,21 @@ class AdvanceOnceTest(_Base):
         await player.start(self.sid)
         self.assertEqual(2, len(self.resolved), "换曲后只准备新的当前 entry")
         self.assertEqual(["http://cdn/a.mp3", "http://cdn/b.mp3"], backend.played)
+
+    async def test_concurrent_ticks_advance_once(self) -> None:
+        # Device Stop 是 await 点：两个并发 tick 都看到 ADVANCE 时，只能推进一次。
+        self._append("a", 10)
+        self._append("b", 10)
+        backend = FakeBackend()
+        player = self._player(backend)
+        await player.start(self.sid)
+        self.now[0] = 9.5
+        first, second = await asyncio.gather(player.tick(self.sid), player.tick(self.sid))
+        self.assertIn(Decision.ADVANCE, (first, second))
+        state = self.store.get(self.sid)
+        self.assertEqual(1, state.current_index)
+        events, _ = self.store.events_after(self.sid, 0)
+        self.assertEqual(1, sum(1 for e in events if e["kind"] == "advance"))
 
     async def test_skip_failed_moves_on_and_marks_event(self) -> None:
         self._append("a", 10)
