@@ -643,6 +643,12 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
     **回读验证**，假成功就重起当前 entry）；
   - **唤醒打断**：托管音乐在管时不再 `stop_device_audio`（停了媒体上下文就回不来）；
   - 麦态/KWS/录制的 finally 归还原语义不变（`mic_gate` 按进入时快照恢复，停止聆听保持 off）。
+- **HTTP/App 命令的设备执行（B-08）**：`/api/music/*` 命令先落回执（202），设备动作由
+  `song_bridge.apply_command` 异步执行并把回执推进到 observed/failed；API 与语音路径共用
+  同一 runtime/store（`api_server` 取 `song_bridge.build_runtime()`）。单设备语义下
+  **换会话即接管**：旧会话先停 tick 再落 `stopped(reason=taken_over)`——不能让旧客户端
+  一直看到 playing。E6（设备侧被别人替换媒体）在本后端**不可检测**（URL 会话无媒体身份/
+  位置回读），不要用「第二次 status:1」猜接管（会误杀 TTS 恢复）。
 - **可选 GENA（B-09，默认关闭、未接线）**：`core/music/gena.py` 的 `GenaGate` 只做补充信号，
   **永不替代** duration/位置/身份/意图（主动 Stop 主路径不依赖它）。按服务器返回有效期续订，
   仅到期/SID 失效/设备重启才重订阅且恢复先取快照；SID+SEQ 处理重复/乱序/缺口（缺口 ⇒ snapshot），
