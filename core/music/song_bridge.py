@@ -325,7 +325,13 @@ async def _songloft_resolver(entry):
                 media = str(data.get("media_url") or "")
                 if not media:
                     raise ManagedError("songloft ready without media_url")
-                return base + media
+                # 顺带返回验证过的时长：HTTP/App 入队没有 duration_s 时，
+                # EOF 判定靠它，否则播完永远 unknown、不推进。
+                try:
+                    duration = float(data.get("duration_s") or 0.0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+                return base + media, duration
             if state == "failed":
                 raise ManagedError(f"songloft prepare failed: {data.get('error')}")
             if asyncio.get_event_loop().time() > deadline:

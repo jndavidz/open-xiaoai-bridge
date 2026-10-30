@@ -46,6 +46,7 @@ class SongloftResolverTest(unittest.IsolatedAsyncioTestCase):
                 "state": "ready",
                 "media_url": "/media?media_ticket=abc",
                 "resolved_source": "kuwo",
+                "duration_s": 236.5,
             })
 
         app = web.Application()
@@ -68,8 +69,9 @@ class SongloftResolverTest(unittest.IsolatedAsyncioTestCase):
                     "song_request.songloft_password": "pw",
                 }.get(key, default))
 
-            url = await song_bridge._songloft_resolver(_entry())
+            url, duration = await song_bridge._songloft_resolver(_entry())
             self.assertEqual(url, base + "/media?media_ticket=abc")
+            self.assertAlmostEqual(duration, 236.5)
             self.assertEqual(len(logins), 1)
             # 第二次调用命中 token 缓存
             await song_bridge._songloft_resolver(_entry("e2"))

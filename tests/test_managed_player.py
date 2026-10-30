@@ -117,6 +117,25 @@ class AdvanceOnceTest(_Base):
         self.assertEqual(2, len(self.resolved), "换曲后只准备新的当前 entry")
         self.assertEqual(["http://cdn/a.mp3", "http://cdn/b.mp3"], backend.played)
 
+    async def test_resolver_supplied_duration_enables_advance(self) -> None:
+        # HTTP/App 入队不带 duration：解析器（Songloft 准备链）返回验证时长后，
+        # EOF 判定必须有可信时长并可推进——否则播完永远停在原曲。
+        self._append("a", 0)   # 未知时长
+        self._append("b", 0)
+        backend = FakeBackend()
+
+        async def resolver(entry: QueueEntry):
+            self.resolved.append(entry.entry_id)
+            return f"http://cdn/{entry.ref.id}.mp3", 8.0
+
+        player = ManagedQueuePlayer(self.store, backend, resolver, clock=lambda: self.now[0])
+        await player.start(self.sid)
+        state = self.store.get(self.sid)
+        self.assertAlmostEqual(state.entries[0].duration_s, 8.0)
+        self.now[0] = 7.5
+        self.assertEqual(Decision.ADVANCE, await player.tick(self.sid))
+        self.assertEqual(1, self.store.get(self.sid).current_index)
+
     async def test_last_entry_stops_cleanly(self) -> None:
         self._append("only", 5)
         backend = FakeBackend()

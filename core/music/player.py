@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import asyncio
 import time
 from dataclasses import dataclass
@@ -191,6 +193,7 @@ class ManagedQueuePlayer:
         self._entry_id: str | None = None
         self._prepared_uri: str | None = None
         self._prepared_entry: str | None = None
+        self._prepared_duration: float = 0.0
 
     # ---- 起播（只准备当前 entry）----
 
@@ -200,14 +203,31 @@ class ManagedQueuePlayer:
         if entry is None:
             raise ManagedError("queue has no current entry")
         uri = None
+        resolved_duration = 0.0
         if self._prepared_entry == entry.entry_id:
             uri = self._prepared_uri        # 只准备当前项：同一条复用已解析 URI
+            resolved_duration = getattr(self, "_prepared_duration", 0.0)
         if not uri:
-            uri = await self.resolve(entry)
+            resolved = await self.resolve(entry)
+            # 解析器可顺带返回验证过的时长（Songloft 准备链）；HTTP/App 入队没有
+            # duration_s 时靠它，否则 EOF 判定永远 unknown、播完不推进。
+            if isinstance(resolved, tuple):
+                uri, resolved_duration = resolved
+                resolved_duration = float(resolved_duration or 0.0)
+            else:
+                uri = resolved
             self._prepared_entry, self._prepared_uri = entry.entry_id, uri
+            self._prepared_duration = resolved_duration
         if not await self.backend.play(uri):
             raise ManagedError("backend rejected playback")
-        detector = EndOfTrackDetector(duration_s=entry.duration_s, backend=self.backend.profile)
+        duration = entry.duration_s or resolved_duration
+        if duration and not entry.duration_s:
+            self.store.transition(
+                session_id,
+                lambda state: _set_entry_duration(state, entry.entry_id, duration),
+            )
+            entry = self._require(session_id).current or entry
+        detector = EndOfTrackDetector(duration_s=duration, backend=self.backend.profile)
         now = self.clock()
         detector.on_play(now)
         self._detector, self._entry_id = detector, entry.entry_id
@@ -253,6 +273,7 @@ class ManagedQueuePlayer:
         self._detector = None
         self._prepared_uri = None
         self._prepared_entry = None
+        self._prepared_duration = 0.0
         return Decision.ADVANCE
 
     async def _stop_and_confirm(self) -> bool:
@@ -359,6 +380,16 @@ class ManagedQueuePlayer:
         if state is None:
             raise ManagedError(f"unknown session {session_id!r}")
         return state
+
+
+def _set_entry_duration(state: SessionState, entry_id: str, duration_s: float) -> None:
+    """把解析阶段得到的可信时长写回队列项（只补缺，不改已有值；QueueEntry 不可变）。"""
+
+    for index, entry in enumerate(state.entries):
+        if entry.entry_id == entry_id and not entry.duration_s:
+            state.entries[index] = dataclasses.replace(
+                entry, duration_s=max(0.0, float(duration_s or 0.0)))
+            return
 
 
 def _mark_playing(state: SessionState) -> None:
