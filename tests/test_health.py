@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -10,7 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.services.health import build_health_payload  # noqa: E402
+# api_server 在导入期需要 native 扩展；本测试只验证正则常量，用空模块占位。
+sys.modules.setdefault("open_xiaoai_server", types.ModuleType("open_xiaoai_server"))
+
+from core.services.health import (  # noqa: E402
+    build_health_payload,
+    livez_payload,
+    readyz_payload,
+)
 
 
 class HealthPayloadTest(unittest.TestCase):
@@ -54,6 +62,36 @@ class HealthPayloadTest(unittest.TestCase):
         rendered = str(payload).lower()
         for forbidden in ("token", "password", "authorization", "cookie"):
             self.assertNotIn(forbidden, rendered)
+
+
+class LivenessReadinessTest(unittest.TestCase):
+    def test_livez_ignores_device(self) -> None:
+        self.assertEqual(livez_payload()["data"]["status"], "alive")
+
+    def test_readyz_ready(self) -> None:
+        status, payload = readyz_payload(speaker_ready=True, recording_expected=True)
+        self.assertEqual((status, payload["data"]["status"]), (200, "ready"))
+        self.assertEqual(payload["data"]["reasons"], [])
+
+    def test_readyz_speaker_missing(self) -> None:
+        status, payload = readyz_payload(speaker_ready=False)
+        self.assertEqual(status, 503)
+        self.assertIn("speaker_unavailable", payload["data"]["reasons"])
+
+    def test_readyz_listening_stopped(self) -> None:
+        status, payload = readyz_payload(speaker_ready=True, recording_expected=False)
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["data"]["reasons"], ["listening_stopped"])
+
+
+class TraceparentPatternTest(unittest.TestCase):
+    def test_w3c_traceparent_pattern(self) -> None:
+        from core.services.api_server import APIServer
+
+        pat = APIServer._TRACEPARENT_RE
+        self.assertTrue(pat.match("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"))
+        self.assertFalse(pat.match("00-xyz"))
+        self.assertFalse(pat.match(""))
 
 
 if __name__ == "__main__":

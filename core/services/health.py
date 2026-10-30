@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["build_health_payload"]
+__all__ = ["build_health_payload", "livez_payload", "readyz_payload"]
 
 
 def build_health_payload(
@@ -35,3 +35,31 @@ def build_health_payload(
     if probe is not None:
         data["probe"] = dict(probe)
     return {"success": True, "data": data}
+
+
+def livez_payload() -> dict[str, Any]:
+    """`/livez`：只证明进程与事件循环还在（不看设备）。"""
+
+    return {"success": True, "data": {"status": "alive"}}
+
+
+def readyz_payload(
+    *, speaker_ready: bool, recording_expected: bool | None = None
+) -> tuple[int, dict[str, Any]]:
+    """`/readyz`：能否承接语音/设备命令，与 liveness 分离。
+
+    - speaker 未就绪 ⇒ not_ready（没有设备连接，命令无处可发）
+    - 用户主动「停止聆听」（recording_expected=False）⇒ not_ready（语音入口不可用）
+    """
+
+    reasons: list[str] = []
+    if not speaker_ready:
+        reasons.append("speaker_unavailable")
+    if recording_expected is False:
+        reasons.append("listening_stopped")
+    ready = not reasons
+    return (
+        200 if ready else 503,
+        {"success": ready,
+         "data": {"status": "ready" if ready else "not_ready", "reasons": reasons}},
+    )

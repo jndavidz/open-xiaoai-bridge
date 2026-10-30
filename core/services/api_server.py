@@ -6,6 +6,7 @@ Provides endpoints to play text/audio remotely
 import asyncio
 import json
 import os
+import re
 import tempfile
 from collections.abc import Coroutine
 from typing import Any
@@ -450,7 +451,8 @@ class APIServer:
         # 业务 API 鉴权中间件（ticket 06）：与 ADMIN_TOKEN 分离，用 BRIDGE_API_TOKEN。
         # 顺序：业务鉴权在最外层（/api/admin/* 由它直接放行给 Admin 中间件）。
         self.app = web.Application(
-            middlewares=[self.api_auth_middleware, self.admin_api.auth_middleware]
+            middlewares=[self.traceparent_middleware, self.api_auth_middleware,
+                         self.admin_api.auth_middleware]
         )
         self.runner = None
         self.site = None
@@ -463,6 +465,23 @@ class APIServer:
         _relay_singleton = self.inject_relay
         self._setup_routes()
         self.admin_api.register(self.app)
+
+    _TRACEPARENT_RE = re.compile(
+        r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+    )
+
+    @web.middleware
+    async def traceparent_middleware(self, request: web.Request, handler):
+        """接受 W3C `traceparent`：回显同一头并把 trace id 记进调试日志。
+
+        只做链路关联，不伪造/改写调用方的 trace；格式非法一律忽略。
+        """
+        tp = request.headers.get("traceparent", "")
+        response = await handler(request)
+        if tp and self._TRACEPARENT_RE.match(tp):
+            response.headers["traceparent"] = tp
+            logger.debug(f"[APIServer] traceparent trace_id={tp.split('-')[1]} {request.method} {request.path}")
+        return response
 
     @web.middleware
     async def api_auth_middleware(self, request: web.Request, handler):
@@ -541,6 +560,8 @@ class APIServer:
         self.app.router.add_get("/api/inject/relay", self.inject_relay.handle_health)  # 中继观测
         self.app.router.add_get("/api/inject/text", self.inject_relay.handle_ws_text)  # 文本回传 WS
         self.app.router.add_get("/api/health", self.handle_health)
+        self.app.router.add_get("/livez", self.handle_livez)
+        self.app.router.add_get("/readyz", self.handle_readyz)
         # TTS endpoints
         self.app.router.add_post("/api/tts/doubao", self.handle_tts_doubao)
         self.app.router.add_get("/api/tts/doubao_voices", self.handle_tts_voices)
@@ -1310,6 +1331,29 @@ class APIServer:
                 "stats": dict(self.inject_relay.stats),
             },
         })
+
+    async def handle_livez(self, request: web.Request) -> web.Response:
+        """GET /livez —— 进程存活（不看设备；不走 /api/* 鉴权）。"""
+        from core.services.health import livez_payload
+
+        return web.json_response(livez_payload())
+
+    async def handle_readyz(self, request: web.Request) -> web.Response:
+        """GET /readyz —— 能否承接语音/设备命令（liveness 与 readiness 分离）。"""
+        from core.services.health import readyz_payload
+
+        recording_expected = None
+        try:
+            from core.xiaoai import XiaoAI
+
+            recording_expected = XiaoAI.audio_health().get("recording_expected")
+        except Exception:  # noqa: BLE001 - 就绪探针不得因单段失败整体 500
+            recording_expected = None
+        status, payload = readyz_payload(
+            speaker_ready=get_speaker() is not None,
+            recording_expected=recording_expected,
+        )
+        return web.json_response(payload, status=status)
 
     async def handle_health(self, request: web.Request) -> web.Response:
         """
