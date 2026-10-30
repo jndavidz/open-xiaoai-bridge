@@ -181,7 +181,7 @@ class SessionState:
             "target": self.target,
             "entries": [
                 {"entry_id": e.entry_id, "ref": json.loads(e.ref.canonical()),
-                 "quality": e.quality}
+                 "quality": e.quality, "duration_s": e.duration_s}
                 for e in self.entries
             ],
             "current_index": self.current_index,
