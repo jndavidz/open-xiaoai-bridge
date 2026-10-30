@@ -383,6 +383,7 @@ class PlaybackEventAdapter:
         self._native_attempts = 0       # 连续「零行即退出」的次数（指数退避）
         self._native_spawn_lines = 0    # 本次子进程产出的行数（判「无行」）
         self._native_lines = 0
+        self._native_status_lines = 0   # 解析成功的状态行（噪声行不算）
         self._native_last_line_at = 0.0
         self._native_warned = False
         self._native_closing = False    # 主动 close 不算「流自己断了」
@@ -513,6 +514,7 @@ class PlaybackEventAdapter:
         try:
             if primary_source == "native" or "native" in shadow_sources:
                 await self._ensure_native()
+            session.native_status_mark = self._native_status_lines
             result = await self._run_session(session)
         finally:
             with self._state_lock:
@@ -525,6 +527,25 @@ class PlaybackEventAdapter:
         completion = self._build_completion(session, result, view)
         self._finalize_session(session, completion, view)
         return completion
+
+    def _restart_native_stalled(self) -> None:
+        """native 订阅疑似僵尸：整个等待期间零条状态行 ⇒ 主动重启，下次等待立即重连。
+
+        只在等待以 timeout/no_observation 收尾时触发，因此不会在正常播放中途
+        打断事件流（native 只在状态变化时出行，静默是正常现象）。
+        """
+
+        task = self._native_task
+        self._native_retry_at = 0.0
+        self._native_force_at = 0.0
+        if task is None or task.done():
+            return
+        self._native_closing = True   # 跳过退避：下一次等待立即重连
+        task.cancel()
+        logger.warning(
+            "[PlaybackEvents] native stream produced no status line during a "
+            "whole wait; restarting subscription"
+        )
 
     def _resolve_sources(self) -> tuple[str, list[str]]:
         source = self.config.source
@@ -769,6 +790,13 @@ class PlaybackEventAdapter:
     ) -> None:
         finished, started, reason = result.finished, result.started, result.reason
         elapsed_ms = round((time.monotonic() - session.started_at) * 1000.0, 1)
+        if (
+            session.primary_source == "native"
+            and reason in ("timeout", "no_observation")
+            and self._native_status_lines == session.native_status_mark
+            and self._native_running()
+        ):
+            self._restart_native_stalled()
         primary = session.primary
         if not primary.reason:
             # 主源没结束而影子兜底成功时，不能把 primary 标成 finished_event。
@@ -912,6 +940,7 @@ class PlaybackEventAdapter:
                 "native_error": self._native_error,
                 "native_attempts": self._native_attempts,
                 "native_lines": self._native_lines,
+                "native_status_lines": self._native_status_lines,
                 "native_last_line_age_ms": (
                     _round((now - self._native_last_line_at) * 1000.0)
                     if self._native_last_line_at
@@ -1002,6 +1031,7 @@ class PlaybackEventAdapter:
                 if parse_native_play_status(text) is None:
                     continue   # 噪声行证明进程活着，但不能抵消「断流」计数
                 self._native_attempts = 0
+                self._native_status_lines += 1
                 self.feed_native_line(text)
         except asyncio.CancelledError:
             raise

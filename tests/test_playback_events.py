@@ -663,5 +663,45 @@ class ShadowFallbackTest(unittest.TestCase):
         self.assertEqual(_triple(_run(scenario())), (False, False, "no_observation"))
 
 
+class NativeStallWatchdogTest(unittest.TestCase):
+    """整个等待期间 native 零状态行 ⇒ 订阅被判僵尸并重启（不退避）。"""
+
+    def test_stalled_stream_is_restarted_after_timeout(self) -> None:
+        adapter = make_adapter(source="native", native_cmd="cat", poll=5)
+        spawns: list[str] = []
+
+        class _SilentProcess:
+            def __init__(self) -> None:
+                self.stdout = _BlockingStream()
+                self.returncode = None
+                self.cancelled = False
+
+            def terminate(self) -> None:
+                self.returncode = 0
+
+        procs: list[_SilentProcess] = []
+
+        async def fake_spawn(cmd, **kwargs):
+            proc = _SilentProcess()
+            procs.append(proc)
+            spawns.append(str(cmd))
+            return proc
+
+        async def scenario():
+            with mock.patch("asyncio.create_subprocess_shell", fake_spawn):
+                first = await adapter.wait_for_finish(60, 10)
+                await asyncio.sleep(0.02)   # 让 cancelled reader 收尾
+                second = await adapter.wait_for_finish(60, 10)
+                await asyncio.sleep(0.02)
+            return first, second
+
+        first, second = _run(scenario())
+        self.assertEqual(_triple(first), (False, False, "no_observation"))
+        self.assertEqual(_triple(second), (False, False, "no_observation"))
+        self.assertEqual(2, len(spawns), "stalled stream must respawn on next wait")
+        self.assertEqual(0.0, adapter._native_retry_at, "watchdog restart must skip backoff")
+        self.assertEqual(0, adapter.snapshot()["native_status_lines"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
