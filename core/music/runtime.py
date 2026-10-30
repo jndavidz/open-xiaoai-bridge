@@ -64,23 +64,33 @@ class ManagedRuntime:
         decision = await self.player.tick(sid)
         if decision is not Decision.ADVANCE:
             return decision
+        if not await self.start_current(sid):
+            # 只解绑：在 _loop 任务内部 await self.stop() 会取消并等待自身
+            # （Task cannot await on itself），随后被 except 吞掉，留下
+            # “_task=None 但旧任务还活着”的双循环隐患。
+            # 只解绑**本 tick 开始时那个会话**：期间可能已切到新会话。
+            if self.session_id == sid:
+                self.bind(None)
+            return Decision.FINISH
+        return decision
+
+    async def start_current(self, session_id: str) -> bool:
+        """起播当前项；失败按有界次数跳过，末项失败由 `skip_failed` 落成可见停止。
+
+        tick（推进后起播）与 HTTP/语音的**首次 play 命令**必须共用这一条：两处各写一
+        遍「失败必须可见」就会漏掉一侧——2026-10-30 E1 覆盖面实测：命令路径的 prepare
+        超时会话永久停在 `preparing`（runtime 那时还没 start，没有 tick 来兜底）。
+        """
+
         for _ in range(self.max_start_attempts):
             try:
-                await self.player.start(sid)
-                return decision
+                await self.player.start(session_id)
+                return True
             except Exception as exc:  # noqa: BLE001 - 单条失败不能让会话静默卡死
                 logger.warning(f"[ManagedRuntime] start failed: {type(exc).__name__}: {exc}")
-                if not self.player.skip_failed(sid, str(exc)):
-                    # 只解绑：在 _loop 任务内部 await self.stop() 会取消并等待自身
-                    # （Task cannot await on itself），随后被 except 吞掉，留下
-                    # “_task=None 但旧任务还活着”的双循环隐患。
-                    # 只解绑**本 tick 开始时那个会话**：期间可能已切到新会话。
-                    if self.session_id == sid:
-                        self.bind(None)
-                    return Decision.FINISH
-        if self.session_id == sid:
-            self.bind(None)
-        return Decision.FINISH
+                if not self.player.skip_failed(session_id, str(exc)):
+                    return False
+        return False
 
     async def _loop(self) -> None:
         while self.session_id:

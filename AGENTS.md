@@ -619,7 +619,13 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   unknown；回绕补偿仅限声明支持的 backend 且只一次；外部接管 ⇒ relinquish 不抢回。
   `backends.py` 的 DLNA（主）与 RPC（降级）各自声明 position/seek/resume/stop 能力，
   未验证的一律 `Unsupported`。`runtime.py` 的 `ManagedRuntime` 按间隔驱动 tick（推进后
-  自动起播下一条）。**迁移开关**：`song_request.managed`（config，默认 false）——
+  自动起播下一条）。**起播失败的可见性只有一条实现**：`ManagedRuntime.start_current()`
+  ——有界跳过失败条，末条失败由 `player.skip_failed` 落 `stopped(stop_reason=advance_failed)`；
+  tick（推进后）、HTTP/App 的 `play`/`next` 命令、语音 `play_items` 三条入口都必须走它。
+  各写一遍就会漏：2026-10-30 E1 覆盖面实测，命令路径自己 `await player.start()` 时
+  prepare 超时只把回执标 failed，会话永久停在 `preparing`（runtime 还没 start，没有 tick
+  来兜底），用户「看到没播放但没有原因」。守卫用例
+  `tests/test_managed_device_exec.FirstStartVisibleTest`（退回旧形态即红）。**迁移开关**：`song_request.managed`（config，默认 false）——
   true 时 `song_request.run()` 走 `core/music/song_bridge.py`（搜索/专辑候选逻辑照旧，
   队列归托管 store、单所有权、无第二自动推进）；false = 旧内存队列（回滚模式）。
   **真机已验证**（2026-10-29/30，最小音量）：点歌起播、主动 Stop 后回读确认再换 URI、
@@ -907,4 +913,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**1020 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**1022 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020，命令路径首次起播失败可见停止 +2 = 1022。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。

@@ -94,9 +94,13 @@ async def _play_items_locked(items: list[dict], *, start_index: int = 0,
     if 0 <= start_index < len(items):
         store.set_current(sid, store.get(sid).entries[start_index].entry_id)
     runtime.bind(sid)
-    await runtime.player.start(sid)
-    await runtime.start()
-    return f"托管队列已接管（{len(items)} 首）"
+    started = await runtime.start_current(sid)
+    if started:
+        await runtime.start()
+        return f"托管队列已接管（{len(items)} 首）"
+    # 全部候选都起播失败：start_current 已把会话落成可见停止
+    # （stopped + stop_reason=advance_failed），不再启动 tick，也不假装成功。
+    return "托管队列已建好，但全部候选都起播失败（已停在可见停止）"
 
 
 async def command(kind: str, **payload) -> str:
@@ -201,7 +205,13 @@ async def _apply_locked(runtime, service: ManagedService, session_id: str,
             if state is None or not state.entries:
                 raise ManagedError("queue is empty")
             runtime.bind(session_id)
-            await runtime.player.start(session_id)
+            if not await runtime.start_current(session_id):
+                # 末项起播失败：skip_failed 已经把会话落成可见停止
+                # （stopped + stop_reason=advance_failed），这里只把回执对齐。
+                # 绝不能让会话停在 preparing——用户看到「没播放但没有原因」。
+                service.observe(receipt_id, state="failed",
+                                detail="start failed; session stopped visibly")
+                return
             await runtime.start()
         elif kind == "pause":
             runtime.bind(session_id)
@@ -217,7 +227,10 @@ async def _apply_locked(runtime, service: ManagedService, session_id: str,
             await runtime.start()
         elif kind in ("next", "prev"):
             runtime.bind(session_id)
-            await runtime.player.start(session_id)
+            if not await runtime.start_current(session_id):
+                service.observe(receipt_id, state="failed",
+                                detail="start failed; session stopped visibly")
+                return
             await runtime.start()
         elif kind == "stop":
             from core.music import focus_bridge
