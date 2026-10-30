@@ -294,10 +294,10 @@ class SongBridgeTest(unittest.IsolatedAsyncioTestCase):
 
         song_bridge._reset_for_tests()   # 让两次构建都走 factory（而不是 setUp 的运行时）
         with mock.patch.object(song_bridge, "ManagedStore", factory):
-            first = song_bridge._build_runtime()
+            first = song_bridge.build_runtime()
             sid = first.service.open_session(target="lx06")["session_id"]
             song_bridge._reset_for_tests()
-            second = song_bridge._build_runtime()
+            second = song_bridge.build_runtime()
             restored = second.service.store.get(sid)
         self.assertEqual(Phase.RECOVERY_PENDING, restored.phase)
         self.assertIsNone(restored.recovery_token)

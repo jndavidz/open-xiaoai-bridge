@@ -556,8 +556,8 @@ class APIServer:
         try:
             import os
 
+            from core.music import song_bridge
             from core.music.auth import MusicAuth
-            from core.music.service import ManagedService
             from core.services.managed_api import ManagedAPI
 
             cors = tuple(
@@ -565,11 +565,15 @@ class APIServer:
                 for origin in os.environ.get("MANAGED_CORS_ORIGINS", "").split(",")
                 if origin.strip()
             )
+            # 与语音路径共用同一 runtime/store：HTTP 命令与「继续播放」等语音命令
+            # 必须作用在同一条托管队列上，不能各持一份状态。
+            runtime = song_bridge.build_runtime()
             self.managed_api = ManagedAPI(
-                ManagedService(),
+                runtime.service,
                 MusicAuth(os.environ.get("MANAGED_TOKENS", "")),
                 cors_origins=cors,
             )
+            self.managed_api.set_device_executor(song_bridge.apply_command)
             self.managed_api.register(self.app)
         except Exception as exc:  # noqa: BLE001 - 托管面失败不得拖垮 bridge
             self.managed_api = None

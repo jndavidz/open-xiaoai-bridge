@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -23,6 +24,7 @@ from core.music.model import ManagedError, SessionNotFound, StaleEpoch, TrackRef
 from core.music.service import ConflictError, ManagedService, TargetMismatch
 
 DEFAULT_BUDGET_MS = 15000
+DEVICE_COMMANDS = ("play", "pause", "resume", "next", "prev", "stop")
 
 
 def _command_budget() -> RetryBudget:
@@ -45,6 +47,16 @@ class ManagedAPI:
         self.service = service
         self.auth = auth
         self.cors_origins = tuple(o for o in cors_origins if o)
+        self._device_executor = None
+        self._device_tasks: set = set()
+
+    def set_device_executor(self, fn) -> None:
+        """设备执行侧（B-08）：命令先落回执，设备动作异步执行并回收 observed/failed。
+
+        接受命令不等待下载/转码/设备 RPC——停播与起播都在后台任务里完成。
+        """
+
+        self._device_executor = fn
 
     def register(self, app: web.Application) -> None:
         # 顺序：CORS 在外、鉴权在内——预检不要求业务凭据，实际请求仍失败关闭。
@@ -169,8 +181,26 @@ class ManagedAPI:
             return _reject(404, "unknown session")
         except ManagedError as err:
             return _reject(400, str(err))
+        if not receipt.replayed:
+            self._schedule_device(request.match_info["sid"], str(body.get("kind") or "").strip().lower(),
+                                  receipt.receipt_id)
         return _json({"code": 200, "data": receipt.as_dict()},
                      200 if receipt.replayed else 202)
+
+    def _schedule_device(self, session_id: str, kind: str, receipt_id: str) -> None:
+        if self._device_executor is None or kind not in DEVICE_COMMANDS:
+            return
+        task = asyncio.ensure_future(self._run_device(session_id, kind, receipt_id))
+        self._device_tasks.add(task)
+        task.add_done_callback(self._device_tasks.discard)
+
+    async def _run_device(self, session_id: str, kind: str, receipt_id: str) -> None:
+        from core.utils.logger import logger
+
+        try:
+            await self._device_executor(session_id, kind, receipt_id)
+        except Exception as exc:  # noqa: BLE001 - 设备执行异常不得影响 HTTP 层
+            logger.warning(f"[ManagedAPI] device {kind} failed: {type(exc).__name__}: {exc}")
 
     # ---- SSE ----
 

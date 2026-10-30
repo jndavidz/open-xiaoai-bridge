@@ -27,7 +27,7 @@ def target() -> str:
     return str(_sr._cfg("managed_target", "lx06") or "lx06")
 
 
-def _build_runtime() -> ManagedRuntime:
+def build_runtime() -> ManagedRuntime:
     runtime = get_runtime()
     if runtime is not None:
         return runtime
@@ -66,7 +66,7 @@ async def play_items(items: list[dict], *, start_index: int = 0, album: bool = F
 
     if not items:
         return "没有可播放的曲目"
-    runtime = _build_runtime()
+    runtime = build_runtime()
     service: ManagedService = runtime.service
     store = service.store
     if runtime.session_id:
@@ -132,6 +132,63 @@ async def command(kind: str, **payload) -> str:
         await runtime.stop()
         runtime.bind(None)
     return f"托管命令已受理（{kind}, {receipt.state}）"
+
+
+DEVICE_COMMANDS = ("play", "pause", "resume", "next", "prev", "stop")
+
+
+async def apply_command(session_id: str, kind: str, receipt_id: str) -> None:
+    """HTTP/App 命令的设备执行侧（B-08）：与语音路径共用同一 runtime 与 store。
+
+    命令状态先落库（回执 accepted/applied），这里只做设备动作并把回执推进到
+    observed/failed；任何设备异常都如实回收，不假装成功。
+    """
+
+    runtime = build_runtime()
+    service: ManagedService = runtime.service
+    if kind != "play" and runtime.session_id != session_id:
+        service.observe(receipt_id, state="failed",
+                        detail="session is not bound to the device")
+        return
+    try:
+        if runtime.session_id not in (None, session_id):
+            # 单设备语义：换会话即接管，旧会话先停，绝不并联出声
+            await runtime.stop()
+        if kind == "play":
+            state = service.store.get(session_id)
+            if state is None or not state.entries:
+                raise ManagedError("queue is empty")
+            runtime.bind(session_id)
+            await runtime.player.start(session_id)
+            await runtime.start()
+        elif kind == "pause":
+            runtime.bind(session_id)
+            await runtime.player.pause_backend()
+        elif kind == "resume":
+            from core.music import focus_bridge
+
+            runtime.bind(session_id)
+            await focus_bridge.force_release()
+            outcome = await runtime.player.ensure_resumed(session_id)
+            if outcome not in ("resumed", "restarted"):
+                raise ManagedError(f"resume outcome={outcome}")
+            await runtime.start()
+        elif kind in ("next", "prev"):
+            runtime.bind(session_id)
+            await runtime.player.start(session_id)
+            await runtime.start()
+        elif kind == "stop":
+            from core.music import focus_bridge
+
+            await focus_bridge.force_release()
+            await runtime.stop()
+            runtime.bind(None)
+        else:
+            raise ManagedError(f"unknown device command {kind!r}")
+    except Exception as exc:  # noqa: BLE001 - 设备拒绝如实回报
+        service.observe(receipt_id, state="failed", detail=str(exc)[:160])
+        return
+    service.observe(receipt_id)
 
 
 def focus():
