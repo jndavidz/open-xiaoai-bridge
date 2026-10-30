@@ -370,6 +370,21 @@ class ManagedQueuePlayer:
         self._prepared_entry = None
         return await self.start(session_id, epoch=epoch)
 
+    async def stop_backend(self) -> None:
+        """只驱动设备停止并清空本地准备/探测（状态由命令层负责）。
+
+        必须在设备锁内调用：stop 是「取消已受理起播」的唯一设备动作，状态层
+        单纯 bind(None) 会让设备继续出声（SLO 取消残留实测暴露）。
+        """
+
+        if not await self._stop_and_confirm():
+            raise ManagedError("backend did not confirm stop")
+        self._detector = None
+        self._entry_id = None
+        self._prepared_uri = None
+        self._prepared_entry = None
+        self._prepared_duration = 0.0
+
     async def pause_backend(self) -> None:
         """只驱动设备暂停 + 冻结探测器（状态/回执由命令层负责）。"""
 

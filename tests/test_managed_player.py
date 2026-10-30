@@ -164,6 +164,20 @@ class AdvanceOnceTest(_Base):
         events, _ = self.store.events_after(self.sid, 0)
         self.assertEqual(1, sum(1 for e in events if e["kind"] == "advance"))
 
+    async def test_stop_backend_actually_stops_device(self) -> None:
+        # 命令层 stop 只 bind(None) 会让设备继续出声；stop_backend 必须真下发 Stop
+        # 并清掉本地准备，保证「取消后无残留」（SLO 采样暴露）。
+        self._append("a", 10)
+        backend = FakeBackend()
+        player = self._player(backend)
+        await player.start(self.sid)
+        self.assertEqual("playing", backend.state_value)
+        await player.stop_backend()
+        self.assertGreaterEqual(backend.stops, 1)
+        self.assertEqual("idle", backend.state_value)
+        self.assertIsNone(player._detector)
+        self.assertIsNone(player._prepared_uri)
+
     async def test_skip_failed_moves_on_and_marks_event(self) -> None:
         self._append("a", 10)
         self._append("b", 10)

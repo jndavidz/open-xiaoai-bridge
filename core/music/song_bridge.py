@@ -140,6 +140,7 @@ async def _command_locked(kind: str, **payload) -> str:
         from core.music import focus_bridge
 
         await focus_bridge.force_release()
+        await runtime.player.stop_backend()
         await runtime.stop()
         runtime.bind(None)
     return f"托管命令已受理（{kind}, {receipt.state}）"
@@ -223,6 +224,8 @@ async def _apply_locked(runtime, service: ManagedService, session_id: str,
 
             await focus_bridge.force_release()
             if runtime.session_id == session_id:
+                # 先停设备再解绑：只解绑会让设备继续出声（取消残留）。
+                await runtime.player.stop_backend()
                 await runtime.stop()
                 runtime.bind(None)
         else:

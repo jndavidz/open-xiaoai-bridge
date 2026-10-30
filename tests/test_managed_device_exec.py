@@ -46,6 +46,9 @@ class FakePlayer:
     async def pause_backend(self) -> None:
         self.paused += 1
 
+    async def stop_backend(self) -> None:
+        self.stopped = getattr(self, "stopped", 0) + 1
+
     async def ensure_resumed(self, session_id: str) -> str:
         self.resumed += 1
         return "resumed"

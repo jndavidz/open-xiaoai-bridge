@@ -99,6 +99,9 @@ class FakePlayer:
         self.backend.value = "idle"
         return True
 
+    async def stop_backend(self) -> None:
+        self.backend.value = "idle"
+
     async def pause_backend(self) -> None:
         if self.pause_error:
             raise self.pause_error
