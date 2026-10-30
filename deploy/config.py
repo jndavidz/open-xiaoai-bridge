@@ -250,9 +250,16 @@ APP_CONFIG = {
         # 音质固定 320k（消费铁律 ≤320k mp3，代码常量 _QUALITY 不可配）
         # B-06 迁移开关：true = 队列归托管 store（ManagedService/ManagedQueuePlayer），
         # false = 旧内存队列（回滚模式，默认）。打开前先确认 ManagedRuntime 已随起播启动。
-        "managed": False,
+        "managed": True,
         # 托管会话的 target（与 MANAGED_TOKENS 的 targets 白名单一致）
         "managed_target": "lx06",
+        # B-08：托管队列当前曲的媒体解析器。"kwqq" = bridge 自查 kwqq v1 两跳（回滚模式）；
+        # "songloft" = 经 Songloft 托管准备链（prepare→验证→票据 URL，媒体由 58091 出）。
+        "managed_media_resolver": "songloft",
+        "songloft_base": "http://10.10.10.2:58091",
+        "songloft_user": "admin",
+        # songloft_password 缺省回落环境变量 SONGLOFT_PASSWORD（NAS compose 注入，不入库）
+        "songloft_password": "",
     },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
