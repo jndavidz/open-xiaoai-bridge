@@ -118,6 +118,37 @@ class AdvanceOnceTest(_Base):
         self.assertEqual(2, len(self.resolved), "换曲后只准备新的当前 entry")
         self.assertEqual(["http://cdn/a.mp3", "http://cdn/b.mp3"], backend.played)
 
+    async def test_stop_confirm_accepts_unknown_context(self) -> None:
+        # 设备上下文丢失后 player_context 长期 unknown：stop 已下发，不能把队列卡死在 playing
+        self._append("a", 5)
+
+        class UnknownAfterStop(FakeBackend):
+            async def state(self):
+                return "unknown"
+
+        backend = UnknownAfterStop()
+        player = self._player(backend)
+        await player.start(self.sid)
+        self.now[0] = 4.8
+        self.assertEqual(Decision.FINISH, await player.tick(self.sid))
+        self.assertGreaterEqual(backend.stops, 1)
+
+    async def test_stop_confirm_rejects_playing_state(self) -> None:
+        # 设备明确仍在 playing：绝不把在播内容当已停
+        self._append("a", 5)
+        self._append("b", 5)
+
+        class StillPlaying(FakeBackend):
+            async def state(self):
+                return "playing"
+
+        backend = StillPlaying()
+        player = self._player(backend)
+        await player.start(self.sid)
+        self.now[0] = 4.8
+        self.assertEqual(Decision.UNKNOWN, await player.tick(self.sid))
+        self.assertEqual(0, self.store.get(self.sid).current_index)
+
     async def test_concurrent_ticks_advance_once(self) -> None:
         # Device Stop 是 await 点：两个并发 tick 都看到 ADVANCE 时，只能推进一次。
         self._append("a", 10)

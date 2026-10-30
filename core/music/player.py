@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Awaitable, Callable
 
 from core.music.model import Intent, ManagedError, Phase, QueueEntry, SessionState
+from core.utils.logger import logger
 from core.music.store import ManagedStore
 
 
@@ -314,9 +315,18 @@ class ManagedQueuePlayer:
     async def _stop_and_confirm(self) -> bool:
         if not self.backend.profile.stop:
             raise Unsupported(f"backend {self.backend.profile.name} has no verified stop")
+        last = "unknown"
         for _ in range(self.stop_confirm_attempts):
-            if await self.backend.stop() and await self.backend.state() == "idle":
-                return True
+            if await self.backend.stop():
+                last = await self.backend.state()
+                if last == "idle":
+                    return True
+        # 设备上下文丢失后 player_context 可能长期读不到（unknown）：此时 stop 已下发，
+        # 继续等 idle 只会把队列永久卡在「playing」。unknown 视为已停（随后换 URI 会接管），
+        # 但明确 playing/paused 仍判定失败，避免把真在播的内容当已停。
+        if last in ("idle", "unknown"):
+            logger.warning(f"[ManagedPlayer] stop confirmed by {last} state (context read unavailable)")
+            return True
         return False
 
     # ---- 暂停 / seek / 外部接管 ----
