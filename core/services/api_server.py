@@ -1395,6 +1395,14 @@ class APIServer:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[APIServer] health song queue snapshot failed: {e}")
 
+        # TTS focus 引用计数（音乐不恢复时区分「没释放」与「释放失败」）
+        try:
+            from core.music import focus_bridge
+
+            audio["focus"] = focus_bridge.health()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[APIServer] health focus snapshot failed: {e}")
+
         playback: dict = {}
         try:
             from core.device import get_playback_events

@@ -143,3 +143,18 @@ async def force_release(*, resume: bool = False) -> None:
 def _reset_for_tests() -> None:
     global _hold_count, _hold_token, _pending_release
     _hold_count, _hold_token, _pending_release = 0, None, None
+
+
+def health() -> dict:
+    """只读快照：引用计数/待释放/当前令牌（不暴露设备细节，供 /api/health 诊断）。"""
+
+    token = _hold_token
+    return {
+        "hold_count": _hold_count,
+        "pending_release": _pending_release is not None,
+        "token": None if token is None else {
+            "session_id": token.session_id,
+            "epoch": token.epoch,
+            "provider": token.provider,
+        },
+    }

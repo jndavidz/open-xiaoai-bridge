@@ -189,7 +189,10 @@ class AcquireTest(_Base):
         self.assertIsNotNone(token)
         self.assertGreaterEqual(slow.polls, 3)
 
-    def test_music_ended_during_pause_needs_no_focus(self) -> None:
+    def test_idle_after_pause_is_treated_as_paused(self) -> None:
+        # 起播后立刻播报：设备暂停后可能先回 idle。若按「音乐已结束」放弃焦点，
+        # phase 会永久停在 paused；这里必须继续取得焦点，释放时由 ensure_resumed
+        # 回读并 restart 当前 entry。
         class EndingPlayer(FakePlayer):
             async def pause(self, session_id):
                 await super().pause(session_id)
@@ -197,11 +200,11 @@ class AcquireTest(_Base):
 
         focus = TtsFocus(self.service, EndingPlayer(self.store, self.backend),
                          confirm_timeout_s=0.1, poll_s=0.01)
-        with self.assertRaises(FocusDenied) as ctx:
-            import asyncio
+        import asyncio
 
-            asyncio.run(focus.acquire(self.sid, provider="xiaoai"))
-        self.assertEqual("not_playing", ctx.exception.code)
+        token = asyncio.run(focus.acquire(self.sid, provider="xiaoai"))
+        self.assertIsNotNone(token)
+        self.assertEqual(token.token, self.store.get(self.sid).focus_token)
 
     def test_second_announcement_reissues_the_token(self) -> None:
         first = self._acquire()

@@ -102,9 +102,14 @@ class TtsFocus:
         await self.player.pause(session_id)
         state_now = await self._wait_state("paused")
         if state_now == "idle":
-            # 暂停期间曲目正好放完：没有音乐可让，也就不需要 focus
-            raise FocusDenied("music ended before focus", code="not_playing")
-        if state_now != "paused":
+            # 起播后立刻播报时，设备暂停后可能先回 idle（上下文重建/刚起播）。
+            # 这里若按「音乐已结束」放弃焦点，phase 会永远停在 paused 且没人恢复
+            # （SLO/真机短播报复现）。暂停命令已下发 ⇒ 视为暂停生效：释放时
+            # ensure_resumed 会回读并 restart 当前 entry。
+            logger.info(
+                "[TtsFocus] pause read back as idle; treating pause as effective"
+            )
+        elif state_now != "paused":
             raise FocusDenied(f"pause not confirmed before {reason}", code="pause_unconfirmed")
         paused = self._require(session_id)          # pause 会 bump epoch
         entry_id = paused.current.entry_id if paused.current else None

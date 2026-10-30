@@ -61,6 +61,21 @@ class HoldTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, acquire.await_count, "整段会话只暂停一次")
         self.assertEqual(1, release.await_count, "归零后去抖恢复一次")
 
+    async def test_health_reports_hold_count_and_token(self) -> None:
+        self.assertEqual(0, focus_bridge.health()["hold_count"])
+        with mock.patch.object(focus_bridge, "enabled", return_value=True), \
+                mock.patch.object(focus_bridge, "acquire",
+                                  mock.AsyncMock(return_value=_token())), \
+                mock.patch.object(focus_bridge, "release",
+                                  mock.AsyncMock(return_value=(True, "resumed"))):
+            await focus_bridge.hold()
+            snap = focus_bridge.health()
+            self.assertEqual(1, snap["hold_count"])
+            self.assertEqual("ms-1", snap["token"]["session_id"])
+            await focus_bridge.release_hold(grace_s=0.01)
+            await asyncio.sleep(0.05)
+        self.assertEqual(0, focus_bridge.health()["hold_count"])
+
     async def test_new_hold_cancels_a_pending_release(self) -> None:
         with mock.patch.object(focus_bridge, "enabled", return_value=True), \
                 mock.patch.object(focus_bridge, "acquire",
