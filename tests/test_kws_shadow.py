@@ -88,6 +88,19 @@ class ShadowLogTest(unittest.TestCase):
             self.assertFalse(record["main_hit"])
             self.assertEqual(record["frames"], 42)
 
+    def test_log_records_main_hit_without_shadow_hits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shadow = object.__new__(ShadowKws)
+            shadow._log_dir = Path(tmp)
+            shadow._frames = 7
+            shadow._hits = 0
+            shadow._log([], main_hit=True)
+            record = json.loads(
+                next(Path(tmp).glob("kws-shadow-*.jsonl")).read_text(encoding="utf-8")
+            )
+            self.assertEqual(record["hits"], [])
+            self.assertTrue(record["main_hit"])
+
 
 if __name__ == "__main__":
     unittest.main()

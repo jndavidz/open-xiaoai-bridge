@@ -165,6 +165,8 @@ class ShadowKws:
                     self._kws.reset_stream(self._stream)
             if hits:
                 self._hits += len(hits)
+            # 主命中也要留痕：hits=[] + main_hit=true 表示「主命中但影子漏检」
+            if hits or main_hit:
                 self._log(hits, main_hit)
         except Exception as exc:  # noqa: BLE001
             self._disable(exc)
