@@ -153,6 +153,9 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
   `AUDIO_INPUT_CHANNELS`，**改 1 即回退单声道**，client 不需重编。
 - `audio_input.channel_strategy`：`strongest`（滑窗最强麦 + 迟滞，默认）/ `average`（等权平均）/
   `fixed`（固定 `audio_input.fixed_channel`）。
+- `audio_input.bits_per_sample`：采集位深，默认 **32**（LX06 生产实采 S32）；bridge 在下混前
+  归一为 S16（`audio/pcm.py` `to_int16`），并同步 native 的 `AUDIO_INPUT_BITS`。
+  S32 采集源不得按 S16 处理（`acfd529` 前的实况），改回 16 仅适用于 S16 采集源。
 - `audio_input.watchdog_seconds`：连续无帧秒数，默认 **1.0**。client 的录音读循环 500ms 无数据即退出，
   阈值必须显著小于 3s；恢复动作是先停后启，失败按指数退避。
 - 真机 A/B 与回滚判据见 `ws: .scratch/lx06-voice-hub-baseline/acceptance-checklist.md` §4/§5。

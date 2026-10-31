@@ -7,6 +7,12 @@
 - 只在主 KWS 的检测线程内调用（单线程，无需额外锁）。
 - 任何异常只记 WARNING 并自动停用，绝不影响主唤醒链路。
 - 默认关闭；`kws.shadow.enabled=true` 且 `model_dir` 有效才启用。
+
+命中留证（shadow 观测取证，仿主路 `_audio_ring`）：
+- 每个 arm 维护 ~3s 环形缓冲，`feed` 恒喂（含 paused/静音帧）；
+- 命中或主命中（影子漏检）时把缓冲写 `data/kws_snapshots/shadow_<arm>_<ts>.pcm`，
+  路径记进 JSONL `snapshot` 字段——没有它，「影子命中主路漏掉」与「影子误触发」无法区分；
+- `vad_prob` 记录命中窗口内最大值（事件后复位），每 arm 快照数上限防磁盘增长。
 """
 
 from __future__ import annotations
@@ -21,6 +27,8 @@ from core.utils.logger import logger
 
 RATE = 16000
 CHUNK = 1440
+SNAPSHOT_SECONDS = 3
+SNAPSHOT_KEEP = 50
 
 
 def _pick(files, prefer_int8: bool, chunk: int):
@@ -90,6 +98,7 @@ class ShadowKws:
         log_dir: str | None = None,
         arm: str = "strongest",
         max_active_paths: int = 16,
+        snapshot_dir: str | None = None,
     ) -> None:
         import sherpa_onnx
 
@@ -109,6 +118,20 @@ class ShadowKws:
         base = Path(log_dir) if log_dir else Path("data/shadow")
         self._log_dir = base
         self._log_dir.mkdir(parents=True, exist_ok=True)
+        if snapshot_dir:
+            self._snapshot_dir = Path(snapshot_dir)
+        else:
+            # 与主路 _SNAPSHOT_DIR 同目录（bridge 根下 data/kws_snapshots），前缀区分归属
+            self._snapshot_dir = Path(__file__).resolve().parents[4] / "data" / "kws_snapshots"
+        try:
+            self._snapshot_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:  # noqa: BLE001 - 落盘失败在 dump 时再兜底
+            pass
+        # 命中留证环形缓冲：~3s 的 16k/16bit/单声道 PCM（96000 字节）
+        self._ring: list[bytes] = []
+        self._ring_max_bytes = SNAPSHOT_SECONDS * RATE * 2
+        self._vad_prob_max: float | None = None
+        self._snapshots_written = 0
 
         try:
             files = pick_model_files(self.model_dir)
@@ -163,11 +186,20 @@ class ShadowKws:
         main_hit: bool = False,
         context: dict | None = None,
     ) -> list[str]:
-        """喂一帧 16k/单声道/16bit PCM；命中写 JSONL，不触发任何动作。"""
+        """喂一帧 16k/单声道/16bit PCM；命中写 JSONL + PCM 快照，不触发任何动作。"""
         if not self.enabled or not frames:
             return []
         started = time.perf_counter()
         try:
+            self._ring_append(frames)
+            prob = (context or {}).get("vad_prob")
+            if prob is not None:
+                try:
+                    p = float(prob)
+                except (TypeError, ValueError):
+                    p = None
+                if p is not None and (self._vad_prob_max is None or p > self._vad_prob_max):
+                    self._vad_prob_max = p
             samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
             self._stream.accept_waveform(RATE, samples)
             self._frames += 1
@@ -201,6 +233,44 @@ class ShadowKws:
             return
         self._log([], True, context=context, main_keyword=keyword, cpu_ms=0.0)
 
+    def _ring_append(self, frames: bytes) -> None:
+        """追加一帧并按字节上限裁剪（保留最近 SNAPSHOT_SECONDS 秒）。"""
+        self._ring.append(frames)
+        excess = sum(len(chunk) for chunk in self._ring) - self._ring_max_bytes
+        while excess > 0 and self._ring:
+            excess -= len(self._ring[0])
+            del self._ring[0]
+
+    def _dump_snapshot(self) -> str | None:
+        """把环形缓冲写成 `shadow_<arm>_<ts>.pcm`，返回路径；失败/空缓冲返回 None。"""
+        if not getattr(self, "_ring", None):
+            return None
+        arm = getattr(self, "arm", "strongest")
+        try:
+            self._snapshot_dir.mkdir(parents=True, exist_ok=True)
+            path = self._snapshot_dir / (
+                f"shadow_{arm}_{time.strftime('%Y%m%d-%H%M%S')}_"
+                f"{int(time.time() * 1000) % 1000:03d}.pcm"
+            )
+            with open(path, "wb") as handle:
+                handle.write(b"".join(self._ring))
+            self._ring.clear()
+            self._snapshots_written += 1
+            self._cleanup_snapshots(arm)
+            return str(path)
+        except Exception as exc:  # noqa: BLE001 - 留证失败不得影响影子检测
+            logger.debug(f"[KWS-Shadow] 快照落盘失败 arm={arm}: {exc}", module="KWS")
+            return None
+
+    def _cleanup_snapshots(self, arm: str) -> None:
+        """只保留最近 SNAPSHOT_KEEP 个本 arm 的快照（按文件名时间戳排序）。"""
+        try:
+            files = sorted(self._snapshot_dir.glob(f"shadow_{arm}_*.pcm"))
+            for old in files[:-SNAPSHOT_KEEP]:
+                old.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _log(
         self,
         hits: list[str],
@@ -209,6 +279,7 @@ class ShadowKws:
         main_keyword: str | None = None,
         cpu_ms: float = 0.0,
     ) -> None:
+        snap_path = self._dump_snapshot()
         record = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "arm": getattr(self, "arm", "strongest"),
@@ -227,6 +298,13 @@ class ShadowKws:
         }
         if context:
             record.update(context)
+        # vad_prob 语义 = 命中窗口内最大值（feed 逐帧累计）；无累计值时回退当前帧值
+        window_max = getattr(self, "_vad_prob_max", None)
+        if window_max is not None:
+            record["vad_prob"] = round(float(window_max), 4)
+        self._vad_prob_max = None
+        if snap_path:
+            record["snapshot"] = snap_path
         path = self._log_dir / f"kws-shadow-{time.strftime('%Y%m%d')}.jsonl"
         try:
             with open(path, "a", encoding="utf-8") as handle:
@@ -247,4 +325,6 @@ class ShadowKws:
             "cpu_ms": round(self._cpu_ms, 1),
             "audio_ms": round(self._audio_ms, 1),
             "rtf": round(self._rtf, 4),
+            "snapshots": getattr(self, "_snapshots_written", 0),
+            "snapshot_dir": str(getattr(self, "_snapshot_dir", "")),
         }

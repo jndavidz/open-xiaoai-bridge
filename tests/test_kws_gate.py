@@ -69,12 +69,13 @@ def _load_kws_module():
         "core.wakeup_session",
     ):
         sys.modules[name] = types.ModuleType(name)
-    # core.ref: 提供 set_kws / get_app / get_xiaoai / get_xiaozhi
+    # core.ref: 提供 set_kws / get_app / get_xiaoai / get_xiaozhi / get_speaker
     ref = sys.modules["core.ref"]
     ref.set_kws = lambda k: None
     ref.get_app = lambda: None
     ref.get_xiaoai = lambda: types.SimpleNamespace(async_loop=None)
     ref.get_xiaozhi = lambda: None
+    ref.get_speaker = lambda: None
     ref.get_kws = lambda: None
     # typing: AudioConfig / DeviceState
     typing = sys.modules["core.services.protocols.typing"]

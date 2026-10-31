@@ -3,7 +3,7 @@ import os
 import threading
 import time
 
-from core.ref import get_app, get_xiaoai, get_xiaozhi, set_kws
+from core.ref import get_app, get_speaker, get_xiaoai, get_xiaozhi, set_kws
 from core.services.audio.kws.sherpa import SherpaOnnx
 from core.services.audio.stream import MyAudio
 from core.services.audio.vad.silero import Silero
@@ -69,6 +69,9 @@ class _KWS:
         self.shadow_audio = None
         self.shadow_stream = None
         self._shadow_always_on = False
+        # ch0 臂丢帧观测计数（影子取证：短读率随时间变化是归因关键）
+        self._ch0_reads = 0
+        self._ch0_short = 0
 
         self.apply_runtime_config()
         self.config_manager.add_reload_listener(self._on_config_reload)
@@ -238,6 +241,8 @@ class _KWS:
         self.shadow_audio = None
         self.shadow_stream = None
         self._shadow_always_on = False
+        self._ch0_reads = 0
+        self._ch0_short = 0
         try:
             config = ConfigManager.instance()
             shadow_config = config.get_app_config("kws.shadow", {}) or {}
@@ -269,6 +274,10 @@ class _KWS:
                 log_dir=os.path.join(
                     os.path.dirname(os.path.abspath(__file__)),
                     "../../../../data/shadow",
+                ),
+                snapshot_dir=os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "../../../../data/kws_snapshots",
                 ),
                 max_active_paths=max_paths,
             )
@@ -312,18 +321,40 @@ class _KWS:
             if shadow is not None:
                 shadow.reset()
 
-    def _shadow_context(self, xiaozhi, speech_prob, paused: bool) -> dict:
-        gate_count, gate_reasons = self.gate_status()
-        state = getattr(xiaozhi, "device_state", None) if xiaozhi else None
+    def _resolve_device_state(self, xiaozhi) -> str | None:
+        """设备状态权威源 = MainApp.device_state。
+
+        生产部署 XIAOZHI_ENABLE 未设置时 get_xiaozhi() 为 None，旧实现直接读
+        xiaozhi 导致影子日志 device_state 恒 null（观测盲区）；MainApp 单例
+        始终存在，xiaozhi.device_state 本身就是它的代理，故优先取 app。
+        """
+        app = get_app()
+        state = getattr(app, "device_state", None) if app is not None else None
+        if state is None and xiaozhi is not None:
+            state = getattr(xiaozhi, "device_state", None)
         if hasattr(state, "name"):
             state = state.name
+        if state is not None and not isinstance(state, str):
+            state = str(state)
+        return state
+
+    def _shadow_context(self, xiaozhi, speech_prob, paused: bool) -> dict:
+        gate_count, gate_reasons = self.gate_status()
+        state = self._resolve_device_state(xiaozhi)
+        speaker = get_speaker()
+        playing = getattr(speaker, "status", None) if speaker is not None else None
         return {
             "vad_prob": None if speech_prob is None else round(float(speech_prob), 4),
             "device_state": str(state) if state is not None else None,
+            # 误触发归因关键字段：设备侧媒体播放状态（playing/paused/idle）
+            "playing": playing if isinstance(playing, str) else None,
             "paused": bool(paused),
             "listen_disabled": bool(self.listen_disabled),
             "gate_count": int(gate_count),
             "gate_reasons": list(gate_reasons),
+            # ch0 臂读帧累计：ch0_short/ch0_reads 即丢帧率的分子/分母
+            "ch0_reads": int(getattr(self, "_ch0_reads", 0)),
+            "ch0_short": int(getattr(self, "_ch0_short", 0)),
         }
 
     def _handle_main_hit(self, result: dict, speech_prob: float, context: dict) -> None:
@@ -344,8 +375,10 @@ class _KWS:
             frames = self.stream.read(self.frame_size)
             if self.shadow_stream is not None:
                 ch0_frames = self.shadow_stream.read(self.frame_size)
+                self._ch0_reads += 1
                 if len(ch0_frames) != self.frame_size * 2:
                     ch0_frames = b""
+                    self._ch0_short += 1
             else:
                 ch0_frames = b""
             if len(frames) != self.frame_size * 2:
@@ -353,14 +386,11 @@ class _KWS:
                 continue
 
             xiaozhi = get_xiaozhi()
+            device_state = self._resolve_device_state(xiaozhi)
             paused = bool(
                 self.paused
                 or self.listen_disabled
-                or (
-                    xiaozhi
-                    and xiaozhi.device_state
-                    in [DeviceState.LISTENING, DeviceState.SPEAKING]
-                )
+                or device_state in [DeviceState.LISTENING, DeviceState.SPEAKING]
             )
             speech_prob = (
                 None
