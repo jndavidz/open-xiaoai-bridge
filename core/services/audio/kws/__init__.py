@@ -63,6 +63,9 @@ class _KWS:
         )
         self._audio_ring: list[bytes] = []
 
+        # 影子 KWS（候选模型并行检测，只记录不唤醒；默认关）
+        self.shadow = None
+
         self.apply_runtime_config()
         self.config_manager.add_reload_listener(self._on_config_reload)
 
@@ -224,8 +227,46 @@ class _KWS:
     def is_listening_disabled(self) -> bool:
         return self.listen_disabled
 
+    def _init_shadow(self):
+        """按配置初始化影子 KWS；失败只告警，不影响主链路。"""
+        self.shadow = None
+        try:
+            config = ConfigManager.instance()
+            shadow_config = config.get_app_config("kws.shadow", {}) or {}
+            if not shadow_config.get("enabled"):
+                return
+            model_dir = shadow_config.get("model_dir", "")
+            words = config.get_app_config("wakeup.keywords", []) or []
+            if not model_dir or not words:
+                logger.warning(
+                    "[KWS-Shadow] enabled 但缺少 model_dir/keywords，跳过",
+                    module="KWS",
+                )
+                return
+            from core.services.audio.kws.shadow import ShadowKws
+
+            log_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "../../../../data/shadow"
+            )
+            self.shadow = ShadowKws(
+                model_dir=model_dir,
+                words=words,
+                score=float(shadow_config.get("score", 1.0)),
+                threshold=float(shadow_config.get("threshold", 0.25)),
+                log_dir=log_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - 影子失败不得影响主 KWS
+            logger.warning(f"[KWS-Shadow] 初始化异常：{exc}", module="KWS")
+            self.shadow = None
+
+    def _shadow_feed(self, frames: bytes, main_hit: bool = False):
+        shadow = getattr(self, "shadow", None)
+        if shadow is not None and shadow.enabled:
+            shadow.feed(frames, main_hit)
+
     def _detection_loop(self):
         SherpaOnnx.start()
+        self._init_shadow()
         self.stream.start_stream()
         while True:
             # 读取缓冲区音频数据
@@ -268,6 +309,7 @@ class _KWS:
                 
                 # 只在有语音时才进行 KWS 检测
                 result = SherpaOnnx.kws(frames)
+                self._shadow_feed(frames, bool(result))
                 if result:
                     self._log_wakeup_evidence(result, speech_prob)
                     logger.wakeup(result["keyword"], module="KWS")
@@ -285,6 +327,7 @@ class _KWS:
                     if self.vad_silence_frames <= self.vad_min_silence_frames:
                         # 继续将音频送入 KWS，允许短暂的静音
                         result = SherpaOnnx.kws(frames)
+                        self._shadow_feed(frames, bool(result))
                         if result:
                             self._log_wakeup_evidence(result, speech_prob)
                             logger.wakeup(result["keyword"], module="KWS")

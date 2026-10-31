@@ -279,6 +279,13 @@ APP_CONFIG = {
         "keywords_threshold": 0.2,
         # 唤醒词检测时的最小静默时长（ms），静默超过该时长则判定为说完
         "min_silence_duration": 480,
+        # 影子 KWS（候选模型并行检测，只记录不唤醒；默认关）
+        "shadow": {
+            "enabled": False,
+            "model_dir": "core/models/shadow",
+            "score": 1.0,
+            "threshold": 0.25,
+        },
     },
     "vad": {
         # 语音检测阈值（0-1，越小越灵敏）

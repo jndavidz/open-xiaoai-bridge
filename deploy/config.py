@@ -308,6 +308,14 @@ APP_CONFIG = {
         "keywords_threshold": 0.30,
         # 判定说完的最小静默时长（ms）
         "min_silence_duration": 480,
+        # 影子 KWS：候选模型对同一路音频并行检测，只记录 JSONL、不触发唤醒。
+        # 灰度前影子测试用；model_dir 需挂载到容器内（如 models/shadow）。
+        "shadow": {
+            "enabled": False,
+            "model_dir": "/app/core/models/shadow",
+            "score": 1.0,
+            "threshold": 0.25,
+        },
     },
     "vad": {
         # share 项目客厅环境实战值 0.3（默认 0.10 过敏易误触发）
