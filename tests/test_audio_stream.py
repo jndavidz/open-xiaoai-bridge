@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.services.audio.stream import MyStream
+from core.services.audio.stream import GlobalStream, GlobalStreamCh0, MyStream
 
 FRAME = 512
 FRAME_BYTES = FRAME * 2
@@ -67,6 +67,25 @@ class MyStreamOffsetTest(unittest.TestCase):
 
         self.assertEqual(0, stream._read_offset)
         self.assertEqual(0, len(stream.input_bytes))
+
+    def test_source_routing_keeps_strongest_and_ch0_separate(self):
+        stream = MyStream(
+            rate=16000,
+            channels=1,
+            format=8,
+            input=True,
+            frames_per_buffer=FRAME,
+            start=True,
+            source=GlobalStreamCh0,
+        )
+        try:
+            GlobalStream.input(b"\x11" * FRAME_BYTES)
+            self.assertEqual(b"", stream.read(FRAME))
+
+            GlobalStreamCh0.input(b"\x22" * FRAME_BYTES)
+            self.assertEqual(b"\x22" * FRAME_BYTES, stream.read(FRAME))
+        finally:
+            stream.stop_stream()
 
 
 if __name__ == "__main__":

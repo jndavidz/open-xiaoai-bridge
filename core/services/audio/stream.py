@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import uuid
 from typing import Any, Callable, ClassVar, Optional
 
@@ -25,6 +27,7 @@ class __GlobalStream:
 
 
 GlobalStream = __GlobalStream()
+GlobalStreamCh0 = __GlobalStream()
 
 
 class MyStream:
@@ -37,8 +40,10 @@ class MyStream:
         output: bool = False,
         frames_per_buffer: int = 1024,
         start: bool = True,
+        source: __GlobalStream | None = None,
     ) -> None:
         self.id = uuid.uuid4()
+        self._source = source if source is not None else GlobalStream
         self._rate = rate
         self._channels = channels
         self._format = format
@@ -74,13 +79,13 @@ class MyStream:
         if not self._is_active:
             self._is_active = True
             if self._is_input:
-                GlobalStream.register_reader(self)
+                self._source.register_reader(self)
 
     def stop_stream(self) -> None:
         if self._is_active:
             self._is_active = False
             if self._is_input:
-                GlobalStream.unregister_reader(self)
+                self._source.unregister_reader(self)
                 self.clear_input()
 
     def write(self, frames: bytes) -> None:
@@ -160,6 +165,7 @@ class MyAudio:
         input_host_api_specific_stream_info: Optional[Any] = None,
         output_host_api_specific_stream_info: Optional[Any] = None,
         stream_callback: Optional[Callable] = None,
+        source: __GlobalStream | None = None,
     ) -> MyStream:
         if self._is_terminated:
             raise RuntimeError("MyAudio instance has been terminated")
@@ -172,6 +178,7 @@ class MyAudio:
             output=output,
             frames_per_buffer=frames_per_buffer,
             start=start,
+            source=source,
         )
 
     def terminate(self) -> None:

@@ -101,6 +101,38 @@ class ShadowLogTest(unittest.TestCase):
             self.assertEqual(record["hits"], [])
             self.assertTrue(record["main_hit"])
 
+    def test_log_includes_arm_context_and_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shadow = object.__new__(ShadowKws)
+            shadow._log_dir = Path(tmp)
+            shadow._frames = 3
+            shadow._hits = 0
+            shadow.arm = "ch0"
+            shadow.model_dir = Path("shadow")
+            shadow.words = ["你好小塔"]
+            shadow.score = 1.0
+            shadow.threshold = 0.25
+            shadow.max_active_paths = 16
+            shadow._cpu_ms = 2.5
+            shadow._audio_ms = 1000.0
+            shadow._rtf = 0.0025
+            shadow._log(
+                [],
+                True,
+                context={"paused": True, "gate_count": 1},
+                main_keyword="你好小塔",
+                cpu_ms=2.5,
+            )
+            record = json.loads(
+                next(Path(tmp).glob("kws-shadow-*.jsonl")).read_text(encoding="utf-8")
+            )
+            self.assertEqual(record["arm"], "ch0")
+            self.assertEqual(record["main_keyword"], "你好小塔")
+            self.assertEqual(record["max_active_paths"], 16)
+            self.assertEqual(record["paused"], True)
+            self.assertEqual(record["gate_count"], 1)
+            self.assertEqual(record["cpu_ms"], 2.5)
+
 
 if __name__ == "__main__":
     unittest.main()

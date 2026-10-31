@@ -40,6 +40,16 @@ pub fn input_channels() -> u16 {
         .unwrap_or(6)
 }
 
+/// Recording sample container bits (16 or 32).
+/// Reads `AUDIO_INPUT_BITS` (default 32 = coderzc client's S32_LE capture).
+pub fn input_bits() -> u16 {
+    std::env::var("AUDIO_INPUT_BITS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|bits| *bits == 16 || *bits == 32)
+        .unwrap_or(32)
+}
+
 /// Ensure the remote aplay is freshly started. Skips the RPC if already ready.
 pub async fn ensure_player_ready() {
     if PLAYER_READY.swap(true, Ordering::SeqCst) {
@@ -131,7 +141,7 @@ fn start_recording(py: Python) -> PyResult<Bound<PyAny>> {
                 Some(json!(AudioConfig {
                     pcm: "noop".into(),
                     channels: input_channels(),
-                    bits_per_sample: 16,
+                    bits_per_sample: input_bits(),
                     sample_rate: 16000,
                     period_size: 1440 / 4,
                     buffer_size: 1440,

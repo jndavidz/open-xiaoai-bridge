@@ -311,10 +311,14 @@ APP_CONFIG = {
         # 影子 KWS：候选模型对同一路音频并行检测，只记录 JSONL、不触发唤醒。
         # 灰度前影子测试用；model_dir 需挂载到容器内（如 models/shadow）。
         "shadow": {
-            "enabled": False,
+            # Phase 1：候选模型 always-on 影子（只写 JSONL，不执行动作）
+            "enabled": True,
             "model_dir": "/app/core/models/shadow",
             "score": 1.0,
             "threshold": 0.25,
+            "max_active_paths": 16,
+            "arms": ["strongest", "ch0"],
+            "always_on": True,
         },
     },
     "vad": {
@@ -329,6 +333,9 @@ APP_CONFIG = {
         "gain": 1.0,
         # 采集声道数（六麦=6）。bridge 自动同步到 native 的 AUDIO_INPUT_CHANNELS；1=回退单声道
         "channels": 6,
+        # client 采集位深（S16/S32）。bridge 自动同步到 native 的 AUDIO_INPUT_BITS，
+        # 并在降声道前统一转成 S16；coderzc client 实测为 S32_LE。
+        "bits_per_sample": 32,
         # 降声道策略：strongest（最强麦+迟滞）/ average（等权平均）/ fixed（固定声道）
         "channel_strategy": "strongest",
         "fixed_channel": 0,

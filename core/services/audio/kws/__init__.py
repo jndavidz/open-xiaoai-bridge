@@ -65,6 +65,10 @@ class _KWS:
 
         # 影子 KWS（候选模型并行检测，只记录不唤醒；默认关）
         self.shadow = None
+        self.shadow_ch0 = None
+        self.shadow_audio = None
+        self.shadow_stream = None
+        self._shadow_always_on = False
 
         self.apply_runtime_config()
         self.config_manager.add_reload_listener(self._on_config_reload)
@@ -230,6 +234,10 @@ class _KWS:
     def _init_shadow(self):
         """按配置初始化影子 KWS；失败只告警，不影响主链路。"""
         self.shadow = None
+        self.shadow_ch0 = None
+        self.shadow_audio = None
+        self.shadow_stream = None
+        self._shadow_always_on = False
         try:
             config = ConfigManager.instance()
             shadow_config = config.get_app_config("kws.shadow", {}) or {}
@@ -245,47 +253,129 @@ class _KWS:
                 return
             from core.services.audio.kws.shadow import ShadowKws
 
-            log_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "../../../../data/shadow"
-            )
-            self.shadow = ShadowKws(
+            arms = shadow_config.get("arms") or ["strongest", "ch0"]
+            if isinstance(arms, str):
+                arms = [arms]
+            arms = [arm for arm in arms if arm in ("strongest", "ch0")]
+            if not arms:
+                logger.warning("[KWS-Shadow] arms 为空，跳过", module="KWS")
+                return
+            max_paths = int(shadow_config.get("max_active_paths", 16))
+            common = dict(
                 model_dir=model_dir,
                 words=words,
                 score=float(shadow_config.get("score", 1.0)),
                 threshold=float(shadow_config.get("threshold", 0.25)),
-                log_dir=log_dir,
+                log_dir=os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "../../../../data/shadow",
+                ),
+                max_active_paths=max_paths,
             )
+            if "strongest" in arms:
+                self.shadow = ShadowKws(arm="strongest", **common)
+            if "ch0" in arms:
+                from core.services.audio.stream import GlobalStreamCh0
+
+                self.shadow_ch0 = ShadowKws(arm="ch0", **common)
+                self.shadow_audio = MyAudio.create()
+                self.shadow_stream = self.shadow_audio.open(
+                    format=AudioConfig.FORMAT,
+                    channels=1,
+                    rate=16000,
+                    input=True,
+                    frames_per_buffer=AudioConfig.FRAME_SIZE,
+                    start=True,
+                    source=GlobalStreamCh0,
+                )
+            self._shadow_always_on = bool(shadow_config.get("always_on", True))
         except Exception as exc:  # noqa: BLE001 - 影子失败不得影响主 KWS
             logger.warning(f"[KWS-Shadow] 初始化异常：{exc}", module="KWS")
             self.shadow = None
+            self.shadow_ch0 = None
+            self.shadow_stream = None
 
-    def _shadow_feed(self, frames: bytes, main_hit: bool = False):
-        shadow = getattr(self, "shadow", None)
-        if shadow is not None and shadow.enabled:
-            shadow.feed(frames, main_hit)
+    def _shadow_feed(
+        self,
+        frames: bytes,
+        context: dict | None = None,
+        arm: str = "strongest",
+        main_hit: bool = False,
+    ) -> list[str]:
+        shadow = self.shadow if arm == "strongest" else self.shadow_ch0
+        if shadow is not None and shadow.enabled and frames:
+            return shadow.feed(frames, main_hit=main_hit, context=context)
+        return []
+
+    def _shadow_reset(self) -> None:
+        for shadow in (self.shadow, self.shadow_ch0):
+            if shadow is not None:
+                shadow.reset()
+
+    def _shadow_context(self, xiaozhi, speech_prob, paused: bool) -> dict:
+        gate_count, gate_reasons = self.gate_status()
+        state = getattr(xiaozhi, "device_state", None) if xiaozhi else None
+        if hasattr(state, "name"):
+            state = state.name
+        return {
+            "vad_prob": None if speech_prob is None else round(float(speech_prob), 4),
+            "device_state": str(state) if state is not None else None,
+            "paused": bool(paused),
+            "listen_disabled": bool(self.listen_disabled),
+            "gate_count": int(gate_count),
+            "gate_reasons": list(gate_reasons),
+        }
+
+    def _handle_main_hit(self, result: dict, speech_prob: float, context: dict) -> None:
+        self._log_wakeup_evidence(result, speech_prob)
+        logger.wakeup(result["keyword"], module="KWS")
+        self.on_message(result["keyword"])
+        if self._shadow_always_on:
+            for shadow in (self.shadow, self.shadow_ch0):
+                if shadow is not None and shadow.enabled:
+                    shadow.record_main_hit(result["keyword"], context=context)
 
     def _detection_loop(self):
         SherpaOnnx.start()
         self._init_shadow()
         self.stream.start_stream()
         while True:
-            # 读取缓冲区音频数据
+            # 主路（strongest）与影子 ch0 各自从独立 GlobalStream 读取
             frames = self.stream.read(self.frame_size)
+            if self.shadow_stream is not None:
+                ch0_frames = self.shadow_stream.read(self.frame_size)
+                if len(ch0_frames) != self.frame_size * 2:
+                    ch0_frames = b""
+            else:
+                ch0_frames = b""
             if len(frames) != self.frame_size * 2:
                 time.sleep(0.01)
                 continue
 
-            # 在说话和监听状态时，暂停 KWS
             xiaozhi = get_xiaozhi()
-            if (
-                not frames
-                or self.paused
+            paused = bool(
+                self.paused
                 or self.listen_disabled
                 or (
-                    xiaozhi and xiaozhi.device_state
+                    xiaozhi
+                    and xiaozhi.device_state
                     in [DeviceState.LISTENING, DeviceState.SPEAKING]
                 )
-            ):
+            )
+            speech_prob = (
+                None
+                if paused
+                else (Silero.vad(frames, self.sample_rate) or 0)
+            )
+            context = self._shadow_context(xiaozhi, speech_prob, paused)
+
+            # 影子 always-on：主 KWS 之前的全帧检测（含 VAD 未放行帧）
+            if self._shadow_always_on:
+                self._shadow_feed(frames, context=context, arm="strongest")
+                if ch0_frames:
+                    self._shadow_feed(ch0_frames, context=context, arm="ch0")
+
+            if paused:
                 time.sleep(0.01)
                 continue
 
@@ -294,44 +384,60 @@ class _KWS:
             if len(self._audio_ring) > self._ring_max_frames:
                 del self._audio_ring[0 : len(self._audio_ring) - self._ring_max_frames]
 
-            # 先进行 VAD 检测
-            speech_prob = Silero.vad(frames, self.sample_rate) or 0
             is_speech = speech_prob >= self.vad_threshold
-            
             if is_speech:
                 # 检测到语音，立即激活
                 if not self.vad_active:
                     self.vad_active = True
                     self.vad_start_time = time.time()
                     logger.debug("检测到语音，开始 KWS 检测", module="KWS")
-                
+
                 self.vad_silence_frames = 0
-                
-                # 只在有语音时才进行 KWS 检测
+
                 result = SherpaOnnx.kws(frames)
-                self._shadow_feed(frames, bool(result))
+                if not self._shadow_always_on:
+                    self._shadow_feed(
+                        frames,
+                        context=context,
+                        arm="strongest",
+                        main_hit=bool(result),
+                    )
+                    if ch0_frames:
+                        self._shadow_feed(
+                            ch0_frames,
+                            context=context,
+                            arm="ch0",
+                            main_hit=bool(result),
+                        )
                 if result:
-                    self._log_wakeup_evidence(result, speech_prob)
-                    logger.wakeup(result["keyword"], module="KWS")
-                    self.on_message(result["keyword"])
-                    # 唤醒后重置状态
+                    self._handle_main_hit(result, speech_prob, context)
                     self.vad_active = False
                     self.vad_silence_frames = 0
-                    
+
             else:
                 # 静音处理
                 if self.vad_active:
                     self.vad_silence_frames += 1
-                    
+
                     # 在激活状态下，允许一定的静音间隙
                     if self.vad_silence_frames <= self.vad_min_silence_frames:
-                        # 继续将音频送入 KWS，允许短暂的静音
                         result = SherpaOnnx.kws(frames)
-                        self._shadow_feed(frames, bool(result))
+                        if not self._shadow_always_on:
+                            self._shadow_feed(
+                                frames,
+                                context=context,
+                                arm="strongest",
+                                main_hit=bool(result),
+                            )
+                            if ch0_frames:
+                                self._shadow_feed(
+                                    ch0_frames,
+                                    context=context,
+                                    arm="ch0",
+                                    main_hit=bool(result),
+                                )
                         if result:
-                            self._log_wakeup_evidence(result, speech_prob)
-                            logger.wakeup(result["keyword"], module="KWS")
-                            self.on_message(result["keyword"])
+                            self._handle_main_hit(result, speech_prob, context)
                             self.vad_active = False
                             self.vad_silence_frames = 0
                     else:
@@ -351,6 +457,7 @@ class _KWS:
                         # preventing leftover audio from the previous utterance
                         # from combining with the next one.
                         SherpaOnnx.reset()
+                        self._shadow_reset()
 
     def on_message(self, text: str):
         loop = get_app().loop if get_app() else get_xiaoai().async_loop

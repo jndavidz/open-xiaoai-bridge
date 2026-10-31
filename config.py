@@ -285,6 +285,9 @@ APP_CONFIG = {
             "model_dir": "core/models/shadow",
             "score": 1.0,
             "threshold": 0.25,
+            "max_active_paths": 16,
+            "arms": ["strongest", "ch0"],
+            "always_on": True,
         },
     },
     "vad": {
@@ -301,6 +304,8 @@ APP_CONFIG = {
         # 设备侧采集声道数（LX06 六麦 = 6）。bridge 会自动同步到 native 的
         # AUDIO_INPUT_CHANNELS；改成 1 即一键回退单声道（client 无需重编）。
         "channels": 6,
+        # client 采集位深（S16/S32）；bridge 在降声道前统一转成 S16
+        "bits_per_sample": 32,
         # 降声道策略：
         #   strongest = 滑动窗口内最强单麦 + 迟滞（默认）
         #   average   = 等权平均

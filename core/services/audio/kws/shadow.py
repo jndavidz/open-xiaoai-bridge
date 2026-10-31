@@ -88,6 +88,8 @@ class ShadowKws:
         score: float = 1.0,
         threshold: float = 0.25,
         log_dir: str | None = None,
+        arm: str = "strongest",
+        max_active_paths: int = 16,
     ) -> None:
         import sherpa_onnx
 
@@ -95,10 +97,15 @@ class ShadowKws:
         self.words = [word for word in words if word]
         self.score = score
         self.threshold = threshold
+        self.arm = arm
+        self.max_active_paths = max(1, int(max_active_paths))
         self.enabled = False
         self._disabled_reason = ""
         self._hits = 0
         self._frames = 0
+        self._cpu_ms = 0.0
+        self._audio_ms = 0.0
+        self._rtf = 0.0
         base = Path(log_dir) if log_dir else Path("data/shadow")
         self._log_dir = base
         self._log_dir.mkdir(parents=True, exist_ok=True)
@@ -111,7 +118,7 @@ class ShadowKws:
             self._kws = sherpa_onnx.KeywordSpotter(
                 provider="cpu",
                 num_threads=1,
-                max_active_paths=8,
+                max_active_paths=self.max_active_paths,
                 keywords_score=score,
                 keywords_threshold=threshold,
                 num_trailing_blanks=0,
@@ -124,13 +131,18 @@ class ShadowKws:
             self._stream = self._kws.create_stream()
             self.enabled = True
             logger.info(
-                f"[KWS-Shadow] 已启用：model={self.model_dir.name} words={len(self.words)} "
-                f"score={score} threshold={threshold}",
+                f"[KWS-Shadow] 已启用：arm={self.arm} model={self.model_dir.name} "
+                f"words={len(self.words)} score={score} threshold={threshold} "
+                f"paths={self.max_active_paths}",
                 module="KWS",
             )
         except Exception as exc:  # noqa: BLE001 - 影子失败不得影响主 KWS
             self._disabled_reason = f"{type(exc).__name__}: {exc}"
-            logger.warning(f"[KWS-Shadow] 初始化失败，影子停用：{self._disabled_reason}", module="KWS")
+            logger.warning(
+                f"[KWS-Shadow] 初始化失败，arm={self.arm} 影子停用："
+                f"{self._disabled_reason}",
+                module="KWS",
+            )
 
     def reset(self) -> None:
         if not self.enabled:
@@ -145,10 +157,16 @@ class ShadowKws:
         self._disabled_reason = f"{type(exc).__name__}: {exc}"
         logger.warning(f"[KWS-Shadow] 运行异常，影子停用：{self._disabled_reason}", module="KWS")
 
-    def feed(self, frames: bytes, main_hit: bool = False) -> None:
+    def feed(
+        self,
+        frames: bytes,
+        main_hit: bool = False,
+        context: dict | None = None,
+    ) -> list[str]:
         """喂一帧 16k/单声道/16bit PCM；命中写 JSONL，不触发任何动作。"""
         if not self.enabled or not frames:
-            return
+            return []
+        started = time.perf_counter()
         try:
             samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
             self._stream.accept_waveform(RATE, samples)
@@ -165,19 +183,50 @@ class ShadowKws:
                     self._kws.reset_stream(self._stream)
             if hits:
                 self._hits += len(hits)
+            cpu_ms = (time.perf_counter() - started) * 1000.0
+            self._cpu_ms += cpu_ms
+            self._audio_ms += len(frames) / 2.0 / RATE * 1000.0
+            self._rtf = self._cpu_ms / self._audio_ms if self._audio_ms > 0 else 0.0
             # 主命中也要留痕：hits=[] + main_hit=true 表示「主命中但影子漏检」
             if hits or main_hit:
-                self._log(hits, main_hit)
+                self._log(hits, main_hit, context=context, cpu_ms=cpu_ms)
+            return hits
         except Exception as exc:  # noqa: BLE001
             self._disable(exc)
+            return []
 
-    def _log(self, hits: list[str], main_hit: bool) -> None:
+    def record_main_hit(self, keyword: str, context: dict | None = None) -> None:
+        """记录主 KWS 命中（影子未在本帧产出候选命中）。"""
+        if not self.enabled:
+            return
+        self._log([], True, context=context, main_keyword=keyword, cpu_ms=0.0)
+
+    def _log(
+        self,
+        hits: list[str],
+        main_hit: bool,
+        context: dict | None = None,
+        main_keyword: str | None = None,
+        cpu_ms: float = 0.0,
+    ) -> None:
         record = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "arm": getattr(self, "arm", "strongest"),
             "hits": hits,
             "main_hit": bool(main_hit),
+            "main_keyword": main_keyword,
             "frames": self._frames,
+            "model": getattr(getattr(self, "model_dir", None), "name", ""),
+            "words": len(getattr(self, "words", [])),
+            "score": getattr(self, "score", None),
+            "threshold": getattr(self, "threshold", None),
+            "max_active_paths": getattr(self, "max_active_paths", None),
+            "cpu_ms": round(float(cpu_ms), 2),
+            "audio_ms": round(float(getattr(self, "_audio_ms", 0.0)), 1),
+            "rtf": round(float(getattr(self, "_rtf", 0.0)), 4),
         }
+        if context:
+            record.update(context)
         path = self._log_dir / f"kws-shadow-{time.strftime('%Y%m%d')}.jsonl"
         try:
             with open(path, "a", encoding="utf-8") as handle:
@@ -188,9 +237,14 @@ class ShadowKws:
     def status(self) -> dict:
         return {
             "enabled": self.enabled,
+            "arm": getattr(self, "arm", "strongest"),
             "disabled_reason": self._disabled_reason,
             "model_dir": str(self.model_dir),
             "words": len(self.words),
+            "max_active_paths": self.max_active_paths,
             "frames": self._frames,
             "hits": self._hits,
+            "cpu_ms": round(self._cpu_ms, 1),
+            "audio_ms": round(self._audio_ms, 1),
+            "rtf": round(self._rtf, 4),
         }

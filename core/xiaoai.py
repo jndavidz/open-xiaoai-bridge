@@ -8,6 +8,7 @@ import open_xiaoai_server
 
 from core.ref import get_speaker, set_xiaoai
 from core.services.audio.channels import ChannelDownmixer, normalize_strategy
+from core.services.audio.pcm import to_int16
 from core.services.audio.stream import GlobalStream
 from core.services.audio.watchdog import (
     STATE_IDLE,
@@ -52,9 +53,11 @@ class XiaoAI:
     _RECOVER_BASE_BACKOFF = 1.0
     _RECOVER_MAX_BACKOFF = 30.0
     _audio_channels = 6
+    _audio_bits = 32
     _channel_strategy = "strongest"
     _fixed_channel = 0
     _downmixer: ChannelDownmixer | None = None
+    _ch0_downmixer: ChannelDownmixer | None = None
     _last_input_frame_time = 0.0
     _input_frame_count = 0
     _current_channel = None
@@ -99,6 +102,14 @@ class XiaoAI:
             channels = 6
         channels = max(1, min(channels, 8))
 
+        try:
+            bits = int(
+                cls.config_manager.get_app_config("audio_input.bits_per_sample", 32)
+            )
+        except (TypeError, ValueError):
+            bits = 32
+        bits = 32 if bits == 32 else 16
+
         strategy = normalize_strategy(
             cls.config_manager.get_app_config(
                 "audio_input.channel_strategy", "strongest"
@@ -124,14 +135,17 @@ class XiaoAI:
             channels != cls._audio_channels
             or strategy != cls._channel_strategy
             or fixed_channel != cls._fixed_channel
+            or bits != cls._audio_bits
         )
         cls._audio_channels = channels
+        cls._audio_bits = bits
         cls._channel_strategy = strategy
         cls._fixed_channel = fixed_channel
         cls._recording_watchdog.configure(watchdog_seconds)
-        # native 的 start_recording / 连接测试在每次调用时读取该环境变量；
-        # 以 bridge 配置为唯一事实源，避免「Python 按 6ch 下混、native 仍抓 1ch」。
+        # native 的 start_recording / 连接测试在每次调用时读取这两个环境变量；
+        # 以 bridge 配置为唯一事实源，避免「Python 按 6ch/S16 下混、native 仍抓另一格式」。
         os.environ["AUDIO_INPUT_CHANNELS"] = str(channels)
+        os.environ["AUDIO_INPUT_BITS"] = str(bits)
 
         if changed or cls._downmixer is None:
             cls._downmixer = (
@@ -141,6 +155,15 @@ class XiaoAI:
                     channels=channels,
                     strategy=strategy,
                     fixed_channel=fixed_channel,
+                )
+            )
+            cls._ch0_downmixer = (
+                None
+                if channels == 1
+                else ChannelDownmixer(
+                    channels=channels,
+                    strategy="fixed",
+                    fixed_channel=0,
                 )
             )
             cls._current_channel = (
@@ -259,25 +282,46 @@ class XiaoAI:
         if not cls._recording_expected and not cls._recording_stop_requested:
             cls._recording_expected = True
 
+        raw = to_int16(data, cls._audio_bits)
+        if not raw:
+            return
+
+        ch0_downmixer = cls._ch0_downmixer
+        if ch0_downmixer is not None:
+            ch0 = ch0_downmixer.feed(raw)
+            if ch0:
+                ch0 = cls._apply_input_gain(ch0)
+                if ch0:
+                    from core.services.audio.stream import GlobalStreamCh0
+
+                    GlobalStreamCh0.input(ch0)
+
         downmixer = cls._downmixer
         if downmixer is not None:
-            pcm = downmixer.feed(data)
+            pcm = downmixer.feed(raw)
             cls._current_channel = downmixer.current_channel
             if not pcm:
                 # 跨帧残留未凑满一个声道帧，等待下一次回调
                 return
         else:
-            # 单声道回退：保持旧行为（仅丢弃尾部半个样本，避免 frombuffer 抛错）
-            pcm = data if len(data) % 2 == 0 else data[:-1]
+            # 单声道回退：仅丢弃尾部半个样本，避免 frombuffer 抛错
+            pcm = raw
 
-        audio_array = np.frombuffer(pcm, dtype=np.int16)
-        if audio_array.size == 0:
+        pcm = cls._apply_input_gain(pcm)
+        if not pcm:
             return
-        if cls._input_gain_enabled:
-            boosted = audio_array.astype(np.float32) * cls._input_gain
-            audio_array = np.clip(boosted, -32768, 32767).astype(np.int16)
         cls._input_frame_count += 1
-        GlobalStream.input(audio_array.tobytes())
+        GlobalStream.input(pcm)
+
+    @classmethod
+    def _apply_input_gain(cls, pcm: bytes) -> bytes:
+        if not pcm:
+            return b""
+        if not cls._input_gain_enabled:
+            return pcm
+        audio_array = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        boosted = audio_array * cls._input_gain
+        return np.clip(boosted, -32768, 32767).astype(np.int16).tobytes()
 
     # ---- 录音通道：native 调用的唯一包装（看门狗 expected 标志由这里维护）----
 
@@ -295,6 +339,8 @@ class XiaoAI:
             if cls._downmixer is not None:
                 cls._downmixer.reset()
                 cls._current_channel = cls._downmixer.current_channel
+            if cls._ch0_downmixer is not None:
+                cls._ch0_downmixer.reset()
             cls._last_input_frame_time = time.monotonic()
             return True
         except Exception as exc:
@@ -430,6 +476,7 @@ class XiaoAI:
             "last_frame_age": round(max(0.0, now - last), 3) if last else None,
             "frame_count": cls._input_frame_count,
             "channels": cls._audio_channels,
+            "bits_per_sample": cls._audio_bits,
             "channel_strategy": cls._channel_strategy,
             "fixed_channel": cls._fixed_channel,
             "current_channel": cls._current_channel,
