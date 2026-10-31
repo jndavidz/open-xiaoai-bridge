@@ -1,109 +1,132 @@
 # client-rust：音箱侧补丁程序
 
-> 音箱上跑的 `client` 二进制是什么、协议契约、版本谱系（idootop 原版 vs coderzc fork vs 本工作区部署）、部署与更新判据都在本文。
-> 触发场景：排查 client ↔ bridge 连接/握手问题、升级或重装 client、评估 client 侧行为（事件源、shell RPC）对服务端的影响。
+> 音箱上运行的 client 二进制：职责边界、协议契约、版本谱系、部署与更新判据、已知缺陷。
+> 触发场景：4399 连不上 / 401、升级或重装 client、评估 client 事件源与 shell RPC 对服务端的影响、恢复设备补丁产物。
 
 ## 1. 定位与职责边界
 
-client-rust 是刷机后跑在音箱（LX06 等，OpenWrt + busybox，ARMv7）上的唯一常驻补丁程序，通过明文 WebSocket 连接 bridge。它只做四件事（上游 README 原文）：
+client-rust 是刷机后跑在音箱（LX06，OpenWrt + busybox，ARMv7）上的常驻补丁程序，以明文 WebSocket 连接 bridge。它只做四件事：
 
-1. 转发麦克风输入音频流到 Server 端
-2. 转发设备事件到 Server 端（语音识别结果、播放状态等）
-3. 响应 Server 端指令调用（执行脚本、播放音频流、系统升级等）
+1. 转发麦克风音频到服务端
+2. 转发设备事件（ASR 文本、播放状态）
+3. 响应服务端 RPC（执行脚本、播放、录音、系统升级等）
 4. 承载 Client/Server 共享通信协议
 
-**业务逻辑一律在服务端**（bridge 的 Python 层）——这是设计原则：音箱内存算力有限，client 保持极薄。因此 bridge 的对话编排、VAD/KWS/ASR、TTS 管线全部不需要改 client。
+业务逻辑全在 bridge 的 Python 层：对话编排、KWS/VAD/ASR、TTS、托管播放都不需要改 client。client 是上游可替换件，本工作区不维护其源码，也不做本地修改。
 
-固件层（刷机补丁 `client-patch` / USB 刷机工具）是另一套东西，本文不覆盖；刷机后 client 二进制与固件解耦，可独立替换升级。
+**RPC 面**（上游 HEAD 注册的命令）：`get_version`、`run_shell`、`start_play`、`stop_play`、`start_recording`、`stop_recording`。`run_shell` 用 `/bin/sh -c` 执行任意脚本，client 又以 root 运行 ⇒ 等价 root，只可连可信 bridge。
 
-## 2. 通信契约（bridge 对接必知）
+**内部三个 monitor**：
 
-- **通道**：明文 WebSocket `ws://<音箱可达地址>:4399`，服务端由 bridge 的 `native/src/server.rs` 提供。
-- **消息协议**：`AppMessage` 四消息枚举（`Request` / `Response` / `Event` / `Stream`，定义在 `packages/client-rust/src/services/connect/data.rs`）——文本帧承载 JSON，二进制帧承载 `Stream`（音频裸字节，PCM 16k）。
-- **握手**：coderzc fork 起支持 `Authorization: Bearer <token>` 头（环境变量 `OPEN_XIAOAI_TOKEN`），bridge 侧 `server.rs` 校验，失败回 401。**bridge 侧该变量未配置时拒绝所有连接（fail closed，ticket 06）**，`token.txt` 与 bridge 环境变量必须同值。
-- **能力面**：RPC 含 `start_recording` / `stop_recording` / `run_shell` 等——client 默认提供任意脚本执行能力，**鉴权不配则等于裸奔**，只可连可信 Server。
+- instruction：tail `/tmp/mico_aivs_lab/instruction.log` → ASR 事件；
+- playing：每 10ms 执行一次 `mphelper mute_stat` → 播放状态事件；
+- kws：监听 `/tmp/open-xiaoai/kws.log`；本设备该目录不存在，monitor 空转、不产生事件（唤醒由 bridge 的 sherpa KWS 完成）。
+
+固件层（刷机补丁、USB 刷机工具）不在本文范围；client 与固件解耦，可独立替换升级。
+
+## 2. 通信契约
+
+- **通道**：明文 WebSocket `ws://<bridge>:4399`，服务端为 bridge 的 [native/src/server.rs](../native/src/server.rs)。
+- **消息**：`AppMessage` 四型 `Request` / `Response` / `Event` / `Stream`（上游 `packages/client-rust/src/services/connect/data.rs`）。文本帧承载前三型的 JSON；**二进制帧承载 `serde_json` 序列化的 `Stream`**——内容仍是 JSON（`bytes` 是整数数组），不是裸 PCM。
+- **音频**：client 默认 1ch / 16k / 16bit（上游 `audio/config.rs`）；bridge 通过 `start_recording` 下发 `channels`（生产默认 6）、`pcm=noop`、period/buffer 等参数。
+- **鉴权**：fork 版 `connect()` 读环境变量 `OPEN_XIAOAI_TOKEN`，非空则加 `Authorization: Bearer`。bridge 侧未配置该变量时**拒绝所有连接**（401，fail closed；token 常量时间比较）。设备 `token.txt` 必须与 bridge 环境变量同值。
+- **能力面**：上游 token 可选，空值 = 不加头。token 漏配等于开放 root 脚本通道，部署必须配 token，只连可信 Server。
 
 ## 3. 版本谱系
 
-三个层面逐一对照（2026-10 实测 `diff -r` 两个仓库 HEAD 的 `packages/client-rust/`，置信度高）：
+2026-10-31 复核（两仓 HEAD：coderzc `14e1034`、idootop `bc3396c`，对 `packages/client-rust/` 做 `diff -r`）：差异仍只有 4 个文件。
 
 | | idootop/open-xiaoai 原版 | coderzc/open-xiaoai fork | 本工作区部署 |
 |---|---|---|---|
-| 状态 | **已归档**（README 顶部 WARNING） | 随 bridge 持续维护 | LX06 上跑 coderzc fork 的**预编译** client |
-| 鉴权 | 无（明文裸协议） | `OPEN_XIAOAI_TOKEN` Bearer（fork 侧可选，空 = 不加头；**bridge 侧已 fail closed**，空则拒连） | 已配 `token.txt`（token 鉴权） |
-| 预编译下载源 | `gitee.com/idootop/artifacts/...` | `gitee.com/coderzc/open-xiaoai/releases/...` | 同 coderzc |
-| 核心机制 | AppMessage / FileMonitor / SpeakerManager | **与原版逐字节一致** | 同 coderzc |
+| 状态 | 已归档（README 顶部 WARNING） | 持续维护 | coderzc fork 的预编译二进制 |
+| 鉴权 | 无 | `OPEN_XIAOAI_TOKEN` Bearer，空则不加头 | 已配 `token.txt`；bridge fail closed |
+| 下载源 | `gitee.com/idootop/artifacts/...` | `gitee.com/coderzc/open-xiaoai/releases/...` | 同 coderzc |
+| 核心机制 | AppMessage / FileMonitor / SpeakerManager | 与原版逐字节一致 | 同 coderzc |
 
-**fork 的 diff 只有 4 个文件**，`src/` 下仅 `bin/client.rs`：
+**4 个差异文件**：
 
-- `client.rs`（+13 行）：`connect()` 读 `OPEN_XIAOAI_TOKEN`，非空则握手加 `Authorization` 头。
-- `boot.sh` / `init.sh`：下载源改 coderzc；`.tmp` + `mv` 原子写（下载失败回退旧版）；读 `/data/open-xiaoai/token.txt` 并 export；`init.sh -u` 仅更新不启动。
-- `README.md`：补 token 与更新章节。
+- `src/bin/client.rs`：`connect()` 读 token，非空加 `Authorization` 头（唯一源码差异）；
+- `init.sh`：下载源改 coderzc；新增 `-u/--update`（只更新不启动）；`.tmp` + `mv` 原子写；读 `token.txt` 并 export；
+- `boot.sh`：下载源改 coderzc；`.tmp` + `mv`；读 `token.txt` 并 export；仍只在本地无二进制时下载，随后前台启动 client；
+- `README.md`：补 token 与更新说明。
 
-**本工作区未对 client 做任何本地修改**。client 是上游可替换件，协议与 idootop 原版同源，任一版本可互换降级/升级。
+**版本识别**：
+
+- 二进制没有 `--version`；`argv[1]` 一律当 WS 地址（传 `--version` 会去连它并挂起重连）。
+- client 注册 RPC `get_version`，返回 Cargo 版本 `1.0.0`；原版与 fork 包版本相同，不含 commit/构建号；bridge 当前不主动查询 ⇒ 排障仍以 md5 和来源为准。
+- 本地版本约定（2026-10-25 起）：**1.0 = idootop 原版，2.0 = coderzc fork（现部署）**，后续整数递增。
+- **当前部署**（2026-10-31 真机核对）：`/data/open-xiaoai/client` = 851,344 B，md5 `b12ebe6e8289de3adcdba6b5641eb843`（2026-10-21 21:07 安装），与 gitee 当前 release 资产一致。
 
 ## 4. 部署与更新
 
-设备上三个文件即全部状态（`/data/open-xiaoai/`）：
+设备状态只有三件（`/data/open-xiaoai/`）：
 
-| 文件 | 作用 |
-|---|---|
-| `server.txt` | bridge 地址（如 `ws://<群晖IP>:4399`），以设备上实际值为准 |
-| `token.txt` | 鉴权 token，须与 bridge `OPEN_XIAOAI_TOKEN` 一致 |
-| `client` | 二进制本体 |
+| 文件 | 作用 | 当前值 |
+|---|---|---|
+| `server.txt` | bridge 地址 | `ws://10.10.10.2:4399` |
+| `token.txt` | 鉴权 token，与 bridge `OPEN_XIAOAI_TOKEN` 同值 | 0600 |
+| `client` | 二进制本体 | 0755 |
 
-启动链：`/etc/rc.local:4`（只读 squashfs，重绑定动不了它）→ `sh /data/init.sh` → 读 server.txt/token.txt → kill 旧进程 → 拉起 `client`。
+**启动链**：`/etc/rc.local:4`（只读 squashfs，不可直接改）→ `sh /data/init.sh` 后台执行 → 分段完成 → 后台拉起 client。
 
-⚠ **`/data/init.sh` 在本工作区是双职责文件**：除了 client 自启，还承担 SSH 免密的 dropbear bind-mount（设备 `/` 只读且无 overlay，`/etc/dropbear` 只能靠 `mount --bind /data/etc/dropbear` 持久化）。任何一侧单独覆盖都会打断另一侧——合并版见 §6 与工作区 `deploy/lx06/init.sh`。
+`/data/init.sh` 是**多职责合并脚本**（工作区源件 [deploy/lx06/init.sh](../../deploy/lx06/init.sh)；2026-10-31 设备与工作区同 md5 `0bf481d65e6e648061608f98b073fd72`）：
 
-更新判据：
+- **A) dropbear 免密**：`/data/etc/dropbear` bind mount 到 `/etc/dropbear`；
+- **C) shadow 加固**：`/data/etc/shadow` bind mount 到 `/etc/shadow`（出厂 root 口令已失效）；
+- **B) client 自启**：等价 boot.sh + fork 的 token 读取；必须**后台**拉起（前台/exec 会让后续段永不执行）；
+- **D) 关 dropbear 密码登录**（key-only）；
+- 末尾还有：SSH 22 限源（NAS / 家庭 PC / 办公室 VPN）+ `:9022` 密码兜底实例 + B-10 时钟兜底（`/tmp/ntp.status` 缺失时后台校时）。
 
-- `boot.sh` **仅当本地无 `client` 时才下载**——直接重跑 boot.sh 不会升级，升级走 `init.sh -u` 或手工替换二进制。
-- 设备 busybox 无 `nohup`；启动脚本自带 kill 旧进程，重复拉起安全。
-- 预编译资产的真实 URL 是 `https://gitee.com/coderzc/open-xiaoai/releases/download/open-xiaoai-client/client`（**带 `/client` 资产名**）；只写到 release tag 那一级的形式实测 404（2026-10-21）。下载后校验：`file`/头 20 字节应为 ELF32 LE ARM `ET_DYN`（设备无 `od`，用 `hexdump -v -e`）。
+任何一段单独覆盖都会让其余段静默失效。改完先 `sh -n`，再重启并确认「执行到达」，不能只验文件内容。
+
+**更新判据**：
+
+- `boot.sh` / `init.sh` 默认调用只在本地无 `client` 时下载；直接重跑不会升级。
+- 升级二进制：运行上游 `init.sh -u`（只更新 `/data/open-xiaoai/client` 后退出，不触碰 `/data/init.sh`），或手工下载到 `.tmp` → 校验 → `mv` → 重启 client。**不要**用 `boot.sh` 覆盖 `/data/init.sh`。
+- 资产 URL：`https://gitee.com/coderzc/open-xiaoai/releases/download/open-xiaoai-client/client`（必须带 `/client`；只到 tag 级实测 404）。
+- 校验：md5，且头 20 字节为 ELF32 LE ARM `ET_DYN`（`03 00 28 00` 结尾）；设备无 `od`，用 `hexdump -v -e`。
+- ⚠ [deploy/README.md](../deploy/README.md) §4 第 4 步仍写着 `curl -L -o /data/init.sh .../boot.sh`；照做会覆盖合并版、丢掉 SSH 加固与自启链。以工作区 `deploy/lx06/init.sh` 为准。
+- 设备 busybox 无 `nohup`；init.sh 自带 kill 旧进程，重复拉起安全。
 
 ## 5. 已知缺陷与排障判据
 
-| 缺陷 | 影响 | 处置 |
+| 缺陷 / 机制 | 影响 | 当前处置与判据 |
 |---|---|---|
-| ASR 事件 = 10ms 轮询 tail 设备日志，**启动丢历史** | 事件源整体延迟与丢帧风险，client/bridge 重启窗口内的 ASR 文本丢失 | 机制与取证见 [AGENTS.md「ASR 事件的真实来源」](../AGENTS.md)；服务端侧对策见 `docs/plan/asr-input-reliability.md` |
-| 鉴权可选、默认明文 | token.txt 缺失即退回无鉴权 + run_shell 裸协议 | 部署时必配 token.txt；网段隔离（勿与访客 WiFi/IoT 同段） |
-| **无独立版本号**（2026-10-25 版本约定：**1.0 = 上游 idootop/open-xiaoai**，**2.0 = 现部署 coderzc/open-xiaoai-bridge**，后续整数递增，排障先对 md5 再对版本号） | 排障时无法从二进制确认构建版本 | 只能靠下载源/部署记录区分；重装即换 coderzc 最新 release。**当前部署识别（2026-10-25 实测）**：设备二进制 md5 `b12ebe6e8289de3adcdba6b5641eb843`（851,344 B，2026-10-21 经 init.sh 安装 = coderzc 最新 release）；⚠️ `client --version` 不存在——传参会当作 WS 地址把 client 拉起来挂死 |
-| 4399 连接是单一长连接 | client 掉线期间所有事件/音频中断，仅靠重连恢复 | 排障第一步先确认设备 4399 ESTABLISHED（判据见 AGENTS.md「kws.log 是死通道」节） |
-| `run_shell` 只透传设备脚本退出码，而设备脚本自身退出码不可信 | `/api/play/text`（blocking）声音已出却恒返回 `{"success": false}`——`speaker.py` 以 `exit_code == 0` 判定，而 `/usr/sbin/tts_play.sh` 末行 `[ x"$player_stat" == x"1" ] && mphelper play` 在空闲时 `player_stat=0` ⇒ rc=1 | 2026-10-21 真机 `time /usr/sbin/tts_play.sh` 实测 rc=1/≈1s 与 bridge 1.69s 对齐；bridge ticket 03 已改为「合成落盘 + `file://` + 回读」，该脚本仅兜底 |
-| 录音读循环 **500ms 无数据即退出**并自行 `stop_recording`，**不通知服务端** | 录音静默死亡后唤醒词永久失效，且服务端没有任何事件可依赖 | bridge ticket 04 的看门狗：1s 无帧执行先停后启 + 指数退避；`XiaoAI.audio_health()` 观测 |
-| `playing` 事件来自 **10ms `/bin/sh` 轮询** `mphelper mute_stat`，不是设备原生事件 | 设备端进程创建频繁；事件精度受轮询与调度影响 | ticket 05 事件适配器以 context 轮询/客户端事件影子比对；原生 `play_status_broadcast_event` 需额外部署通道 |
-| RPC **先发送、后登记 pending** | 极快的响应可能落在登记之前被丢弃，表现为一次 10s 超时（默认 `call_remote` 超时） | 排障时先看是否「响应已到但 pending 未登记」；修复语义为「先登记后发送」 |
+| ASR 文本靠 10ms 轮询 `instruction.log`；启动时 `position = 文件末尾`，每次 WS 重连 monitor 重启都从末尾起 | 重启窗口内的 ASR 永久丢失；延迟地板 10ms | bridge 侧减少重连；历史无法补拉。取证与可做项见 [AGENTS.md「ASR 事件的真实来源」](../AGENTS.md) 与 [asr-input-reliability.md](plan/asr-input-reliability.md) |
+| `playing` 靠 10ms 执行 `mphelper mute_stat`（每次新建 `/bin/sh`） | 设备进程创建频繁；精度受调度影响 | bridge 生产主源已切 native `play_status_broadcast_event`（`event_plane.source=native`，2026-10-26 起；client/native 影子并行至 2026-11-09）。native 实测快约 102ms，但 20 次中 4 次丢 `status:0`，超时兜底必须保留。client 自身轮询仍在设备上运行 |
+| 录音读循环 500ms 无数据 → `break` 并自行 `stop_recording`，不发事件 | 采集静默死亡，唤醒词永久失效 | bridge 1s 无帧看门狗「先停后启」+ 指数退避；`XiaoAI.audio_health()` |
+| 上游 token 可选，空值不加头 | 漏配 token = 无鉴权 + root shell | bridge fail closed；设备必配 `token.txt`。本机 SSH 已 key-only + 限源 + root 随机口令；**访客网段隔离仍未做** |
+| 无构建版本号（见 §3） | 无法从二进制确认来源 | 按 md5 + 安装日期识别；沿用 1.0/2.0 约定 |
+| 单一 4399 长连接 | 掉线期间事件/音频全断 | 排障第一步确认设备侧 4399 `ESTABLISHED` |
+| `run_shell` 只回传脚本退出码，而设备脚本 rc 不可信（`tts_play.sh` 空闲时 rc=1） | 声音已出却判失败 | 阻塞播报主路径已改为「合成落盘 + `file://` + 回读」；`tts_play.sh` 仅兜底，按能力表的结构化 ok / rc∈{0,1}+stderr 判据 |
+| RPC 先发送、后登记 pending | 极快响应可能先到被丢，表现为一次 10s 超时 | 查「响应已到但 pending 未登记」；客户端无修复，重试可恢复 |
+| `kws.log` 通道不存在（见 §1） | 不产生 kws 事件 | 不要据此判 client 故障；唤醒走 bridge sherpa |
+| 「停止聆听」后 KWS 全程静默，INFO 级日志看不到 `[KWS] 检测到语音` | 误判成音频链路 / client 故障 | 先查 `is_listening_disabled()`；`POST /api/audio_input` 是恢复路径，它先 enable 再回报 `listening`，不回显调用前状态（[api_server.py](../core/services/api_server.py)） |
 
-## 6. 2026-10-21 事故与恢复实录：client 文件整体丢失
+## 6. 设备落点与恢复要点
 
-**现象**：音箱「你好贾维斯」等自定义唤醒词全无响应，而设备原生「小爱同学」正常。bridge 侧 `speaker.ready` 虽 true，但 4399 无连接 ⇒ 麦克风音频、`run_shell` 设备控制全断。
+| 落点 | 内容 |
+|---|---|
+| `/data/init.sh` | 多段合并启动脚本；权威源件在工作区 [deploy/lx06/init.sh](../../deploy/lx06/init.sh) |
+| `/data/open-xiaoai/` | `client`、`server.txt`、`token.txt` |
+| `/data/etc/dropbear/` | dropbear 主机密钥（持久化 bind mount 源） |
+| `/data/etc/shadow` | 加固后的 shadow（bind mount 源） |
+| `/data/etc/config/dropbear` | key-only 配置（bind mount 源） |
+| `/data/etc/init.sh.bak-*` | 历史备份 |
 
-**根因**：不是「client 没启动」，是**设备上根本没有 client**。
+**重新配网会选择性删除 `/data` 顶层**（不是格式化）：曾出现 `init.sh` 与 `open-xiaoai/` 三件套同时消失，而 `/data/etc/device.info`、`miio.cfg`、`ai-crontab/`、`notify/`、`timer/`、`bt/` 保留。恢复前先核对哪些落点在、哪些没了，再按段补齐。
 
-1. 2026-10-19 22:10 设备重绑定清掉了 open-xiaoai 的两个落点：`/data/init.sh`（含 `.orig` 备份）与 `/data/open-xiaoai/` 三件套。
-2. 当晚为修 SSH 免密重建的 `/data/init.sh` **只写了 dropbear bind-mount 一段**，把 boot.sh 的自启链顶掉了 ⇒ 此后重启永不自启（10-21 07:15 设备重启过、仍无 client，实证）。
+**恢复顺序**：
 
-**重绑定是选择性删除，不是格式化 `/data`**（关键判据，恢复其它补丁产物时同样适用）：
-- 存活：`/data/etc/device.info`、`/data/etc/miio.cfg`、`ai-crontab/`、`notify/`、`timer/`、`bt/` 仍是 Sep 17 2025 时间戳；`/etc/rc.local` 调用点在。
-- 重写：`TOKEN`、`cacerts/`、`miio/`、`idm/`、`voip/`、`etc/binfo`、`etc/messaging.cfg` 集中在 10-19 22:09–22:10 = 重新配网。
-
-**证据边界**：设备 syslog 轮转最远只回溯到 10-20 13:45（`messages.15.gz`），22:10 那一次无日志留存 ⇒ 「`/data/open-xiaoai/` 由重绑定删除」是**同窗口两个已知落点同时消失**的时间线推定，未取到直接删除记录。
-
-**恢复动作**（2026-10-21，全部实测通过）：
-- 放 fork 版二进制（851344B，md5 `b12ebe6e8289de3adcdba6b5641eb843`）、`server.txt`、`token.txt`（0600，经 stdin 直传不落聊天）。
-- `/data/init.sh` 换成 **合并版**（A 段 dropbear bind-mount 原样保留 + B 段 client 自启），源件留档在工作区 [deploy/lx06/init.sh](../../deploy/lx06/init.sh)；旧文件备份 `/data/etc/init.sh.bak-20261021-dropbear-only`。
-- ⚠ **不要照抄 [deploy/README.md](../deploy/README.md) §4 第 4 步**（`curl -o /data/init.sh .../boot.sh`）——那会覆盖 dropbear 钩子、SSH 免密当场失效。
-
-**端到端验证**：`[KWS] 命中留证 keyword='你好贾维斯'` → `🔥 触发唤醒` → `before_wakeup returned: openai` → 小爱 native ASR `recognized` → `Bridge 接管原生 ASR`，用户确认可唤醒并连续对话。
-
-**顺带定位的一个诊断盲区**（非 client 缺陷，但会误判成 client 故障）：「停止聆听」置位后 KWS 全程静默，若日志级别恰在 INFO，DEBUG 级 `[KWS] 检测到语音` 不落盘 ⇒ 看起来像「音频没上来」。`POST /api/audio_input` 会连带执行 `kws.enable_listening()`（[api_server.py](../core/services/api_server.py) `handle_audio_input`），但它先 enable 再回报 `listening`，不回显调用前状态——排障时要**先单独查 `is_listening_disabled()` 再决定清理**。
-
-**遗留**：合并版 init.sh 只经 `sh /data/init.sh` 手工执行验证，**尚未做真实 reboot 验开机自启**——备份文件保留到该项通过后再删。
+1. 写入多段合并版 `/data/init.sh`（工作区副本），`sh -n` 语法检查；
+2. 写入 `client` / `server.txt` / `token.txt`（token 0600，经 stdin 直传，不落聊天、不入日志）；
+3. 重启设备，确认自启链：22 key-only 可登录、9022 兜底在、4399 `ESTABLISHED`、`/tmp/ntp.status` 重建、init.sh 后续段均执行到；
+4. 语音链路验证：KWS 命中 → 唤醒 → 原生 ASR `recognized` → bridge 接管。
 
 ## 参考
 
 - 上游 README（安装/编译原文）：https://github.com/coderzc/open-xiaoai/blob/main/packages/client-rust/README.md
 - 原版 README：https://github.com/idootop/open-xiaoai/blob/main/packages/client-rust/README.md
-- 设备端命令与行为（播放通道、tts_play.sh、中断处理）：[AGENTS.md「音箱设备控制命令」](../AGENTS.md)
+- 设备端命令与行为（播放通道、`tts_play.sh`、中断处理）：[AGENTS.md「音箱设备控制命令」](../AGENTS.md)
+- ASR 可靠性：[docs/plan/asr-input-reliability.md](plan/asr-input-reliability.md)
 - 服务端侧架构：[README.md 系统架构](../README.md#系统架构)
