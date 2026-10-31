@@ -23,7 +23,15 @@ BYTES_PER_SAMPLE = 2
 STRATEGY_STRONGEST = "strongest"
 STRATEGY_AVERAGE = "average"
 STRATEGY_FIXED = "fixed"
-VALID_STRATEGIES = (STRATEGY_STRONGEST, STRATEGY_AVERAGE, STRATEGY_FIXED)
+STRATEGY_BEAMFORM_FIXED = "beamform_fixed"
+STRATEGY_BEAMFORM_DOA = "beamform_doa"
+BEAMFORM_STRATEGIES = (STRATEGY_BEAMFORM_FIXED, STRATEGY_BEAMFORM_DOA)
+VALID_STRATEGIES = (
+    STRATEGY_STRONGEST,
+    STRATEGY_AVERAGE,
+    STRATEGY_FIXED,
+    *BEAMFORM_STRATEGIES,
+)
 
 
 def normalize_strategy(value, default: str = STRATEGY_STRONGEST) -> str:
@@ -209,6 +217,7 @@ class ChannelDownmixer:
         self.strategy = normalize_strategy(strategy)
         self.fixed_channel = max(0, min(int(fixed_channel), self.channels - 1))
         self.aligner = FrameAligner(self.channels)
+        self.beamformer = self._build_beamformer()
         self.selector = (
             ChannelSelector(
                 channels=self.channels,
@@ -222,15 +231,33 @@ class ChannelDownmixer:
         self.frame_count = 0
         self.current_channel = self._initial_channel()
 
+    def _build_beamformer(self):
+        if self.strategy not in BEAMFORM_STRATEGIES:
+            return None
+        if self.channels == 1:
+            return None  # 1ch 回退直通，与 average/fixed 的兼容语义一致
+        if self.channels != 6:
+            raise ValueError("beamform strategies require channels == 6")
+        # 延迟导入：numpy 只为波束策略付出，其余策略保持纯 stdlib。
+        from core.services.audio.beamform import Beamformer
+
+        mode = "fixed" if self.strategy == STRATEGY_BEAMFORM_FIXED else "doa"
+        return Beamformer(mode=mode, channels=self.channels)
+
     def _initial_channel(self):
         if self.strategy == STRATEGY_FIXED:
             return self.fixed_channel
-        if self.channels == 1 or self.strategy == STRATEGY_AVERAGE:
+        if self.channels == 1 or self.strategy in (
+            STRATEGY_AVERAGE,
+            *BEAMFORM_STRATEGIES,
+        ):
             return None
         return 0
 
     def reset(self) -> None:
         self.aligner.reset()
+        if self.beamformer is not None:
+            self.beamformer.reset()
         if self.selector is not None:
             self.selector.reset()
         self.frame_count = 0
@@ -245,7 +272,23 @@ class ChannelDownmixer:
             return aligned
         return self._downmix(aligned)
 
+    def flush(self) -> bytes:
+        """结束流：多声道不足一帧的残字节无法降混，直接丢弃。"""
+        leftover = self.aligner.flush()
+        if self.channels == 1:
+            return leftover
+        return b""
+
+    def doa_delays(self):
+        """DOA 波束当前使用的通道时延（样本）；非 DOA 策略返回 None。"""
+        if self.beamformer is None or self.beamformer.mode != "doa":
+            return None
+        return [float(value) for value in self.beamformer.last_delays]
+
     def _downmix(self, aligned: bytes) -> bytes:
+        if self.beamformer is not None:
+            return self.beamformer.feed(aligned)
+
         if self.strategy == STRATEGY_AVERAGE:
             samples = _to_samples(aligned)
             averaged = array.array(

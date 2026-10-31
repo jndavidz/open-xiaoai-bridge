@@ -45,7 +45,8 @@ open-xiaoai-bridge/
 │   │   ├── audio/
 │   │   │   ├── stream.py          # GlobalStream 全局音频流（多路输入广播）
 │   │   │   ├── codec.py           # 音频编解码
-│   │   │   ├── channels.py        # 六麦帧对齐/选麦/下混（纯 stdlib，ticket 04）
+│   │   │   ├── channels.py        # 六麦帧对齐/选麦/下混（纯 stdlib，ticket 04）；波束策略延迟导入 beamform
+│   │   │   ├── beamform.py        # 六麦延迟-求和波束（numpy；fixed/DOA 两模式，离线验证用，未接生产配置）
 │   │   │   ├── watchdog.py        # 录音通道无帧看门狗状态机（ticket 04）
 │   │   │   ├── playback_timing.py # 播放时长/完成等待纯函数原语（B-29 步 1：pcm_duration/sleep_playback_done/文本预算估算）
 │   │   │   ├── speaking_channel.py# 对话循环发声接缝（B-29 步 2）：播放 API 只经 open() 产出 session（进门即物理断录）
@@ -590,7 +591,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | GlobalStream | `audio/stream.py` | 多路输入广播（模拟 PyAudio API） |
 | VAD | `audio/vad/`（`__init__.py` + `silero.py`） | Silero ONNX 语音活动检测 + **公开订阅 seam**（P2 票 04：`subscribe_events`/`subscribe_frames` 多消费者、注销幂等、订阅者异常隔离；回调在检测线程同步上抛；第二消费者一行挂上） |
 | KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒（信心度 2.0，阈值 0.30；2026-10-28 试放宽，观察期见台账 §4）；`kws/__init__` 含 `listen_disabled` 持久开关 + **播放闸门**（`gate_on`/`gate_off`） |
-| 多声道入口 | `audio/channels.py` | 6ch 帧对齐 + 最强麦（滑窗+迟滞）/等权平均/固定声道降为 1ch；纯 stdlib |
+| 多声道入口 | `audio/channels.py` | 6ch 帧对齐 + 最强麦（滑窗+迟滞）/等权平均/固定声道降为 1ch；纯 stdlib。另有 `beamform_fixed`/`beamform_doa` 两策略（延迟导入 `audio/beamform.py`，numpy DAS；仅离线验证，未接生产 config） |
 | 录音看门狗 | `audio/watchdog.py` + `core/xiaoai.py` | 1s 无帧判死 → 先停后启 + 指数退避；`audio_health()` 暴露帧龄/策略/恢复计数 |
 | ASR | `audio/asr/sherpa.py` | Sherpa SenseVoice 离线语音识别（懒加载，INT8 量化） |
 | TTS | `tts/openai.py`, `tts/mlx_audio.py`, `tts/doubao.py` | OpenAI-compatible TTS、MLX-Audio 与豆包 TTS（一次性/本地音频播放） |
@@ -913,4 +914,4 @@ uv venv .venv-test && uv pip install --python .venv-test/bin/python aiohttp webs
 PYTHONPATH=. .venv-test/bin/python -m unittest discover -s tests -t tests -p "test_*.py"
 ```
 
-当前基线：**1034 tests OK (skipped=3)**（2026-10-30）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020，命令路径首次起播失败可见停止 +2 = 1022，长播报质量门（§15 #10，§7.1.6）+4 = 1026，纯动作提示音（§1.5）+3 = 1029，对话内裸媒体命令提示音（stop/pause）+5 = 1034。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
+当前基线：**1043 tests OK (skipped=3)**（2026-10-31）。口径：b6ae705 上为 810 项（含 5 个夹具滞后失败，B-01 补齐两处对话 fake 的 `note_raw_turn_text` 后全绿），B-02 新增 18 项设备命令 quoting / loop 闸门 = 828，B-03 新增 18 项完成代次/质量门用例 = 846，B-04 新增 11 项托管 store/executor = 857，B-05 新增 19 项命令/事件/SSE = 876，B-06 新增 27 项 EOF/后端矩阵/运行期/迁移 = 903，B-05 收尾（预算/observed/CORS）新增 6 项 = 909，B-07 focus/四 provider 新增 18 项 = 927，接线新增 7 项 = 934，真机修复（`unknown` 不接管、媒体命令单轮、去抖 5s）后 = 951，B-09 GENA 新增 15 项 = 966，B-08 设备执行接线新增 10 项 = 976（同批含解析器用例 = 980），duration 补写/快照字段 = 981，推进失败跳过（#12）= 985，并发推进守卫（#13）= 986，裸媒体命令 +19 = 1008，stop-unknown +2 = 1010，livez/readyz/traceparent +5 = 1015，native 僵尸 watchdog +1 = 1016，stop 设备确认 +1 = 1017，focus 健康面 +1 = 1018，阻塞播报起播序号（§15 #9）+2 = 1020，命令路径首次起播失败可见停止 +2 = 1022，长播报质量门（§15 #10，§7.1.6）+4 = 1026，纯动作提示音（§1.5）+3 = 1029，对话内裸媒体命令提示音（stop/pause）+5 = 1034，六麦波束 fixed/DOA/契约 +9 = 1043（2026-10-31，`test_audio_beamform.py`）。历史：706（2026-10-27，B-31/B-32 批后）。每次 main 合入后应复跑此基线；现场树若含他票未提交的测试工作，计数会高于基线，按文件归属折算。onnxruntime/sherpa-onnx 等重依赖仅功能运行需要，测试不需要（`test_pipeline.py` 自带 sherpa_onnx stub）。
