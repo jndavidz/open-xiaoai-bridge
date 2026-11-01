@@ -300,8 +300,9 @@ sleep(Duration::from_millis(10)).await;           // 轮询间隔
 
 **三个坑**：
 
-0. **LX06 硬件是 6 麦，不是 8 麦**（真机逐通道实测：ch0~ch5 有信号，**ch6/ch7 恒零**；
-   `hw:0,3` 的 8ch 只是音频格式）。6 路底噪接近（−59~−55 dBFS）⇒ 环形阵列等权、
+0. **LX06 硬件是 6 麦，不是 8 麦**（真机逐通道实测：ch0~ch5 有信号；ch6/ch7 非麦克风——
+   **空闲态恒零，播放时是回声参考对**，两者完全相同；`hw:0,3` 的 8ch 只是音频格式）。
+   6 路底噪接近（−59~−55 dBFS）⇒ 环形阵列等权、
    无明显主通道 ⇒ 不要指望「取单通道最优」能提升识别率。
    详见 [`docs/plan/asr-input-reliability.md`](docs/plan/asr-input-reliability.md) §1.1；待办见 [`docs/plan/README.md`](docs/plan/README.md) B-03
 

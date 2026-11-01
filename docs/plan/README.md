@@ -38,7 +38,7 @@
 
 | 项 | 事实 | 取证 |
 |---|---|---|
-| 麦克风 | **6 麦**（`hw:0,3` 以 8ch 暴露，ch6/ch7 恒零、非零率 0.00%） | `run/n2-six-mic-array-verified.md` §1 |
+| 麦克风 | **6 麦**（`hw:0,3` 以 8ch 暴露；ch6/ch7 非麦克风：空闲恒零、**播放时为回声参考对**——2026-10-31 勘误，workspace `docs/devices/lx06/mic-array-6ch-capture.md` §11） | `run/n2-six-mic-array-verified.md` §1 |
 | 采集入口 | `noop` ≡ `mico_record`（`dsnoop`），可与 `mipns-xiaomi` 并发 | 同上 §4.1 / §4.2 |
 | 采集规格 | `-c 6 -f S16_LE -r 16000` 一次到位（ALSA plug 做 48k/S32→16k/S16 + 裁通道），**192 KB/s** | 同上 §4.5 |
 | `channels` 来源 | bridge 经 RPC 下发的 `AudioConfig`（client `.rodata 0xbcf1a` 只有 argv 骨架）⇒ **改 bridge 常量即可，client 不用重编** | 同上 §4.5；`plan/ROADMAP.md` §3.2 |
@@ -396,7 +396,7 @@ procd respawn 语义**，是权威探针。`respawn.retry=0` = **无限重启**�
 | 旧文档 / 旧断言 | 现行权威 |
 |---|---|
 | `pending-decisions.md`（6 项待定索引） | **本文 §2**（1/2/6 → B-09、B-04；3 → B-02；4 → B-10；5 → §2 台账结案） |
-| `asr-input-reliability.md`「8ch 阵列」 | ❌ 6 麦（ch6/ch7 恒零）→ §1 |
+| `asr-input-reliability.md`「8ch 阵列」 | ❌ 6 麦（ch6/ch7 空闲恒零；播放时为回声参考对，2026-10-31 勘误 → workspace mic-array §11）→ §1 |
 | `asr-input-reliability.md`「下混损失约 3.8 dB」 | ❌ **8.33 dB peak / 10.54 dB rms** → `run/n2-six-mic-array-verified.md` §3 |
 | `asr-input-reliability.md`「非对角相关 0.573」 | ❌ **0.111**（声场不同，独立性更强）→ 同上 §2 |
 | `asr-input-reliability.md`「6ch 直采需改 client，已排除」 | ❌ `channels` 由 bridge 下发 ⇒ 不需改 client → §1、§3.3（B-03） |
