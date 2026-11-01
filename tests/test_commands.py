@@ -31,7 +31,8 @@ if str(TESTS_DIR) not in sys.path:
 
 from core import ref  # noqa: E402
 from core.commands import route_before_wakeup, run_steps  # noqa: E402
-from core.commands.router import STOP_LISTENING_KEYWORD  # noqa: E402
+from core.commands import router as router_mod  # noqa: E402
+from core.commands.router import STOP_LISTENING_CONFIRM_PROMPT, STOP_LISTENING_KEYWORD  # noqa: E402
 
 
 def _run(coro):
@@ -54,7 +55,7 @@ class FakeSpeaker:
         self.mic = True
         self.announce_error = announce_error
 
-    def announce(self, *, text, reason, wait, gate_seconds):
+    def announce(self, *, text, reason, wait, gate_seconds, exempt=False):
         self.calls.append(("announce:open", text, reason))
         if self.announce_error is not None:
             raise self.announce_error
@@ -275,6 +276,7 @@ class MediaCommandAckTest(unittest.TestCase):
 
 class RouterContractTest(unittest.TestCase):
     def setUp(self):
+        router_mod.stop_listening_confirm.reset()  # 模块级单例跨用例复位
         self.speaker = FakeSpeaker()
         self.app = FakeApp()
         self.direct = {
@@ -342,23 +344,90 @@ class RouterContractTest(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(self.speaker.calls, [])
 
-    def test_stop_listening_mutes_mic_and_disables_kws(self) -> None:
+    def _route_stop(self, now: float = 1000.0):
+        with mock.patch.object(router_mod, "monotonic", return_value=now):
+            return self._route(STOP_LISTENING_KEYWORD, "kws")
+
+    def test_stop_listening_first_time_arms_and_asks_confirmation(self) -> None:
+        """高影响命令二次确认：首次只武装 + 经 announce 闸门播提示，绝不立即执行。
+
+        「停止聆听」执行后不可经语音恢复（mic 静音 + KWS 永久停），误触发代价
+        不对称 ⇒ 复述确认（15s 内再说一次）。
+        """
         kws = FakeKWS()
         ref.set_kws(kws)
         try:
-            result = self._route(STOP_LISTENING_KEYWORD, "kws")
+            result = self._route_stop()
         finally:
             ref.set_kws(None)
 
         self.assertIsNone(result)
-        self.assertFalse(self.speaker.mic, "硬件麦克风已静音")
-        self.assertTrue(kws.disabled, "KWS 持久停止分析")
+        self.assertTrue(self.speaker.mic, "首次触发绝不静音")
+        self.assertFalse(kws.disabled, "首次触发绝不持久停听")
+        self.assertTrue(router_mod.stop_listening_confirm.pending, "确认态已武装")
         self.assertEqual(
             [c[0] for c in self.speaker.calls],
-            ["set_mic", "play"],
-            "先静音停听再播报确认",
+            ["announce:open", "play", "announce:close"],
+            "确认提示经 announce 双闸门（文案含口令本身，直播冒自触发风险）",
         )
+        self.assertIn(("play", STOP_LISTENING_CONFIRM_PROMPT), self.speaker.calls)
+
+    def test_stop_listening_confirmed_second_time_executes(self) -> None:
+        kws = FakeKWS()
+        ref.set_kws(kws)
+        try:
+            self._route_stop(now=1000.0)
+            result = self._route_stop(now=1005.0)
+        finally:
+            ref.set_kws(None)
+
+        self.assertIsNone(result)
+        self.assertFalse(self.speaker.mic, "复述确认后硬件麦克风已静音")
+        self.assertTrue(kws.disabled, "复述确认后 KWS 持久停止分析")
         self.assertIn(("play", "已停止聆听"), self.speaker.calls)
+        self.assertFalse(router_mod.stop_listening_confirm.pending, "执行后确认态已消费")
+
+    def test_stop_listening_confirmation_expires_then_rearms(self) -> None:
+        kws = FakeKWS()
+        ref.set_kws(kws)
+        try:
+            self._route_stop(now=1000.0)
+            self._route_stop(now=1000.0 + router_mod.STOP_LISTENING_CONFIRM_SECONDS + 1)
+        finally:
+            ref.set_kws(None)
+
+        self.assertTrue(self.speaker.mic, "确认超时后复述 = 重新武装，不执行")
+        self.assertFalse(kws.disabled)
+        self.assertEqual(
+            [c[0] for c in self.speaker.calls].count("play"),
+            2,
+            "两次触发各播一次确认提示",
+        )
+
+    def test_other_command_cancels_pending_stop_confirmation(self) -> None:
+        ha_calls: list[tuple] = []
+
+        async def _fake_hass(domain, service, data=None):
+            ha_calls.append((domain, service, data))
+            return 200
+
+        kws = FakeKWS()
+        ref.set_kws(kws)
+        try:
+            with mock.patch.object(router_mod, "monotonic", return_value=1000.0):
+                self._route(STOP_LISTENING_KEYWORD, "kws")
+            with mock.patch("core.commands.hass.hass_action", _fake_hass):
+                self._route("下一首歌曲", "kws")
+            with mock.patch.object(router_mod, "monotonic", return_value=1002.0):
+                self._route(STOP_LISTENING_KEYWORD, "kws")
+        finally:
+            ref.set_kws(None)
+
+        self.assertEqual(ha_calls, [("script", "turn_on", {"entity_id": "script.music_next"})],
+                         "确认期内说其他指令：指令照常执行")
+        self.assertTrue(self.speaker.mic, "旧确认态已取消，不得被无关指令顶替成执行")
+        self.assertFalse(kws.disabled)
+        self.assertTrue(router_mod.stop_listening_confirm.pending, "末次触发重新武装")
 
     def test_persona_switch_sets_session_and_prompt(self) -> None:
         result = self._route("你好老师讲个题", "kws")

@@ -11,12 +11,51 @@ config 保留路由钩子（before_wakeup）并把两张指令表 + 人设表作
                         返回 None（不进原生小爱）；未命中 → None（放行原生小爱）。
 """
 
+from time import monotonic
+
 from core.commands.executor import run_steps
 from core.commands.matching import normalize_command_text, resolve_command_key
 from core.ref import get_kws
 from core.utils.logger import logger
 
 STOP_LISTENING_KEYWORD = "停止聆听"
+STOP_LISTENING_CONFIRM_SECONDS = 15.0
+STOP_LISTENING_CONFIRM_PROMPT = "即将停止聆听并静音麦克风，如确认请再说一次停止聆听"
+
+
+class _ConfirmGate:
+    """「停止聆听」复述确认状态机（高影响命令二次确认闸门）。
+
+    该命令执行后不可经语音恢复（mic 静音 + KWS 持久停，唯一恢复路径是
+    HTTP /api/audio_input），误触发代价不对称 ⇒ 首次触发只武装不执行，
+    timeout_s 内再次说出同一口令才真正执行；确认期内说了任何其他内容
+    （其他免唤醒指令 / 人设 / 进对话）即取消。
+    """
+
+    def __init__(self, timeout_s: float = STOP_LISTENING_CONFIRM_SECONDS) -> None:
+        self.timeout_s = timeout_s
+        self._armed_at: float | None = None
+
+    def reset(self) -> None:
+        self._armed_at = None
+
+    @property
+    def pending(self) -> bool:
+        return self._armed_at is not None
+
+    def arm_or_confirm(self, now: float) -> bool:
+        """返回 True=已复述确认（应执行）；False=本次武装（应播确认提示）。"""
+        if self._armed_at is not None and now - self._armed_at <= self.timeout_s:
+            self._armed_at = None
+            return True
+        self._armed_at = now
+        return False
+
+    def cancel(self) -> None:
+        self._armed_at = None
+
+
+stop_listening_confirm = _ConfirmGate()
 
 
 async def clear_device_audio(speaker):
@@ -71,12 +110,30 @@ async def route_before_wakeup(
     if source == "kws":
         steps_key = resolve_command_key(text, direct_table or {}, aliases)
         steps = (direct_table or {}).get(steps_key) if steps_key else None
+        is_stop = normalize_command_text(key) == normalize_command_text(STOP_LISTENING_KEYWORD)
+        if stop_listening_confirm.pending and not is_stop:
+            # 确认等待期内说了别的内容：视为改主意，取消确认态并按原逻辑继续
+            stop_listening_confirm.cancel()
+            logger.info("[commands] 停止聆听二次确认已取消（确认期内说了其他内容）")
         if steps is not None:
             await run_steps(speaker, steps)
             return None  # 执行完毕，不进入 AI 连续对话
 
-        if normalize_command_text(key) == normalize_command_text(STOP_LISTENING_KEYWORD):
-            return await stop_listening(speaker)
+        if is_stop:
+            if stop_listening_confirm.arm_or_confirm(monotonic()):
+                return await stop_listening(speaker)
+            # 首次触发：只播确认提示，不执行。文案含口令「停止聆听」本身，
+            # 必须经 announce 双闸门 + exempt（播报期间 KWS 已闸门，不冒自触发）。
+            logger.info("[commands] 停止聆听首次触发，等待复述确认")
+            async with speaker.announce(
+                text=STOP_LISTENING_CONFIRM_PROMPT,
+                reason="stop-listening confirm",
+                exempt=True,  # 桥自持固定文案，播报期间 KWS 已闸门
+                wait=False,  # play 阻塞式内含等完成
+                gate_seconds=STOP_LISTENING_CONFIRM_SECONDS,
+            ):
+                await speaker.play(text=STOP_LISTENING_CONFIRM_PROMPT)
+            return None
 
         for word, persona in (personas or {}).items():
             if word in key:
