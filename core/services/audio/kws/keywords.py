@@ -53,13 +53,27 @@ def should_generate_keywords():
 
 def get_args():
     config = ConfigManager.instance()
-    tokens_type = "cjkchar+bpe"
     tokens = get_model_file_path("tokens.txt")
     bpe_model = get_model_file_path("bpe.model")
+    # tokens_type 随模型形态自适应（2026-11-01 主路切候选 wenetspeech 拼音 tokens
+    # 模型后，硬编码 cjkchar+bpe + bpe.model 必需导致启动崩溃循环）：
+    #   - 有 bpe.model（现网模型）：cjkchar+bpe；
+    #   - 无 bpe.model（拼音 tokens 模型，官方不发布 bpe）：ppinyin，bpe 不再必需。
+    has_bpe = Path(bpe_model).is_file()
+    tokens_type = "cjkchar+bpe" if has_bpe else "ppinyin"
     output = get_model_file_path("keywords.txt")
     keywords = config.get_app_config("wakeup.keywords", [])
     texts = [f"{keyword.upper()}" for keyword in keywords]
     return locals()
+
+
+def missing_required_files():
+    """启动自检：tokens.txt 必需；bpe.model 仅在 cjkchar+bpe 形态下必需。"""
+    tokens = get_model_file_path("tokens.txt")
+    bpe_model = get_model_file_path("bpe.model")
+    required = [tokens] if Path(bpe_model).is_file() else []
+    required.insert(0, tokens)
+    return [path for path in required if not Path(path).is_file()]
 
 
 def main():
@@ -68,11 +82,7 @@ def main():
         logger.debug(f"Keyword generation skipped: {reason}", module="KWS")
         return 0
 
-    required_files = [
-        get_model_file_path("tokens.txt"),
-        get_model_file_path("bpe.model"),
-    ]
-    missing_files = [path for path in required_files if not Path(path).is_file()]
+    missing_files = missing_required_files()
     if missing_files:
         logger.debug(
             "Keyword generation failed: missing model files: "
