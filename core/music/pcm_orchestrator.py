@@ -1,8 +1,8 @@
 """TTS/音乐互斥编排器（pcm-backend spec 票 02，本 spec 核心需求）。
 
 spike 耳测实锤（pending-followups §1.11）：PCM 推流（aplay/dmix）与固件 TTS
-（miplayer→mipns）双时钟源并发混音出噪音。编排器把原厂 tts_play.sh 的
-「pause→TTS→play」互斥模式搬到桥侧：
+（mipns 播报链）双时钟源并发混音出噪音。编排器把原厂播放脚本（tts-play 原语）
+的「pause→TTS→play」互斥模式搬到桥侧：
 
   - TTS 起播前（经由 PcmBackend 暴露的 pause）自动停推音乐并记忆偏移；
   - TTS 结束（focus 归还 → resume）后从记忆偏移 start_ms 续推；
