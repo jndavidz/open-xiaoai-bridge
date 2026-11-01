@@ -70,11 +70,15 @@ class BridgeSideEndOfTrackTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.store = ManagedStore(Path(self._tmp.name) / "p.db")
+        from core.music.service import ManagedService
+
+        self.service = ManagedService(store=self.store)
         self.native = FakeNative()
         self.orch = PcmOrchestrator(native=self.native)
         self.backend = PcmBackend(orchestrator=self.orch)
         self.now = [0.0]
-        self.sid = self.store.open_session(target="lx06").session_id
+        self.sid = self.store.open_session(target="lx06", transport="rpc",
+                                           player_backend="mediaplayer").session_id
 
     def tearDown(self) -> None:
         self.store.close()
@@ -120,6 +124,54 @@ class BridgeSideEndOfTrackTest(unittest.IsolatedAsyncioTestCase):
         self.now[0] = 1.0
         decision = await runtime.tick_once()
         self.assertIs(Decision.ADVANCE, decision)
+
+    async def test_position_feed_publishes_to_session_snapshot(self) -> None:
+        # 桥侧记账位置必须进会话快照（App/SSE 可观测），否则 /api/music 快照
+        # position 恒 None（2026-11-02 真机验收 P3 暴露）。
+        self.store.append(self.sid, TrackRef.make("kuwo", "a"), duration_s=100)
+
+        async def resolve(entry):
+            return f"http://cdn/{entry.ref.id}.mp3"
+
+        player = ManagedQueuePlayer(self.store, self.backend, resolve,
+                                    clock=lambda: self.now[0])
+        runtime = ManagedRuntime(player, service=self.service)
+        runtime.bind(self.sid)
+        await runtime.start_current(self.sid)
+        self.native.progress(100, 5_000)
+        self.now[0] = 1.0
+        await runtime.tick_once()
+        snap = runtime.service.snapshot(self.sid)
+        pos = snap.get("position")
+        self.assertIsNotNone(pos, "position must be published to the snapshot")
+        self.assertAlmostEqual(pos["position_s"], 5.0, places=2)
+        self.assertEqual(pos["operation"], "pcm-accounted")
+        self.assertEqual(pos["transport"], "rpc")
+
+    async def test_seek_command_unlocked_for_pcm(self) -> None:
+        # B-06 时代 service.command 对 seek 硬拒；pcm backend 落地后必须放行
+        # （票 03/04 桥侧重投），否则 HTTP seek 一直 400。
+        from core.music.service import ManagedService
+
+        self.service2 = ManagedService(store=self.store)
+        self.store.append(self.sid, TrackRef.make("kuwo", "a"), duration_s=200)
+
+        async def resolve(entry):
+            return f"http://cdn/{entry.ref.id}.mp3"
+
+        player = ManagedQueuePlayer(self.store, self.backend, resolve,
+                                    clock=lambda: self.now[0])
+        runtime = ManagedRuntime(player, service=self.service2)
+        runtime.bind(self.sid)
+        await runtime.start_current(self.sid)
+        receipt = self.service2.command(
+            self.sid, kind="seek", payload={"position_s": 150.0},
+            principal="acceptance", idem_key="seek-1", target="lx06",
+        )
+        self.assertEqual(receipt.state, "accepted")
+        # 设备执行侧走 player.seek（桥侧重投）
+        await runtime.player.seek(self.sid, 150.0)
+        self.assertEqual(self.native.starts[-1], ("http://cdn/a.mp3", 150_000))
 
     async def test_url_backend_tick_has_no_position_feed(self) -> None:
         # 双轨：url backend 无 position 能力，tick 不额外查询（行为冻结）

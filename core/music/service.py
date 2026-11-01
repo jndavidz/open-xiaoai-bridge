@@ -157,9 +157,6 @@ class ManagedService:
         state = self.store.get(session_id)
         if state is None:
             raise SessionNotFound(session_id)
-        if kind == "seek":
-            # 设备适配（B-06）落地前如实拒绝，不假装接受一个不会执行的能力
-            raise ManagedError("seek is not supported by the managed adapter yet")
         if target is not None and state.target and str(target) != state.target:
             raise TargetMismatch(
                 f"target {target!r} does not match session target {state.target!r}")

@@ -250,6 +250,9 @@ async def _apply_locked(runtime, service: ManagedService, session_id: str,
                                 detail="start failed; session stopped visibly")
                 return
             await runtime.start()
+        elif kind == "seek":
+            runtime.bind(session_id)
+            await runtime.player.seek(session_id, float((payload or {}).get("position_s") or 0))
         elif kind == "stop":
             from core.music import focus_bridge
 
