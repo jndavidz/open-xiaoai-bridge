@@ -24,7 +24,7 @@ from core.music.model import ManagedError, SessionNotFound, StaleEpoch, TrackRef
 from core.music.service import ConflictError, ManagedService, TargetMismatch
 
 DEFAULT_BUDGET_MS = 15000
-DEVICE_COMMANDS = ("play", "pause", "resume", "next", "prev", "stop")
+DEVICE_COMMANDS = ("play", "pause", "resume", "next", "prev", "stop", "seek")
 
 
 def _command_budget() -> RetryBudget:

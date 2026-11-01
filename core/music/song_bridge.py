@@ -168,7 +168,7 @@ async def _command_locked(kind: str, **payload) -> str:
     return f"托管命令已受理（{kind}, {receipt.state}）"
 
 
-DEVICE_COMMANDS = ("play", "pause", "resume", "next", "prev", "stop")
+DEVICE_COMMANDS = ("play", "pause", "resume", "next", "prev", "stop", "seek")
 
 # 设备动作必须串行：play 的解析/准备可能几十秒，期间的 stop/pause 若并行执行，
 # 会出现「stop 先解绑、play 后 start」的幽灵会话（设备在响但运行期没绑定）。

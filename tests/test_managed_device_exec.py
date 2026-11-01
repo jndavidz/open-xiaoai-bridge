@@ -233,7 +233,7 @@ class ScheduleDeviceTest(unittest.IsolatedAsyncioTestCase):
             seen.append((sid, kind, rid))
 
         api.set_device_executor(executor)
-        api._schedule_device("ms-1", "seek", "r-1")
+        api._schedule_device("ms-1", "rewind", "r-1")  # seek 已是合法设备 kind（B-36），换真未知样本
         await asyncio.sleep(0)
         self.assertEqual(seen, [])
 
