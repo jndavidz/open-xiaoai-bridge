@@ -1,7 +1,6 @@
 pub mod decoder;
 pub mod doubao;
 pub mod pcm_stream;
-pub mod spike;
 
 use crate::tts::decoder::{decode_audio_to_pcm, StreamingDecoder};
 use crate::tts::doubao::DoubaoStreamClient;
@@ -928,9 +927,6 @@ pub fn stop_tts_playback(token: Option<u64>) {
 }
 
 pub fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(spike::spike_start_play, m)?)?;
-    m.add_function(wrap_pyfunction!(spike::spike_stop, m)?)?;
-    m.add_function(wrap_pyfunction!(spike::spike_stream_source, m)?)?;
     m.add_function(wrap_pyfunction!(pcm_stream::pcm_stream_start, m)?)?;
     m.add_function(wrap_pyfunction!(pcm_stream::pcm_stream_stop, m)?)?;
     m.add_function(wrap_pyfunction!(pcm_stream::pcm_session_state, m)?)?;

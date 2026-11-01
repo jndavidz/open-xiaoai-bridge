@@ -563,7 +563,6 @@ class APIServer:
         self.app.router.add_get("/livez", self.handle_livez)
         self.app.router.add_get("/readyz", self.handle_readyz)
         # TTS endpoints
-        self.app.router.add_post("/api/spike/pcm", self.handle_spike_pcm)  # spike（收口后删）
         self.app.router.add_post("/api/tts/doubao", self.handle_tts_doubao)
         self.app.router.add_get("/api/tts/doubao_voices", self.handle_tts_voices)
         self._setup_managed_routes()
@@ -1036,67 +1035,6 @@ class APIServer:
                 {"success": False, "error": str(e)},
                 status=500
             )
-
-    # ---- PCM 流式代理 spike（临时验证，见 docs/plan/pending-followups.md「PCM 流式代理 spike」）----
-    # 收口后整段删除（含路由注册）。token 状态只存实例字段，重启即清。
-    _spike_token: int | None = None
-
-    async def handle_spike_pcm(self, request: web.Request) -> web.Response:
-        """
-        POST /api/spike/pcm
-        PCM 流式代理 spike 端点：推流音乐文件/直链到 client PCM 通道（可带 offset 续推）。
-
-        body:
-          - action: "start"(默认) | "stop"
-          - path: 本地路径（容器内，如 /app/data/spike/x.wav）或 http(s) 直链；start 必填
-          - start_ms: 续推偏移毫秒（默认 0）
-          - playback_token: 可选，接续上次会话
-          - sample_rate/channels/period_size/buffer_size: 仅 action=start_play 手动实验用
-        """
-        try:
-            import open_xiaoai_server as native
-
-            data = await request.json()
-        except Exception as e:
-            return web.json_response({"success": False, "error": f"bad request: {e}"}, status=400)
-
-        action = data.get("action", "start")
-        logger.info(f"[APIServer] spike/pcm action={action} data={ {k: v for k, v in data.items() if k != 'path'} } path={data.get('path')}")
-
-        try:
-            if action == "stop":
-                tok = self._spike_token
-                native.spike_stop(tok)
-                self._spike_token = None
-                return web.json_response({"success": True, "stopped_token": tok})
-
-            if action == "start_play":
-                # 手动实验：只下发 start_play，不推流
-                await native.spike_start_play(
-                    int(data.get("sample_rate", 48000)),
-                    int(data.get("channels", 2)),
-                    data.get("period_size"),
-                    data.get("buffer_size"),
-                )
-                return web.json_response({"success": True, "action": "start_play"})
-
-            if action != "start":
-                return web.json_response({"success": False, "error": f"unknown action {action}"}, status=400)
-
-            source = data.get("path")
-            if not source:
-                return web.json_response({"success": False, "error": "path required"}, status=400)
-            start_ms = int(data.get("start_ms", 0))
-            token = await native.spike_stream_source(
-                str(source),
-                start_ms=start_ms,
-                playback_token=data.get("playback_token"),
-            )
-            self._spike_token = int(token)
-            return web.json_response({"success": True, "token": int(token), "start_ms": start_ms})
-        except Exception as e:
-            logger.error(f"[APIServer] spike/pcm failed: {type(e).__name__}: {e}")
-            return web.json_response({"success": False, "error": str(e)}, status=500)
 
     async def handle_stop(self, request: web.Request) -> web.Response:
         """
