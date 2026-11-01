@@ -9,11 +9,16 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from core.music.player import Decision, ManagedQueuePlayer
 from core.utils.logger import logger
 
 _RUNTIME: "ManagedRuntime | None" = None
+
+# 桥侧位置写快照的节流：SQLite 单事务写全会话，1s tick 全写太密；
+# 5s 一次对「快照新鲜度」（fresh_for_s=8s）与写放大都是折中。
+POSITION_PUBLISH_INTERVAL_S = 5.0
 
 
 class ManagedRuntime:
@@ -25,6 +30,7 @@ class ManagedRuntime:
         self.max_start_attempts = max(1, int(max_start_attempts))
         self.session_id: str | None = None
         self._task: asyncio.Task | None = None
+        self._last_position_publish = 0.0
         self.ticks = 0
 
     def bind(self, session_id: str | None) -> None:
@@ -92,6 +98,7 @@ class ManagedRuntime:
             return
         if pos is not None:
             self.player.update_position(pos)
+            self._publish_position(pos)
         # backend 起播后才拿得到时长时补缺（pcm：native 流头解析），否则
         # 无 duration_s 的条目 EOF 判定永远 unknown、播完不推进。
         duration_fn = getattr(backend, "duration_s", None)
@@ -102,6 +109,36 @@ class ManagedRuntime:
                 from core.utils.logger import logger
 
                 logger.debug(f"[ManagedRuntime] duration feed failed: {exc}")
+
+    def _publish_position(self, pos_s: float) -> None:
+        """把桥侧记账位置写进会话快照（pcm-backend 票 05 验收 P3 修复）。
+
+        PCM 会话没有设备位置回读——快照 position 由桥侧记账发布，App/SSE
+        的可观测面才不为 None。transport/player_backend 与会话一致由
+        store._check_snapshot 强制。
+        """
+
+        if self.service is None or not self.session_id:
+            return
+        now = time.time()
+        if now - self._last_position_publish < POSITION_PUBLISH_INTERVAL_S:
+            return
+        from core.music.model import PositionSnapshot
+
+        try:
+            state = self.service.store.get(self.session_id)
+            if state is None:
+                return
+            self.service.store.set_position(
+                self.session_id,
+                PositionSnapshot(position_s=pos_s, sampled_at=now,
+                                 operation="pcm-accounted", fresh_for_s=8.0,
+                                 transport=state.transport,
+                                 player_backend=state.player_backend),
+            )
+            self._last_position_publish = now
+        except Exception as exc:  # noqa: BLE001 - 快照发布失败不阻推进判定
+            logger.debug(f"[ManagedRuntime] position publish failed: {exc}")
 
     async def start_current(self, session_id: str) -> bool:
         """起播当前项；失败按有界次数跳过，末项失败由 `skip_failed` 落成可见停止。

@@ -228,17 +228,22 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 
 ## 8.5 托管播放（managed）开关与回滚
 
-**现网状态（2026-10-30）**：`song_request.managed = True`、`managed_media_resolver = "songloft"`，
-`MANAGED_TOKENS` 与 `SONGLOFT_PASSWORD` 已注入容器；镜像 `5fdbd365f545`
-（回滚 tag `rollback-pre-b08-20261030`）。生产配置以 `deploy/config.py` 为权威（根 `config.py`
+**现网状态（2026-11-02）**：`song_request.managed = True`、`managed_media_resolver = "songloft"`、
+`playback_backend = "url"`（pcm 已上生产待显式开启）；`SONGLOFT_PASSWORD` **归口 `.env`**
+（2026-11-02 401 修复：songloft admin 密码启动时从 env hash 进内存，compose 改
+`${SONGLOFT_PASSWORD:?}` 引用；旧硬编码值已作废，轮换待办）；
+镜像 `open-xiaoai-bridge:home` = `pcm-20261102`（bridge `45422a7`，含 B-36 PCM 推流
++ spike 摘除），回滚支点 `rollback-pre-pcm-20261102` + `.env.bak-pre-pcm-20261102` +
+`config.py.bak-pre-pcm-20261102`。生产配置以 `deploy/config.py` 为权威（根 `config.py`
 是开发基线，**勿再整份覆盖到 NAS**——2026-10-30 曾因此丢掉 personas/唤醒词，备份
 `config.py.bak-devconfig-20261030`）。
 
 - **开关**：`song_request.managed`（`managed_target` 与 `MANAGED_TOKENS.targets` 一致），
   `managed_media_resolver` 选 `songloft`（经 Songloft 准备链拿票据 URL）或 `kwqq`（回滚模式）；
   **`playback_backend` 选 `url`（默认 = mediaplayer RPC 投送，2026-11-01 基线）或 `pcm`**
-  （桥侧 PCM 推流 + TTS 互斥编排，pcm-backend spec 票 04；上线初期保持 url，
-  真机互斥耳测通过后显式切换，切回 url 即回滚零代码）；
+  （桥侧 PCM 推流 + TTS 互斥编排，pcm-backend spec 票 04/B-36；**现值 url**——pcm 机器
+  验收全过（票 05 §Answer），切 pcm 常开待人耳验收（互斥无噪音/音质）；
+  切回 url 即回滚零代码）；
   改完 `docker compose up -d`（配置是 bind-mount，不重建镜像）。
   未配 `MANAGED_TOKENS` 时托管面一律 **503 fail-closed**；配了但无凭据 **401**——都不是故障。
 - **行为**（真机已验证）：点歌 = **单轮**（说完即退出对话）；`停止/暂停/继续/上一首/下一首`
