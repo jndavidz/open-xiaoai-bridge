@@ -175,6 +175,16 @@ class PcmOrchestrator:
         logger.info(f"[PcmOrchestrator] resumed from {offset} ms (token={token})")
         return offset
 
+    async def seek_to(self, pos_ms: int) -> None:
+        """桥侧重投：停推并从指定偏移重新起推（无活跃会话则明拒）。"""
+
+        if self._session is None:
+            raise PcmNativeError("no active pcm session")
+        if self._state == "playing":
+            await self.pause()
+        self._session["position"] = max(0, int(pos_ms))
+        await self.resume()
+
     async def stop(self) -> None:
         """显式停止：停推并丢弃会话（换曲/用户停止/队列结束）。"""
 

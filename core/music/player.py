@@ -60,6 +60,10 @@ class BackendProfile:
 DLNA = BackendProfile(name="dlna", position=False, seek=False, resume=False, stop=True)
 RPC = BackendProfile(name="rpc-mediaplayer", position=False, seek=False, resume=True,
                      stop=True, wraparound_compensation=False)
+# PCM 推流（pcm-backend spec 票 03）：position/seek 全部由桥侧记账/重投回答，
+# 不依赖设备回读（PCM 会话不碰设备 status）。
+PCM = BackendProfile(name="pcm-stream", position=True, seek=True, resume=True,
+                     stop=True, wraparound_compensation=False)
 
 
 class EndOfTrackDetector:
@@ -414,14 +418,22 @@ class ManagedQueuePlayer:
         self.store.transition(session_id, _mark_resumed, events=[{"kind": "resumed"}])
 
     async def seek(self, session_id: str, position_s: float) -> None:
-        """停止后迟到 seek 不得偷偷 Play；未验证能力的 backend 一律明拒。"""
+        """停止后迟到 seek 不得偷偷 Play；未验证能力的 backend 一律明拒。
+
+        backend 提供自己的 seek 实现时委托（pcm backend = 桥侧重投），
+        并把新位置喂给探测器，EOF 记账从新偏移继续。
+        """
 
         state = self._require(session_id)
         if not self.backend.profile.seek:
             raise Unsupported(f"backend {self.backend.profile.name} has no verified seek")
         if state.phase not in (Phase.PLAYING, Phase.PAUSED):
             raise Unsupported("seek requires an active playback")
-        raise Unsupported("seek is not implemented for the managed adapter yet")
+        seek_impl = getattr(self.backend, "seek", None)
+        if seek_impl is None:
+            raise Unsupported("seek is not implemented for the managed adapter yet")
+        await seek_impl(position_s)
+        self.update_position(position_s)
 
     def update_position(self, position_s: float) -> None:
         """喂入一次位置观测（仅 position 能力已声明的 backend 有意义）。"""
