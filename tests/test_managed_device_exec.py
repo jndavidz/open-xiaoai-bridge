@@ -217,7 +217,7 @@ class ScheduleDeviceTest(unittest.IsolatedAsyncioTestCase):
         api = self._api()
         seen: list[tuple] = []
 
-        async def executor(sid, kind, rid):
+        async def executor(sid, kind, rid, payload=None):
             seen.append((sid, kind, rid))
 
         api.set_device_executor(executor)
@@ -229,7 +229,7 @@ class ScheduleDeviceTest(unittest.IsolatedAsyncioTestCase):
         api = self._api()
         seen: list[tuple] = []
 
-        async def executor(sid, kind, rid):
+        async def executor(sid, kind, rid, payload=None):
             seen.append((sid, kind, rid))
 
         api.set_device_executor(executor)
@@ -240,7 +240,7 @@ class ScheduleDeviceTest(unittest.IsolatedAsyncioTestCase):
     async def test_executor_failure_is_swallowed(self) -> None:
         api = self._api()
 
-        async def executor(sid, kind, rid):
+        async def executor(sid, kind, rid, payload=None):
             raise RuntimeError("boom")
 
         api.set_device_executor(executor)

@@ -183,22 +183,22 @@ class ManagedAPI:
             return _reject(400, str(err))
         if not receipt.replayed:
             self._schedule_device(request.match_info["sid"], str(body.get("kind") or "").strip().lower(),
-                                  receipt.receipt_id)
+                                  receipt.receipt_id, body.get("payload") or {})
         return _json({"code": 200, "data": receipt.as_dict()},
                      200 if receipt.replayed else 202)
 
-    def _schedule_device(self, session_id: str, kind: str, receipt_id: str) -> None:
+    def _schedule_device(self, session_id: str, kind: str, receipt_id: str, payload: dict | None = None) -> None:
         if self._device_executor is None or kind not in DEVICE_COMMANDS:
             return
-        task = asyncio.ensure_future(self._run_device(session_id, kind, receipt_id))
+        task = asyncio.ensure_future(self._run_device(session_id, kind, receipt_id, payload))
         self._device_tasks.add(task)
         task.add_done_callback(self._device_tasks.discard)
 
-    async def _run_device(self, session_id: str, kind: str, receipt_id: str) -> None:
+    async def _run_device(self, session_id: str, kind: str, receipt_id: str, payload: dict | None = None) -> None:
         from core.utils.logger import logger
 
         try:
-            await self._device_executor(session_id, kind, receipt_id)
+            await self._device_executor(session_id, kind, receipt_id, payload)
         except Exception as exc:  # noqa: BLE001 - 设备执行异常不得影响 HTTP 层
             logger.warning(f"[ManagedAPI] device {kind} failed: {type(exc).__name__}: {exc}")
 

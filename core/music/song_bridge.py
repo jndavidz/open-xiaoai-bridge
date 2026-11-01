@@ -184,7 +184,7 @@ def _device_lock() -> "asyncio.Lock":
     return _DEVICE_LOCK
 
 
-async def apply_command(session_id: str, kind: str, receipt_id: str) -> None:
+async def apply_command(session_id: str, kind: str, receipt_id: str, payload: dict | None = None) -> None:
     """HTTP/App 命令的设备执行侧（B-08）：与语音路径共用同一 runtime 与 store。
 
     命令状态先落库（回执 accepted/applied），这里只做设备动作并把回执推进到
@@ -194,11 +194,12 @@ async def apply_command(session_id: str, kind: str, receipt_id: str) -> None:
     runtime = build_runtime()
     service: ManagedService = runtime.service
     async with _device_lock():
-        await _apply_locked(runtime, service, session_id, kind, receipt_id)
+        await _apply_locked(runtime, service, session_id, kind, receipt_id, payload)
 
 
 async def _apply_locked(runtime, service: ManagedService, session_id: str,
-                        kind: str, receipt_id: str) -> None:
+                        kind: str, receipt_id: str,
+                        payload: dict | None = None) -> None:
     if kind != "play" and runtime.session_id != session_id:
         service.observe(receipt_id, state="failed",
                         detail="session is not bound to the device")
