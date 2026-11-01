@@ -441,6 +441,20 @@ class ManagedQueuePlayer:
         if self._detector is not None:
             self._detector.on_position(self.clock(), position_s)
 
+    def apply_backend_duration(self, duration_s: float) -> None:
+        """backend 起播后才知道时长时补缺（pcm：native 流头解析）。
+
+        只补未知时长的 detector（HTTP/App 入队无 duration_s 的条目），
+        已有可信时长以 resolver/entry 值为准。
+        """
+
+        if (
+            self._detector is not None
+            and duration_s
+            and self._detector.duration_s <= 0
+        ):
+            self._detector.duration_s = max(0.0, float(duration_s))
+
     def on_external_takeover(self) -> None:
         if self._detector is not None:
             self._detector.on_external_takeover()

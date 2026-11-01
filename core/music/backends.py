@@ -80,11 +80,11 @@ class PcmBackend:
     profile: BackendProfile = PCM
 
     def __init__(self, orchestrator: PcmOrchestrator | None = None) -> None:
-        self.orch = orchestrator or PcmOrchestrator()
+        self.orchestrator = orchestrator or PcmOrchestrator()
 
     async def play(self, uri: str) -> bool:
         try:
-            await self.orch.start(uri)
+            await self.orchestrator.start(uri)
             return True
         except Exception as exc:  # noqa: BLE001 - 起播失败如实上报为 False
             from core.utils.logger import logger
@@ -93,34 +93,34 @@ class PcmBackend:
             return False
 
     async def stop(self) -> bool:
-        await self.orch.stop()
+        await self.orchestrator.stop()
         return True
 
     async def pause(self) -> bool:
-        await self.orch.pause()
+        await self.orchestrator.pause()
         return True
 
     async def resume(self) -> bool:
-        await self.orch.resume()
+        await self.orchestrator.resume()
         return True
 
     async def state(self) -> str:
-        self.orch.refresh()
-        return self.orch.state()
+        self.orchestrator.refresh()
+        return self.orchestrator.state()
 
     async def position(self) -> float | None:
         # 桥侧记账（含推流终态后的冻结曲末值，由编排器持有）
-        self.orch.refresh()
-        pos_ms = self.orch.position_ms()
+        self.orchestrator.refresh()
+        pos_ms = self.orchestrator.position_ms()
         return None if pos_ms is None else pos_ms / 1000.0
 
     async def seek(self, position_s: float) -> None:
         """桥侧重投：停推 + 从目标偏移 start_ms 重推（无设备 seek 依赖）。"""
 
-        await self.orch.seek_to(int(position_s * 1000))
+        await self.orchestrator.seek_to(int(position_s * 1000))
 
     def duration_s(self) -> float | None:
         """native 流头解析出的时长（无索引格式为 None，调用方回落 resolver 值）。"""
 
-        duration_ms = self.orch.duration_ms()
+        duration_ms = self.orchestrator.duration_ms()
         return None if duration_ms is None else duration_ms / 1000.0

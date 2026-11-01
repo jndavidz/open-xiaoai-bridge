@@ -92,6 +92,16 @@ class ManagedRuntime:
             return
         if pos is not None:
             self.player.update_position(pos)
+        # backend 起播后才拿得到时长时补缺（pcm：native 流头解析），否则
+        # 无 duration_s 的条目 EOF 判定永远 unknown、播完不推进。
+        duration_fn = getattr(backend, "duration_s", None)
+        if callable(duration_fn):
+            try:
+                self.player.apply_backend_duration(duration_fn())
+            except Exception as exc:  # noqa: BLE001 - 补缺失败不阻推进判定
+                from core.utils.logger import logger
+
+                logger.debug(f"[ManagedRuntime] duration feed failed: {exc}")
 
     async def start_current(self, session_id: str) -> bool:
         """起播当前项；失败按有界次数跳过，末项失败由 `skip_failed` 落成可见停止。

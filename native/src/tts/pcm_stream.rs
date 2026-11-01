@@ -49,6 +49,11 @@ fn is_active(token: u64) -> bool {
     is_playback_session_active(token)
 }
 
+/// 通道感知字节速率：S16LE 交错 PCM 每毫秒字节数（48k/2ch = 192）。
+fn bytes_per_ms(rate: u32, channels: u16) -> usize {
+    rate as usize * channels as usize * 2 / 1000
+}
+
 // ---- 会话状态注册表（桥侧进度记账的数据源） ----
 
 #[derive(Clone, Debug)]
@@ -66,7 +71,6 @@ pub struct SessionRecord {
     pub rate: u32,
     pub channels: u16,
     pub error: Option<String>,
-    pub source: String,
 }
 
 static SESSIONS: OnceLock<Mutex<HashMap<u64, SessionRecord>>> = OnceLock::new();
@@ -83,7 +87,7 @@ fn sess_update(token: u64, f: impl FnOnce(&mut SessionRecord)) {
     }
 }
 
-fn sess_insert(token: u64, source: &str, start_ms: u64) {
+fn sess_insert(token: u64, start_ms: u64) {
     if let Ok(mut map) = sessions().lock() {
         map.insert(
             token,
@@ -96,7 +100,6 @@ fn sess_insert(token: u64, source: &str, start_ms: u64) {
                 rate: 0,
                 channels: 0,
                 error: None,
-                source: source.to_string(),
             },
         );
     }
@@ -140,10 +143,17 @@ impl HttpRangeReader {
             return Ok(());
         }
         if self.pos == buffered_end && self.len != Some(self.pos) {
-            // 顺序续读：追加在缓存尾部，保留已有窗口
+            // 顺序续读：追加在缓存尾部
             self.fetch(buffered_end, HTTP_BLOCK_BYTES, true)?;
         } else {
             self.fetch(self.pos, HTTP_BLOCK_BYTES, false)?;
+        }
+        // 内存上限：只保留 pos 之后的窗口（ symphonia 对 mp3 的 seek 需要回退
+        // 重新同步，回退越过 buf_start 时 fill 会重新发 Range 请求，正确性不变）
+        let keep_from = (self.pos - self.buf_start) as usize;
+        if keep_from > 0 {
+            self.buffer.drain(..keep_from.min(self.buffer.len()));
+            self.buf_start = self.pos;
         }
         Ok(())
     }
@@ -308,6 +318,15 @@ struct DecodeStats {
     decode_packets: u64,
 }
 
+/// 发送流头信息；接收端已停（推流端退出）时返回 false，调用方直接收尾。
+fn send_info(tx: &mpsc::Sender<DecMsg>, duration_ms: Option<u64>, actual_ms: u64) -> bool {
+    tx.blocking_send(DecMsg::Info {
+        duration_ms,
+        actual_start_ms: actual_ms,
+    })
+    .is_ok()
+}
+
 /// 探测 → 可选 seek(start_ms) → 逐 packet 解码 → PCM 发给推流端。
 /// seek 失败回落「从流头解码丢弃」（spike 语义），不致命。
 fn decode_source(
@@ -369,13 +388,7 @@ fn decode_source(
                         ext
                     );
                 }
-                if tx
-                    .blocking_send(DecMsg::Info {
-                        duration_ms,
-                        actual_start_ms: actual_ms,
-                    })
-                    .is_err()
-                {
+                if !send_info(&tx, duration_ms, actual_ms) {
                     return Ok(DecodeStats {
                         decode_total_us: 0,
                         decode_packets: 0,
@@ -388,13 +401,7 @@ fn decode_source(
                 if let Some(rate) = track.codec_params.sample_rate {
                     skip_frames_left = start_ms * u64::from(rate) / 1000;
                 }
-                if tx
-                    .blocking_send(DecMsg::Info {
-                        duration_ms,
-                        actual_start_ms: 0,
-                    })
-                    .is_err()
-                {
+                if !send_info(&tx, duration_ms, 0) {
                     return Ok(DecodeStats {
                         decode_total_us: 0,
                         decode_packets: 0,
@@ -402,13 +409,7 @@ fn decode_source(
                 }
             }
         }
-    } else if tx
-        .blocking_send(DecMsg::Info {
-            duration_ms,
-            actual_start_ms: 0,
-        })
-        .is_err()
-    {
+    } else if !send_info(&tx, duration_ms, 0) {
         return Ok(DecodeStats {
             decode_total_us: 0,
             decode_packets: 0,
@@ -503,7 +504,7 @@ struct MusicPushChunker {
 
 impl MusicPushChunker {
     fn new(sample_rate: u32, channels: u16) -> Self {
-        let bytes_per_ms = (sample_rate as usize * channels as usize * 2) / 1000;
+        let bytes_per_ms = bytes_per_ms(sample_rate, channels).max(1);
         let chunk_bytes = (bytes_per_ms * PCM_STREAM_CHUNK_MS as usize).max(2);
         Self {
             bytes_per_ms: bytes_per_ms.max(1),
@@ -546,11 +547,11 @@ impl MusicPushChunker {
 }
 
 fn pushed_ms(pcm_sent: usize, rate: u32, channels: u16) -> u64 {
-    let bytes_per_ms = (rate as usize * channels as usize * 2) / 1000;
-    if bytes_per_ms == 0 {
+    let bpm = bytes_per_ms(rate, channels);
+    if bpm == 0 {
         0
     } else {
-        (pcm_sent / bytes_per_ms) as u64
+        (pcm_sent / bpm) as u64
     }
 }
 
@@ -618,7 +619,7 @@ async fn start_aplay(rate: u32, channels: u16) {
 }
 
 async fn run_pipeline(source: String, start_ms: u64, token: u64) {
-    sess_insert(token, &source, start_ms);
+    sess_insert(token, start_ms);
     let result = pipeline_inner(&source, start_ms, token).await;
     match result {
         Ok(summary) => {
@@ -803,22 +804,28 @@ pub fn pcm_stream_start(
 }
 
 /// 停止音乐推流：token 失效 + 杀 aplay + 复位 PLAYER_READY。
-/// 与 TTS 的 stop_tts_playback 同构；TTS 起播前必须先调它（或靠新 TTS 会话
-/// 的 token 失效机制兜底），否则 aplay 参数冲突。
+/// 只在该 token 仍是活跃会话时动 aplay——若已被 TTS 会话顶掉（token 失效），
+/// 说明 TTS 已接管并按自己的规格重启了 aplay，此时不得连带杀掉 TTS 的播放。
+/// `None` = 全局停（显式拆除，无条件复位）。
 #[pyfunction]
 #[pyo3(signature = (token=None))]
 pub fn pcm_stream_stop(token: Option<u64>) {
-    match token {
-        Some(t) => {
-            cancel_playback_session_if_active(t);
+    let was_active = match token {
+        Some(t) => cancel_playback_session_if_active(t),
+        None => {
+            cancel_playback_session();
+            true
         }
-        None => cancel_playback_session(),
+    };
+    if was_active {
+        PLAYER_READY.store(false, Ordering::SeqCst);
+        let rt = pyo3_async_runtimes::tokio::get_runtime();
+        rt.spawn(async {
+            let _ = RPC::instance().call_remote("stop_play", None, None).await;
+        });
+    } else {
+        crate::pylog!("[Pcm] stop on stale token {} skipped (session superseded)", token.unwrap_or(0));
     }
-    PLAYER_READY.store(false, Ordering::SeqCst);
-    let rt = pyo3_async_runtimes::tokio::get_runtime();
-    rt.spawn(async {
-        let _ = RPC::instance().call_remote("stop_play", None, None).await;
-    });
 }
 
 /// 查询推流会话状态（JSON）：status/pushed_ms/start_ms/actual_start_ms/
@@ -966,6 +973,37 @@ mod tests {
     }
 
     #[test]
+    fn range_reader_memory_is_windowed_not_whole_file() {
+        // 票 01 目标：流式拉取不得整文件进内存。顺序读 1MB mock 文件，
+        // 本地缓存必须保持单块窗口。
+        static BIG: [u8; 1024 * 1024] = [7u8; 1024 * 1024];
+        let url = spawn_mock_server(&BIG);
+        let mut r = HttpRangeReader::new(url);
+        let mut buf = [0u8; 8192];
+        for i in 0..64 {
+            assert_eq!(r.read(&mut buf).unwrap(), 8192);
+            assert_eq!(buf[0], 7);
+            let _ = i;
+        }
+        assert!(
+            r.buffer.len() <= (HTTP_BLOCK_BYTES as usize) * 2,
+            "buffer grew to {} bytes; windowing broken",
+            r.buffer.len()
+        );
+    }
+
+    #[test]
+    fn mp3_decode_stream_pipeline() {
+        // 用仓库内 mp3 资产覆盖 mp3 解码路径（symphonia mpa probe + 解码）。
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../core/assets/sounds/tts_notify.mp3");
+        let data = std::fs::read(path).expect("asset mp3 missing");
+        let (duration_ms, actual_start_ms, pcm) = collect_decode(data, "mp3", 0);
+        assert!(duration_ms.is_none() || duration_ms.unwrap() > 0);
+        assert_eq!(actual_start_ms, 0);
+        assert!(!pcm.is_empty(), "mp3 decode produced no audio");
+    }
+
+    #[test]
     fn range_reader_eof_at_end() {
         let url = spawn_mock_server(b"0123456789");
         let mut r = HttpRangeReader::new(url);
@@ -1078,7 +1116,7 @@ mod tests {
     #[test]
     fn session_registry_roundtrip() {
         let token = 987_654_321;
-        sess_insert(token, "http://x/y.mp3", 1200);
+        sess_insert(token, 1200);
         sess_update(token, |rec| {
             rec.status = "playing";
             rec.pushed_ms = 42;

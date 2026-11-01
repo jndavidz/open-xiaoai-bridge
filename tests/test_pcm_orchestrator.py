@@ -116,18 +116,17 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos, 0)  # 回落最后已知进度
         self.assertEqual(orch.state(), "paused")
 
-    async def test_completion_ends_session_and_fires_callback_once(self) -> None:
+    async def test_completion_ends_session_and_is_idempotent(self) -> None:
         native = FakeNative()
         orch, _, _ = make_orchestrator(native)
-        ended: list[str] = []
-        orch.on_track_end = ended.append
         await orch.start("http://m/x.mp3")
         native.complete(100, 180_000)
         orch.refresh()
         self.assertEqual(orch.state(), "idle")
-        self.assertEqual(ended, ["completed"])
-        orch.refresh()  # 幂等：不重复回调
-        self.assertEqual(ended, ["completed"])
+        self.assertEqual(orch.position_ms(), 180_000)  # 曲末位置冻结保留
+        orch.refresh()  # 幂等：会话已清，不再变化
+        self.assertEqual(orch.state(), "idle")
+        self.assertEqual(orch.position_ms(), 180_000)
 
     async def test_push_lost_without_focus_self_heals(self) -> None:
         native = FakeNative()
@@ -156,8 +155,6 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
     async def test_heal_budget_exhausted_gives_up(self) -> None:
         native = FakeNative()
         orch, _, _ = make_orchestrator(native, max_heal_retries=2)
-        ended: list[str] = []
-        orch.on_track_end = ended.append
         await orch.start("http://m/x.mp3")
         # 起播成功后 native 坏掉：重试 2 次后放弃
         native.sessions[100]["status"] = "failed"
@@ -166,7 +163,6 @@ class OrchestratorTest(unittest.IsolatedAsyncioTestCase):
             orch.refresh()
             await asyncio.sleep(0)
         self.assertEqual(orch.state(), "idle")
-        self.assertEqual(ended, ["lost"])
 
     async def test_stalled_push_triggers_heal(self) -> None:
         native = FakeNative()

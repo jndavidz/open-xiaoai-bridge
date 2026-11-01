@@ -6,7 +6,8 @@ spike 耳测实锤（pending-followups §1.11）：PCM 推流（aplay/dmix）与
 
   - TTS 起播前（经由 PcmBackend 暴露的 pause）自动停推音乐并记忆偏移；
   - TTS 结束（focus 归还 → resume）后从记忆偏移 start_ms 续推；
-  - 曲末由 native 会话终态判定（completed），桥侧回调通知，不依赖设备事件；
+  - 曲末由 native 会话终态判定（completed）：位置冻结在曲末值，由 runtime 的
+    位置馈送驱动 EOF 判定推进（票 04），不依赖设备事件；
   - 超时兜底：暂停态挂看门狗，TTS focus 归零仍 paused ⇒ 自动续推
     （focus 拒绝播报等路径不得永久哑音乐）；推流停滞自愈（有界重试）。
 
@@ -58,18 +59,11 @@ class PcmNativeAdapter:
 
 
 def _default_focus_active() -> bool:
-    """TTS focus 是否持有中（hold/待释放/令牌任一在即算）。
-
-    编排器只读；focus 状态机归 focus_bridge 所有。
-    """
+    """TTS focus 是否持有中（经 focus_bridge 的唯一公开读口）。"""
 
     from core.music import focus_bridge
 
-    return bool(
-        getattr(focus_bridge, "_hold_count", 0) > 0
-        or getattr(focus_bridge, "_hold_token", None) is not None
-        or getattr(focus_bridge, "_pending_release", None) is not None
-    )
+    return focus_bridge.focus_holding()
 
 
 class PcmOrchestrator:
@@ -101,10 +95,10 @@ class PcmOrchestrator:
         # 最后已知位置（ms）：会话结束（completed/lost）后冻结保留，供桥侧
         # 记账回答「推完了」；显式 stop 才清零。
         self._last_position_ms: int | None = None
+        # 最后已知时长（ms）：native 流头解析，会话结束后保留（EOF 补缺用）
+        self._last_duration_ms: int | None = None
         self._watchdog: asyncio.Task | None = None
         self._healing = False
-        # 曲末/推流死亡回调（票 04 auto_advance 由 backend/runtime 消费）
-        self.on_track_end: Callable[[str], None] | None = None
 
     # ---- 查询（供 backend） ----
 
@@ -117,9 +111,9 @@ class PcmOrchestrator:
         return int(self._session.get("position", 0))
 
     def duration_ms(self) -> int | None:
-        if self._session is None:
-            return None
-        return self._session.get("duration_ms")
+        if self._session is not None:
+            return self._session.get("duration_ms")
+        return self._last_duration_ms
 
     # ---- 会话生命周期 ----
 
@@ -128,6 +122,7 @@ class PcmOrchestrator:
 
         self._cancel_watchdog()
         self._last_position_ms = None  # 新会话：旧位置作废（起播失败也无陈旧位置）
+        self._last_duration_ms = None
         token = await self._native.start(str(source), int(start_ms))
         self._last_position_ms = int(start_ms)
         self._session = {
@@ -155,6 +150,7 @@ class PcmOrchestrator:
             duration = rec.get("duration_ms")
             if duration:
                 self._session["duration_ms"] = int(duration)
+                self._last_duration_ms = int(duration)
         else:
             # 终态读取失败（会话已清/注册表丢）：退回最后已知进度
             pos = self.position_ms() or 0
@@ -199,6 +195,7 @@ class PcmOrchestrator:
             self._native.stop(self._session["token"])
         self._session = None
         self._last_position_ms = None
+        self._last_duration_ms = None
         self._state = "idle"
 
     # ---- 进度快照（非阻塞，由 backend.position()/state() 周期驱动） ----
@@ -217,6 +214,7 @@ class PcmOrchestrator:
         pos = actual + pushed
         if rec.get("duration_ms"):
             self._session["duration_ms"] = int(rec["duration_ms"])
+            self._last_duration_ms = int(rec["duration_ms"])
 
         if status == "completed":
             self._finish("completed", pos)
@@ -248,11 +246,6 @@ class PcmOrchestrator:
         self._session = None
         self._state = "idle"
         logger.info(f"[PcmOrchestrator] session ended ({reason}) at {pos} ms")
-        if self.on_track_end is not None:
-            try:
-                self.on_track_end(reason)
-            except Exception as exc:  # noqa: BLE001 - 回调异常不杀编排器
-                logger.warning(f"[PcmOrchestrator] on_track_end failed: {exc}")
 
     # ---- 自愈（推流死亡/停滞） ----
 

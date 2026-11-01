@@ -101,6 +101,26 @@ class BridgeSideEndOfTrackTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(Decision.ADVANCE, decision)
         self.assertEqual(self.native.starts[-1], ("http://cdn/b.mp3", 0))
 
+    async def test_native_duration_backfills_unknown_duration_entries(self) -> None:
+        # HTTP/App 入队无 duration_s：pcm 模式下靠 native 流头时长补缺，
+        # 否则 EOF 判定永远 unknown、播完不推进（spec 验收 3）。
+        self.store.append(self.sid, TrackRef.make("kuwo", "a"))  # 无 duration_s
+        self.store.append(self.sid, TrackRef.make("kuwo", "b"), duration_s=10)
+
+        async def resolve(entry):
+            return f"http://cdn/{entry.ref.id}.mp3"
+
+        player = ManagedQueuePlayer(self.store, self.backend, resolve,
+                                    clock=lambda: self.now[0])
+        runtime = ManagedRuntime(player)
+        runtime.bind(self.sid)
+        await runtime.start_current(self.sid)
+        self.native.sessions[100]["duration_ms"] = 9_000  # native 流头解析出 9s
+        self.native.complete(100, 9_000)  # 整曲推完
+        self.now[0] = 1.0
+        decision = await runtime.tick_once()
+        self.assertIs(Decision.ADVANCE, decision)
+
     async def test_url_backend_tick_has_no_position_feed(self) -> None:
         # 双轨：url backend 无 position 能力，tick 不额外查询（行为冻结）
         calls: list[int] = []

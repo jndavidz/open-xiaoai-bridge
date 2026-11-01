@@ -40,6 +40,20 @@ def manages_music() -> bool:
     return song_bridge.managed_enabled() and bool(song_bridge.active_session())
 
 
+def focus_holding() -> bool:
+    """TTS focus 是否持有中（hold 计数/待释放/令牌任一在即算）。
+
+    供 pcm 编排器判断「暂停是否仍在 TTS 保护下」；focus 状态机的唯一读口，
+    外部不要伸手进 _hold_* 私有状态。
+    """
+
+    return bool(
+        _hold_count > 0
+        or _hold_token is not None
+        or _pending_release is not None
+    )
+
+
 async def acquire(reason: str = "tts") -> FocusToken | None:
     """直接取一个 focus 令牌（无托管会话/音乐未在播时返回 None）。"""
 

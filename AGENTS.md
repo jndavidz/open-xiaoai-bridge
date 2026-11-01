@@ -30,7 +30,7 @@ open-xiaoai-bridge/
 │   ├── device/                    # 类型化设备能力层（registry/client/results/transport/playback_events）
 │   ├── tools/                     # Agent 工具层：registry 三函数 + 只读工具（hass/weather/music/device_status）+ guardrails 四分级护栏 + ir_send C 级工具（P3）
 │   ├── commands/                  # 指令层深模块（C4/P2 票 01）：双表执行器 run_steps + HA client + 动作构造器 + 唤醒边界路由 route_before_wakeup + 词表对账 audit（P2 票 02）+ 文本归一化/别名键 matching（B-31）
-│   ├── music/                     # 托管播放（B-04…B-07，config 默认关、2026-10-30 起生产已开）：TrackRef/队列项/位置快照 + ManagedStore（SQLite 单事务）+ ManagedExecutor（有界单 worker）+ EventBus/ManagedService（幂等回执、代次闸门、事件同事务）+ auth（music-control 专用凭据）+ player/backends（EOF 判定与 DLNA/RPC 后端，主动 Stop 后推进一次）+ tts_focus/tts_providers/focus_bridge（会话级 TTS focus、恢复资格、四 provider 独立结果）+ gena（B-09 可选事件增强，默认关闭、未接线）
+│   ├── music/                     # 托管播放（B-04…B-07，config 默认关、2026-10-30 起生产已开）：TrackRef/队列项/位置快照 + ManagedStore（SQLite 单事务）+ ManagedExecutor（有界单 worker）+ EventBus/ManagedService（幂等回执、代次闸门、事件同事务）+ auth（music-control 专用凭据）+ player/backends（EOF 判定与 DLNA/RPC/PCM 后端，主动 Stop 后推进一次）+ pcm_orchestrator（B-36 TTS/音乐互斥编排：pause→TTS→play、start_ms 续推、看门狗与自愈）+ tts_focus/tts_providers/focus_bridge（会话级 TTS focus、恢复资格、四 provider 独立结果）+ gena（B-09 可选事件增强，默认关闭、未接线）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
 │   ├── assets/sounds/             # 音效（tts_notify.mp3 等）
 │   ├── services/
@@ -622,7 +622,12 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   再换当前 entry；单条只推进一次，末条停止；暂停冻结计时、位置陈旧 ⇒ stalled、时长未知 ⇒
   unknown；回绕补偿仅限声明支持的 backend 且只一次；外部接管 ⇒ relinquish 不抢回。
   `backends.py` 的 DLNA（主）与 RPC（降级）各自声明 position/seek/resume/stop 能力，
-  未验证的一律 `Unsupported`。`runtime.py` 的 `ManagedRuntime` 按间隔驱动 tick（推进后
+  未验证的一律 `Unsupported`；**PCM（B-30，`playback_backend: url|pcm`，默认 url）**：
+  `PcmBackend` 不碰设备 status/mediaplayer——state()/position() 由桥侧推流会话记账回答
+  （`pcm_orchestrator.py`：TTS/音乐互斥 pause→TTS→play、start_ms 续推、暂停看门狗、
+  推流停滞自愈；native 侧 `native/src/tts/pcm_stream.rs` Range 流式拉取 + symphonia
+  解码 + 会话注册表），seek = 停推重投，曲末由推流终态经 runtime 位置馈送驱动。
+  `runtime.py` 的 `ManagedRuntime` 按间隔驱动 tick（推进后
   自动起播下一条）。**起播失败的可见性只有一条实现**：`ManagedRuntime.start_current()`
   ——有界跳过失败条，末条失败由 `player.skip_failed` 落 `stopped(stop_reason=advance_failed)`；
   tick（推进后）、HTTP/App 的 `play`/`next` 命令、语音 `play_items` 三条入口都必须走它。
