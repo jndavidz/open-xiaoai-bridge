@@ -26,7 +26,7 @@ _spec.loader.exec_module(_mod)
 
 class _FakeConfig:
     def get_app_config(self, _path, default=None):
-        return default if default is not None else ["你好小塔"]
+        return ["你好小塔"]
 
 
 class TokensTypeDecisionTest(unittest.TestCase):
@@ -58,8 +58,28 @@ class TokensTypeDecisionTest(unittest.TestCase):
             with mock.patch.object(_mod, "get_model_file_path", side_effect=lambda name: str(tmp / name)), \
                     mock.patch.object(_mod.ConfigManager, "instance", return_value=_FakeConfig()):
                 missing = _mod.missing_required_files()
-            self.assertIn(str(Path(tmp) / "tokens.txt"), missing)
-            self.assertNotIn(str(Path(tmp) / "bpe.model"), missing)
+            self.assertIn(str(tmp / "tokens.txt"), missing)
+            self.assertNotIn(str(tmp / "bpe.model"), missing)
+
+
+class DisplayNameTest(unittest.TestCase):
+    """main() 写出的 keywords_file 显示名必须是原词（@串进唤醒文本参与路由）。"""
+
+    def test_main_writes_original_word_display_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "tokens.txt").write_text("", encoding="utf-8")
+            fake_encoded = [["n", "ǐ", "h", "ǎo", "x", "iǎo", "t", "ǎ"]]
+            with mock.patch.object(_mod, "get_model_file_path", side_effect=lambda name: str(tmp / name)), \
+                    mock.patch.object(_mod.ConfigManager, "instance", return_value=_FakeConfig()), \
+                    mock.patch.dict(sys.modules, {"sherpa_onnx": mock.MagicMock()}), \
+                    mock.patch.dict("os.environ", {"OPENAI_ENABLE": "1"}):
+                import sherpa_onnx  # noqa: F401 - 保证 patch 后 import 命中 stub
+                sys.modules["sherpa_onnx"].text2token.return_value = fake_encoded
+                rc = _mod.main()
+            self.assertEqual(rc, 0)
+            line = (tmp / "keywords.txt").read_text(encoding="utf-8").strip()
+            self.assertEqual(line, "n ǐ h ǎo x iǎo t ǎ @你好小塔")
 
 
 if __name__ == "__main__":

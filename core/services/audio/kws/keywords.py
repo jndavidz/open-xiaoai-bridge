@@ -1,4 +1,4 @@
-import re
+import os
 from pathlib import Path
 
 
@@ -98,15 +98,13 @@ def main():
         args["texts"],
         tokens=args["tokens"],
         tokens_type=args["tokens_type"],
-        bpe_model=args["bpe_model"],
+        **({"bpe_model": args["bpe_model"]} if args["has_bpe"] else {}),
     )
     with open(args["output"], "w", encoding="utf8") as f:
-        for _, txt in enumerate(encoded_texts):
-            line = "".join(txt)
-            if re.match(r"^[▁A-Z\s]+$", line):
-                f.write(" ".join(txt) + "\n")
-            else:
-                f.write(" ".join(txt) + f" @{line}" + "\n")
+        # 显示名写原词（与 shadow build_keywords 一致）：@串进入唤醒文本参与
+        # 免唤醒指令路由匹配，拼音串会让中文词表匹配全部落空。
+        for word, txt in zip(args["keywords"], encoded_texts):
+            f.write(" ".join(txt) + f" @{word}" + "\n")
     logger.debug(f"Keyword file generated: {args['output']}", module="KWS")
     return 0
 
