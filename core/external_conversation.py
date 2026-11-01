@@ -157,7 +157,10 @@ class ExternalConversationController:
         logger.info(f"🎙️ 进入 {self.BACKEND_NAME} 连续对话模式", module=self.LOG_MODULE)
 
         # 会话级 TTS focus（B-07）：整段连续对话期间保持音乐暂停（回声防护），
-        # 对话结束（退出词/超时/停止聆听）后才按资格恢复。点歌起播会直接结束会话。
+        # 对话结束（退出词/超时）后才按资格恢复。点歌起播会直接结束会话。
+        # 注：「停止聆听」不在对话内处理（2026-11-01 用户裁决）——对话中 KWS
+        # 暂停、免唤醒路径不可达，该词只匹配 exit_keywords 之外的普通文本进
+        # LLM；要停止聆听须先退出对话再经 KWS 路径（含二次确认闸门）。
         focus_held = False
         try:
             from core.music import focus_bridge
