@@ -740,7 +740,12 @@ class ExternalConversationController:
                     f"Triggering XiaoAI native ASR, waiting up to {wait_seconds:.1f}s",
                     module=self.LOG_MODULE,
                 )
-                await speaker.wake_up(awake=True, silent=True)
+                wake_res = await speaker.wake_up(awake=True, silent=True)
+                # 🔍 ASR 会话诊断：wake 失败会被吞成对话聋，升 INFO 留证
+                logger.info(
+                    f"ASR kick wake_up(awake=True,silent) -> {wake_res}",
+                    module=self.LOG_MODULE,
+                )
                 result = await asyncio.wait_for(
                     self._xiaoai_asr_future,
                     timeout=wait_seconds,
