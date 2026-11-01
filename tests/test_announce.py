@@ -704,7 +704,13 @@ class PlayEndpointsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 200)
         self.assertTrue(json.loads(resp.text)["success"])
 
-        await asyncio.sleep(0.1)
+        # 后台 announce 完成 + 闸门释放是异步的：轮询等待而非固定 sleep——
+        # 全量高负载下 0.1s 窗口不够（2026-11-02 flaky 复盘，与 docker build
+        # 并行跑全量时两次复现；单独跑恒绿）。
+        for _ in range(60):
+            if self.kws.count == 0 and self.device.called("text_to_speech"):
+                break
+            await asyncio.sleep(0.05)
         self.device.assert_called("text_to_speech")
         self.assertEqual(self.kws.count, 0)
         self.assertFalse(self.device.muted)
