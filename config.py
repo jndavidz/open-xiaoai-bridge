@@ -236,6 +236,10 @@ APP_CONFIG = {
         # B-06 迁移开关：true = 队列归托管 store（ManagedService/ManagedQueuePlayer），
         # false = 旧内存队列（回滚模式，默认）。打开前先确认 ManagedRuntime 已随起播启动。
         "managed": False,
+        # 播放 backend 选源（pcm-backend spec 票 04）：'url' = mediaplayer RPC 投送
+        # （2026-11-01 基线，默认/回滚模式）；'pcm' = 桥侧 PCM 推流（PcmBackend，
+        # TTS 互斥由编排器驱动）。切回 url 即回滚，零代码。
+        "playback_backend": "url",
         # 托管会话的 target（与 MANAGED_TOKENS 的 targets 白名单一致）
         "managed_target": "lx06",
         # B-08：托管队列当前曲的媒体解析器。"kwqq" = bridge 自查 kwqq v1 两跳（回滚模式）；

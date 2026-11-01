@@ -23,6 +23,24 @@ def managed_enabled() -> bool:
     return bool(_sr._cfg("managed", False))
 
 
+def playback_backend() -> str:
+    """播放 backend 选源（pcm-backend spec 票 04）：'url'（默认，双轨冻结）| 'pcm'。"""
+
+    value = str(_sr._cfg("playback_backend", "url") or "url")
+    return value if value == "pcm" else "url"
+
+
+def _build_backend():
+    """按 config 选设备后端：url = mediaplayer RPC（2026-11-01 基线，回滚模式）；
+    pcm = PcmBackend（桥侧推流 + 进度记账）。未知值一律回落 url。"""
+
+    from core.music.backends import PcmBackend, RpcBackend
+
+    if playback_backend() == "pcm":
+        return PcmBackend()
+    return RpcBackend()
+
+
 def target() -> str:
     return str(_sr._cfg("managed_target", "lx06") or "lx06")
 
@@ -42,7 +60,7 @@ def build_runtime() -> ManagedRuntime:
     # 设备通道是 mediaplayer 的 player_play_url（RPC），不是 DLNA SOAP；
     # 它已验证 pause/play（设备播放控制 CLI），所以用 RpcBackend 的能力矩阵。
     resolver = _songloft_resolver if str(_sr._cfg("managed_media_resolver", "kwqq")) == "songloft" else _default_resolver
-    player = ManagedQueuePlayer(store, RpcBackend(), resolver)
+    player = ManagedQueuePlayer(store, _build_backend(), resolver)
     runtime = ManagedRuntime(player, service=service)
     set_runtime(runtime)
     return runtime

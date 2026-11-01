@@ -109,6 +109,7 @@ class PcmBackend:
         return self.orch.state()
 
     async def position(self) -> float | None:
+        # 桥侧记账（含推流终态后的冻结曲末值，由编排器持有）
         self.orch.refresh()
         pos_ms = self.orch.position_ms()
         return None if pos_ms is None else pos_ms / 1000.0

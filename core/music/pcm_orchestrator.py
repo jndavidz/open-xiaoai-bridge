@@ -98,6 +98,9 @@ class PcmOrchestrator:
 
         self._state = "idle"
         self._session: dict | None = None
+        # 最后已知位置（ms）：会话结束（completed/lost）后冻结保留，供桥侧
+        # 记账回答「推完了」；显式 stop 才清零。
+        self._last_position_ms: int | None = None
         self._watchdog: asyncio.Task | None = None
         self._healing = False
         # 曲末/推流死亡回调（票 04 auto_advance 由 backend/runtime 消费）
@@ -110,7 +113,7 @@ class PcmOrchestrator:
 
     def position_ms(self) -> int | None:
         if self._session is None:
-            return None
+            return self._last_position_ms
         return int(self._session.get("position", 0))
 
     def duration_ms(self) -> int | None:
@@ -124,7 +127,9 @@ class PcmOrchestrator:
         """起播/续推一条音乐源；成功后编排器处于 playing。"""
 
         self._cancel_watchdog()
+        self._last_position_ms = None  # 新会话：旧位置作废（起播失败也无陈旧位置）
         token = await self._native.start(str(source), int(start_ms))
+        self._last_position_ms = int(start_ms)
         self._session = {
             "token": int(token),
             "source": str(source),
@@ -156,6 +161,7 @@ class PcmOrchestrator:
             logger.warning("[PcmOrchestrator] pause: terminal state unreadable, "
                            f"falling back to last known position {pos}")
         self._session["position"] = pos
+        self._last_position_ms = pos
         self._state = "paused"
         self._arm_watchdog()
         logger.info(f"[PcmOrchestrator] paused at {pos} ms")
@@ -192,6 +198,7 @@ class PcmOrchestrator:
         if self._session is not None and self._state == "playing":
             self._native.stop(self._session["token"])
         self._session = None
+        self._last_position_ms = None
         self._state = "idle"
 
     # ---- 进度快照（非阻塞，由 backend.position()/state() 周期驱动） ----
@@ -230,12 +237,14 @@ class PcmOrchestrator:
         # starting/playing：位置单调前进
         if pos > self._session["position"]:
             self._session["position"] = pos
+            self._last_position_ms = pos
             self._session["last_progress"] = self._clock()
         elif self._clock() - self._session["last_progress"] > self._stall_s:
             self._schedule_heal(pos)
 
     def _finish(self, reason: str, pos: int) -> None:
         self._session["position"] = pos
+        self._last_position_ms = pos
         self._session = None
         self._state = "idle"
         logger.info(f"[PcmOrchestrator] session ended ({reason}) at {pos} ms")

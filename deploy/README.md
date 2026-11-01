@@ -236,6 +236,9 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 
 - **开关**：`song_request.managed`（`managed_target` 与 `MANAGED_TOKENS.targets` 一致），
   `managed_media_resolver` 选 `songloft`（经 Songloft 准备链拿票据 URL）或 `kwqq`（回滚模式）；
+  **`playback_backend` 选 `url`（默认 = mediaplayer RPC 投送，2026-11-01 基线）或 `pcm`**
+  （桥侧 PCM 推流 + TTS 互斥编排，pcm-backend spec 票 04；上线初期保持 url，
+  真机互斥耳测通过后显式切换，切回 url 即回滚零代码）；
   改完 `docker compose up -d`（配置是 bind-mount，不重建镜像）。
   未配 `MANAGED_TOKENS` 时托管面一律 **503 fail-closed**；配了但无凭据 **401**——都不是故障。
 - **行为**（真机已验证）：点歌 = **单轮**（说完即退出对话）；`停止/暂停/继续/上一首/下一首`

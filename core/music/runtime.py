@@ -61,6 +61,7 @@ class ManagedRuntime:
         if not sid:
             return None
         self.ticks += 1
+        await self._feed_position()
         decision = await self.player.tick(sid)
         if decision is not Decision.ADVANCE:
             return decision
@@ -73,6 +74,24 @@ class ManagedRuntime:
                 self.bind(None)
             return Decision.FINISH
         return decision
+
+    async def _feed_position(self) -> None:
+        """桥侧位置馈送（pcm-backend spec 票 04）：声明 position 能力的 backend
+        每 tick 喂一次位置观测，曲末判定由桥侧推流终态驱动；url backend 无此
+        能力，tick 行为不变。"""
+
+        backend = self.player.backend
+        if not getattr(getattr(backend, "profile", None), "position", False):
+            return
+        try:
+            pos = await backend.position()
+        except Exception as exc:  # noqa: BLE001 - 馈送失败不阻推进判定
+            from core.utils.logger import logger
+
+            logger.debug(f"[ManagedRuntime] position feed failed: {exc}")
+            return
+        if pos is not None:
+            self.player.update_position(pos)
 
     async def start_current(self, session_id: str) -> bool:
         """起播当前项；失败按有界次数跳过，末项失败由 `skip_failed` 落成可见停止。
