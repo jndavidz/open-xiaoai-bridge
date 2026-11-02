@@ -353,9 +353,11 @@ APP_CONFIG = {
         # 逐词门槛（票 03）：{词: {"boost": 加成, "threshold": 触发门槛}}，
         # 编译进 keywords.txt 后缀（:boost #threshold，官方语法）。缺省 = 空，
         # 全部词沿用上面全局 keywords_score / keywords_threshold（行为与今天一致）。
-        # ⚠ 调参值（「停止聆听」收紧 / 6–8 字长词放宽）等票 08 held-out 评测
-        #   标定后回填——先改值后看数是本轮 spec 明确禁止的事后挪杆。
-        "keyword_gates": {},
+        # 「停止聆听」收紧初值 0.40（2026-11-03 标定）：120 条近邻负样本 × 7 档阈值
+        # 分叉（0.10–0.40）全部 FA=0——数据无法区分更紧的值，取显著高于全局 0.25 的
+        # 保守收紧档（deploy/lx06/kws-beamform-ab/stop_listening_scan.py VERDICT）；
+        # ⚠ 无正样本约束，真声复核（在场窗口）后调整。长词放宽值仍待票 08。
+        "keyword_gates": {"停止聆听": {"threshold": 0.4}},
     },
     "vad": {
         # share 项目客厅环境实战值 0.3（默认 0.10 过敏易误触发）
