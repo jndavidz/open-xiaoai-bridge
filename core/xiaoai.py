@@ -58,6 +58,9 @@ class XiaoAI:
     _fixed_channel = 0
     _downmixer: ChannelDownmixer | None = None
     _ch0_downmixer: ChannelDownmixer | None = None
+    # 唤醒输入独立链（music-far spec 票 05）：默认 None = 不启用（KWS 读主链，
+    # 与历史行为一致）；配置 audio_input.wakeup_channel 非 inherit 才构建。
+    _wakeup_chain = None
     _last_input_frame_time = 0.0
     _input_frame_count = 0
     _current_channel = None
@@ -169,6 +172,25 @@ class XiaoAI:
             cls._current_channel = (
                 cls._downmixer.current_channel if cls._downmixer else None
             )
+
+        # 唤醒输入独立链（票 05）：按配置重建；未激活时保持 None（零行为变化）
+        try:
+            from core.services.audio import wakeup_input
+
+            section = cls.config_manager.get_app_config("audio_input", {}) or {}
+            if wakeup_input.is_chain_active(section, channels):
+                if (
+                    cls._wakeup_chain is None
+                    or cls._wakeup_chain.channels != channels
+                ):
+                    cls._wakeup_chain = wakeup_input.WakeupInputChain(
+                        section, channels
+                    )
+            else:
+                cls._wakeup_chain = None
+        except Exception as exc:  # noqa: BLE001 - 链构建失败不得影响主链
+            logger.warning(f"[XiaoAI] wakeup input chain init failed: {exc}")
+            cls._wakeup_chain = None
 
     @classmethod
     async def _reconcile_mic_once(cls):
@@ -296,6 +318,26 @@ class XiaoAI:
 
                     GlobalStreamCh0.input(ch0)
 
+        # 唤醒输入独立链（票 05）：只喂 GlobalStreamKws（主路 KWS 读），
+        # 主链 GlobalStream（对话 ASR / 语音注入）的降声道与增益完全不变。
+        chain = cls._wakeup_chain
+        if chain is not None and chain.active:
+            speaker = get_speaker()
+            playing = (
+                isinstance(getattr(speaker, "status", None), str)
+                and speaker.status == "playing"
+            )
+            chain.set_playing(playing)
+            try:
+                kws_pcm = chain.feed(raw)
+            except Exception as exc:  # noqa: BLE001 - 链异常静默回落，不打断主链
+                logger.warning(f"[XiaoAI] wakeup input chain feed failed: {exc}")
+                kws_pcm = b""
+            if kws_pcm:
+                from core.services.audio.stream import GlobalStreamKws
+
+                GlobalStreamKws.input(kws_pcm)
+
         downmixer = cls._downmixer
         if downmixer is not None:
             pcm = downmixer.feed(raw)
@@ -341,6 +383,8 @@ class XiaoAI:
                 cls._current_channel = cls._downmixer.current_channel
             if cls._ch0_downmixer is not None:
                 cls._ch0_downmixer.reset()
+            if cls._wakeup_chain is not None:
+                cls._wakeup_chain.reset()
             cls._last_input_frame_time = time.monotonic()
             return True
         except Exception as exc:
@@ -471,7 +515,7 @@ class XiaoAI:
         """录音面健康快照（供 /api/health、管理面板与排障使用）。"""
         now = time.monotonic()
         last = cls._last_input_frame_time
-        return {
+        health = {
             "recording_expected": bool(cls._recording_expected),
             "last_frame_age": round(max(0.0, now - last), 3) if last else None,
             "frame_count": cls._input_frame_count,
@@ -484,6 +528,10 @@ class XiaoAI:
             "recover_count": cls._recording_watchdog.recover_count,
             "last_recover_error": cls._last_recover_error,
         }
+        # 唤醒输入链（票 05）：仅激活时出现该键，面板/排障可见当前口径
+        if cls._wakeup_chain is not None:
+            health["wakeup_input"] = cls._wakeup_chain.stats()
+        return health
 
     @classmethod
     def on_output_data(cls, data: bytes):

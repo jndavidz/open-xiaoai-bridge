@@ -28,6 +28,10 @@ class __GlobalStream:
 
 GlobalStream = __GlobalStream()
 GlobalStreamCh0 = __GlobalStream()
+# 唤醒输入独立流（music-far spec 票 05）：按播放态条件化的降声道/AEC 链
+# （WakeupInputChain）产出喂这里，主路 KWS 读此流；主链 GlobalStream
+# （对话 ASR / 语音注入）完全不经该链，逐字节不变。
+GlobalStreamKws = __GlobalStream()
 
 
 class MyStream:

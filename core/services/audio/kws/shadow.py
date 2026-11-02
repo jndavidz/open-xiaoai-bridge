@@ -62,9 +62,17 @@ def pick_model_files(model_dir: Path) -> dict:
     return result
 
 
-def build_keywords(words: list[str], model_dir: Path, target: Path) -> Path:
-    """有 bpe.model 走 cjkchar+bpe，否则 ppinyin；显示名写原词。"""
+def build_keywords(
+    words: list[str], model_dir: Path, target: Path, gates: dict | None = None
+) -> Path:
+    """有 bpe.model 走 cjkchar+bpe，否则 ppinyin；显示名写原词。
+
+    gates（票 03）：{词: {"boost": x, "threshold": y}}，可选后缀 :x / #y
+    与主路 keywords.py 同一编译口径。
+    """
     import sherpa_onnx
+
+    from core.utils.word_gates import compile_keyword_line
 
     tokens = model_dir / "tokens.txt"
     bpe = model_dir / "bpe.model"
@@ -79,10 +87,13 @@ def build_keywords(words: list[str], model_dir: Path, target: Path) -> Path:
         encoded = sherpa_onnx.text2token(
             [word.upper() for word in words], tokens=str(tokens), tokens_type="ppinyin"
         )
+    gates = gates or {}
     target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, "w", encoding="utf8") as handle:
         for word, tokens_row in zip(words, encoded):
-            handle.write(" ".join(tokens_row) + f" @{word}\n")
+            handle.write(
+                compile_keyword_line(tokens_row, word, gates.get(word)) + "\n"
+            )
     return target
 
 
@@ -99,6 +110,7 @@ class ShadowKws:
         arm: str = "strongest",
         max_active_paths: int = 16,
         snapshot_dir: str | None = None,
+        word_gates: dict | None = None,
     ) -> None:
         import sherpa_onnx
 
@@ -136,7 +148,10 @@ class ShadowKws:
         try:
             files = pick_model_files(self.model_dir)
             keyword_file = build_keywords(
-                self.words, self.model_dir, self._log_dir / "shadow-keywords.txt"
+                self.words,
+                self.model_dir,
+                self._log_dir / "shadow-keywords.txt",
+                gates=word_gates,
             )
             self._kws = sherpa_onnx.KeywordSpotter(
                 provider="cpu",

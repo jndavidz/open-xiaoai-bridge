@@ -51,8 +51,11 @@ open-xiaoai-bridge/
 │   │   │   ├── playback_timing.py # 播放时长/完成等待纯函数原语（B-29 步 1：pcm_duration/sleep_playback_done/文本预算估算）
 │   │   │   ├── speaking_channel.py# 对话循环发声接缝（B-29 步 2）：播放 API 只经 open() 产出 session（进门即物理断录）
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
-│   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门）
+│   │   │   ├── aec.py             # 播放期回声消除（music-far 票 04）：对齐后单抽头 NLMS，ch6 参考，三类旁路静默直通；aec.enabled 默认关
+│   │   │   ├── wakeup_input.py    # 唤醒输入通道条件化（music-far 票 05）：按播放态选 strongest/fixed/aec 喂 GlobalStreamKws；默认 inherit（读主链，零行为变化）
+│   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门；vad_mode=endpoint 全帧喂 / gate 回滚）
 │   │   │   ├── kws/shadow.py      # 影子 KWS：候选模型双臂 always-on 并行检测，JSONL + 命中留证 PCM，不唤醒（kws.shadow.enabled，默认关）
+│   │   │   ├── kws/l3_shadow.py   # L3 影子第三臂（music-far 票 06）：逆向三词模型 numpy 复现链，同帧只记录不触发（kws.shadow.arms 含 l3 时启用）
 │   │   │   └── asr/sherpa.py      # Sherpa ASR 离线语音识别（SenseVoice）
 │   │   ├── conversation_memory.py  # 对话记忆 JSONL（B-30 票 04）：按天滚动/过期清理/注入摘要；data/memory/ 本地卷
 │   │   ├── led_language.py         # LED 灯语（P3 票 02）：管线态四态可视化，led_language.enabled 默认关
@@ -74,6 +77,7 @@ open-xiaoai-bridge/
 │       ├── pipeline.py            # 管线态/轮次标识/取消传播骨架（P1 ticket 02；IDLE/LISTENING/PROCESSING/SPEAKING + TurnCancelledError）
 │       ├── sentence_split.py      # 句读切分器纯函数（P1 ticket 03：强标点≥4/弱≥12/≥20 强切；流式增量→句段，04 起逐段直喂 TTS）
 │       ├── new_topic.py           # 「换个话题」暗号识别纯函数（B-30 票 02：exact 整句 + fuzzy ≤8 字 dist≤2；长句永不进模糊通道）
+│       ├── word_gates.py          # 逐词门槛词表编译纯函数（music-far 票 03）：:boost #threshold 后缀 + 自检；keywords/shadow 共用
 │       ├── base.py                # 基础工具
 │       └── file.py                # 文件工具
 ├── native/                        # Rust PyO3 扩展（maturin 编译）

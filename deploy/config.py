@@ -334,15 +334,36 @@ APP_CONFIG = {
             "max_active_paths": 16,
             "arms": ["strongest", "ch0"],
             "always_on": True,
+            # L3 第三臂（music-far spec 票 06）：逆向三词模型服务端影子，
+            # 与 strongest 臂同音频、只记录不触发。启用 = arms 加 "l3" +
+            # model_dir 指向含 l3_weights.npz 的目录（权重经固件 harness
+            # export_l3_npz.py 导出）+ thresholds 填 eval_3way 标定的各词 p5。
+            # ⚠ 分数量纲 = 离线标度（JSONL scale 字段），勿与引擎分数混读。
+            # "arms": ["strongest", "ch0", "l3"],
+            # "l3": {"model_dir": "/app/core/models/l3", "thresholds": {}},
         },
+        # VAD 语义（music-far spec 票 02，2026-11-03 落地）：
+        #   "endpoint"（默认）= 端点器——主路 KWS 对非暂停态**每一帧**运行，
+        #     VAD 只判语音帧与端点时机（静音 480ms reset 检测流）。
+        #     此前（11-01 起）注释声称"全帧喂 KWS"但主环实际仍是门控——
+        #     该偏差由票 02 消除。回滚 = 改 "gate" + 重启容器（旧行为原样保留）。
+        "vad_mode": "endpoint",
+        # 逐词门槛（票 03）：{词: {"boost": 加成, "threshold": 触发门槛}}，
+        # 编译进 keywords.txt 后缀（:boost #threshold，官方语法）。缺省 = 空，
+        # 全部词沿用上面全局 keywords_score / keywords_threshold（行为与今天一致）。
+        # ⚠ 调参值（「停止聆听」收紧 / 6–8 字长词放宽）等票 08 held-out 评测
+        #   标定后回填——先改值后看数是本轮 spec 明确禁止的事后挪杆。
+        "keyword_gates": {},
     },
     "vad": {
         # share 项目客厅环境实战值 0.3（默认 0.10 过敏易误触发）
         # 2026-09-24 收紧：0.3 -> 0.4（incident §5 建议 3）
-        # 2026-11-01 主路=候选后与影子 strongest 同构（全帧喂 KWS）：0.4 -> 0.2。
+        # 2026-11-01 主路=候选后与影子 strongest 同构：0.4 -> 0.2。
         #   远场 VAD 断续会截碎 chunked 检测流（200 段消融：0.4 门把候选 music_far
         #   从 75% 压到 10%），误触发改由 keywords_threshold 0.25 承担
         #   （影子 arms 全天零背景误报佐证）。本项支持热重载。
+        # ⚠ 语义自 2026-11-03（票 02）起为**端点器**：threshold 只决定"是否算
+        #   语音帧"与端点时机，主路 KWS 全帧运行（kws.vad_mode="endpoint"）。
         "threshold": 0.2,
         "min_speech_duration": 250,
         "min_silence_duration": 500,
@@ -360,6 +381,18 @@ APP_CONFIG = {
         "fixed_channel": 0,
         # 录音看门狗：连续无帧秒数（client 500ms 无数据即退出读循环）
         "watchdog_seconds": 1.0,
+        # 唤醒输入通道条件化（music-far spec 票 05）：主路 KWS 按播放态选源。
+        #   playing / idle ∈ inherit（默认，读主链 GlobalStream，零行为变化）/
+        #   strongest / fixed / aec（回声消除输出，需 8ch 采集含参考声道）。
+        # 非法值启动期告警并回落 inherit；改动需重启容器（KWS 流源启动期决定）。
+        # ⚠ 只影响 KWS/VAD 路径；对话 ASR 与语音注入的降声道（channel_strategy）
+        #   不经此链，逐字节不变。回滚 = 两键改回 inherit + 重启。
+        "wakeup_channel": {"playing": "inherit", "idle": "inherit", "fixed_channel": 0},
+        # 回声消除（票 04）：对齐后单抽头 NLMS，参考 = 播放期 ch6（需 8ch 采集）。
+        # 默认关闭；开启后参考异常/发散/双讲自动旁路直通（见 core/services/audio/aec.py）。
+        # 启用步骤：采集切 8ch（channels=8）→ aec.enabled=true →
+        #   wakeup_channel.playing="aec" → 重启；回滚 = playing 改 inherit。
+        "aec": {"enabled": False},
     },
     "inject": {
         # PC 语音注入模块总开关（默认关闭）：关闭时不监听 :9093，注入端点 503；

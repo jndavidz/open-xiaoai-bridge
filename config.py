@@ -292,7 +292,14 @@ APP_CONFIG = {
             "max_active_paths": 16,
             "arms": ["strongest", "ch0"],
             "always_on": True,
+            # L3 第三臂（music-far 票 06）：arms 加 "l3" + l3.model_dir 指向含
+            # l3_weights.npz 的目录（导出脚本见固件 harness）；用法见 deploy/config.py
+            # "l3": {"model_dir": "core/models/l3", "thresholds": {}},
         },
+        # VAD 语义（music-far 票 02）：endpoint = 全帧喂 KWS（默认）；gate = 旧门控回滚
+        "vad_mode": "endpoint",
+        # 逐词门槛（票 03）：{词: {"boost": x, "threshold": y}}；空 = 与全局一致
+        "keyword_gates": {},
     },
     "vad": {
         # 语音检测阈值（0-1，越小越灵敏）
@@ -320,6 +327,11 @@ APP_CONFIG = {
         # 录音看门狗：连续无音频帧达到该秒数即「先停后启」
         # （client 录音读循环 500ms 无数据即退出，阈值须显著小于 3s）
         "watchdog_seconds": 1.0,
+        # 唤醒输入通道条件化（music-far 票 05）：playing/idle ∈ inherit/strongest/
+        # fixed/aec；默认双 inherit = KWS 读主链，零行为变化。用法见 deploy/config.py
+        "wakeup_channel": {"playing": "inherit", "idle": "inherit", "fixed_channel": 0},
+        # 回声消除（票 04）：默认关；开启需 8ch 采集含 ch6 参考
+        "aec": {"enabled": False},
     },
     "inject": {
         # PC 语音注入模块总开关（ticket 07）。默认关闭：

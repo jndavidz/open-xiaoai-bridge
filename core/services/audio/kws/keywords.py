@@ -63,8 +63,49 @@ def get_args():
     tokens_type = "cjkchar+bpe" if has_bpe else "ppinyin"
     output = get_model_file_path("keywords.txt")
     keywords = config.get_app_config("wakeup.keywords", [])
+    gates = get_word_gates()
     texts = [f"{keyword.upper()}" for keyword in keywords]
     return locals()
+
+
+# ---- 逐词门槛（music-far spec 票 03）----
+# 编译/解析/自检纯函数在 core/utils/word_gates.py（keywords 与 shadow 共用，
+# 避免 shadow 独立加载时触发 kws 包 heavyweight 初始化）；
+# 这里只留依赖 ConfigManager 的配置读取。
+from core.utils.word_gates import (  # noqa: E402,F401  (re-export 供旧引用)
+    compile_keyword_line,
+    parse_keyword_line,
+    verify_keyword_lines,
+)
+
+
+def get_word_gates() -> dict:
+    """读取并校验逐词门槛配置；非法条目告警后丢弃（不影响其余词）。"""
+    config = ConfigManager.instance()
+    raw = config.get_app_config("kws.keyword_gates", {}) or {}
+    if not isinstance(raw, dict):
+        logger.warning("[KWS] kws.keyword_gates 必须是 {词: {...}}，已忽略", module="KWS")
+        return {}
+    gates: dict = {}
+    for word, spec in raw.items():
+        if not isinstance(word, str) or not word or not isinstance(spec, dict):
+            logger.warning(f"[KWS] keyword_gates 非法条目 {word!r}，已忽略", module="KWS")
+            continue
+        gate: dict = {}
+        for key in ("boost", "threshold"):
+            value = spec.get(key)
+            if value is None:
+                continue
+            try:
+                gate[key] = float(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"[KWS] keyword_gates[{word!r}].{key} 非法值 {value!r}，已忽略",
+                    module="KWS",
+                )
+        if gate:
+            gates[word] = gate
+    return gates
 
 
 def missing_required_files():
@@ -103,8 +144,15 @@ def main():
     with open(args["output"], "w", encoding="utf8") as f:
         # 显示名写原词（与 shadow build_keywords 一致）：@串进入唤醒文本参与
         # 免唤醒指令路由匹配，拼音串会让中文词表匹配全部落空。
+        # 逐词门槛（票 03）：配置了 boost/threshold 的词带 :x / #x 后缀。
         for word, txt in zip(args["keywords"], encoded_texts):
-            f.write(" ".join(txt) + f" @{word}" + "\n")
+            f.write(
+                compile_keyword_line(txt, word, args["gates"].get(word)) + "\n"
+            )
+    # 词表自检（票 03）：任一行 token 编译失败/显示名丢失 → 启动期告警
+    problems = verify_keyword_lines(args["output"], args["keywords"])
+    for problem in problems:
+        logger.warning(f"[KWS] 词表自检告警：{problem}", module="KWS")
     logger.debug(f"Keyword file generated: {args['output']}", module="KWS")
     return 0
 
