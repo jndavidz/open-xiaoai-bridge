@@ -395,6 +395,10 @@ APP_CONFIG = {
         # 启用步骤：采集切 8ch（channels=8）→ aec.enabled=true →
         #   wakeup_channel.playing="aec" → 重启；回滚 = playing 改 inherit。
         "aec": {"enabled": False},
+        # 参考声道（music-far 缺口 2）：8ch 采集时播放参考声道号（LX06 = [6, 7]），
+        # 只作 AEC 输入，不参与选麦（strongest）/平均（average）；6ch 采集留空 []。
+        # 声道数 ≥7 且未声明时启动期告警（防线：strongest 选中音乐本身）。
+        "reference_channels": [],
     },
     "inject": {
         # PC 语音注入模块总开关（默认关闭）：关闭时不监听 :9093，注入端点 503；

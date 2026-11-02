@@ -124,7 +124,10 @@ class ChannelSelector:
     - 每帧（一次 `feed()` 的对齐数据）计算各声道 RMS，窗口内取均值；
     - 首帧直接选最响声道；
     - 之后只有「候选声道均值 > 当前声道均值 × hysteresis_ratio」且
-      「连续 min_hold_frames 帧都是它最响」才切换，避免逐帧抖动。
+      「连续 min_hold_frames 帧都是它最响」才切换，避免逐帧抖动；
+    - `mic_channels`（music-far 票 04/05 前置，缺口 2）：只在这些声道里选麦——
+      8ch 采集时 ch6/ch7 是播放 far-end 参考，播放期能量极高，若参与选麦会把
+      音乐本身当麦克风信号喂给 VAD/KWS。空 = 全部声道可选（6ch 兼容）。
     """
 
     def __init__(
@@ -134,12 +137,21 @@ class ChannelSelector:
         hysteresis_ratio: float = 1.25,
         min_hold_frames: int = 3,
         silence_floor: float = 1.0,
+        mic_channels: collections.abc.Sequence[int] | None = None,
     ) -> None:
         self.channels = max(1, int(channels))
         self.window_frames = max(1, int(window_frames))
         self.hysteresis_ratio = max(1.0, float(hysteresis_ratio))
         self.min_hold_frames = max(1, int(min_hold_frames))
         self.silence_floor = max(0.0, float(silence_floor))
+        if mic_channels is None:
+            mic_channels = range(self.channels)
+        mic = sorted({int(c) for c in mic_channels})
+        if not mic or mic[0] < 0 or mic[-1] >= self.channels:
+            raise ValueError(
+                f"mic_channels {mic} 必须是非空且都在 [0, {self.channels}) 内"
+            )
+        self.mic_channels = tuple(mic)
         self._history: collections.deque[list[float]] = collections.deque(
             maxlen=self.window_frames
         )
@@ -165,7 +177,8 @@ class ChannelSelector:
         frame_levels = frame_rms(frame, self.channels)
         self._history.append(frame_levels)
         levels = self._smoothed_levels()
-        best = max(range(self.channels), key=lambda channel: levels[channel])
+        # 只在麦克风声道里选（参考声道不参与，music-far 缺口 2）
+        best = max(self.mic_channels, key=lambda channel: levels[channel])
 
         if not self._initialized:
             self.current = best
@@ -173,7 +186,7 @@ class ChannelSelector:
             return self.current
 
         instant_best = max(
-            range(self.channels), key=lambda channel: frame_levels[channel]
+            self.mic_channels, key=lambda channel: frame_levels[channel]
         )
         if best == self.current:
             self._best_streak = 0
@@ -212,10 +225,25 @@ class ChannelDownmixer:
         window_frames: int = 5,
         hysteresis_ratio: float = 1.25,
         min_hold_frames: int = 3,
+        reference_channels: collections.abc.Sequence[int] = (),
     ) -> None:
         self.channels = max(1, int(channels))
         self.strategy = normalize_strategy(strategy)
         self.fixed_channel = max(0, min(int(fixed_channel), self.channels - 1))
+        # 参考声道（music-far 缺口 2）：8ch 采集的 ch6/ch7 是播放 far-end 参考，
+        # 只作 AEC 输入，不参与选麦（strongest）与平均（average）。fixed 策略
+        # 语义不变（用户显式指定声道号）。
+        ref = sorted({int(c) for c in reference_channels})
+        if ref and (ref[0] < 0 or ref[-1] >= self.channels or len(ref) >= self.channels):
+            raise ValueError(
+                f"reference_channels {ref} 必须都在 [0, {self.channels}) 内且不得占满全部声道"
+            )
+        self.reference_channels = tuple(ref)
+        self.mic_channels = tuple(
+            c for c in range(self.channels) if c not in self.reference_channels
+        )
+        if self.strategy in BEAMFORM_STRATEGIES and self.reference_channels:
+            raise ValueError("波束策略不支持参考声道（按 6ch 纯麦克风阵列设计）")
         self.aligner = FrameAligner(self.channels)
         self.beamformer = self._build_beamformer()
         self.selector = (
@@ -224,6 +252,7 @@ class ChannelDownmixer:
                 window_frames=window_frames,
                 hysteresis_ratio=hysteresis_ratio,
                 min_hold_frames=min_hold_frames,
+                mic_channels=self.mic_channels,
             )
             if self.strategy == STRATEGY_STRONGEST
             else None
@@ -291,10 +320,12 @@ class ChannelDownmixer:
 
         if self.strategy == STRATEGY_AVERAGE:
             samples = _to_samples(aligned)
+            # 只平均麦克风声道（参考声道不进下混，music-far 缺口 2）
+            mics = self.mic_channels
             averaged = array.array(
                 "h",
                 (
-                    _round_div(sum(samples[i : i + self.channels]), self.channels)
+                    _round_div(sum(samples[i + c] for c in mics), len(mics))
                     for i in range(0, len(samples), self.channels)
                 ),
             )

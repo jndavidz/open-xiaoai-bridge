@@ -56,6 +56,7 @@ class XiaoAI:
     _audio_bits = 32
     _channel_strategy = "strongest"
     _fixed_channel = 0
+    _reference_channels: tuple = ()
     _downmixer: ChannelDownmixer | None = None
     _ch0_downmixer: ChannelDownmixer | None = None
     # 唤醒输入独立链（music-far spec 票 05）：默认 None = 不启用（KWS 读主链，
@@ -126,6 +127,26 @@ class XiaoAI:
             fixed_channel = 0
         fixed_channel = max(0, min(fixed_channel, channels - 1))
 
+        # 参考声道（music-far 缺口 2）：8ch 采集的播放参考（默认 ch6/ch7）只作
+        # AEC 输入，不得参与选麦/平均。配置未声明而声道数 ≥7 时启动期告警——
+        # 这是「一开 8ch strongest 就选到音乐」的防线。
+        raw_refs = cls.config_manager.get_app_config("audio_input.reference_channels", [])
+        try:
+            reference_channels = tuple(int(c) for c in (raw_refs or []))
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[XiaoAI] audio_input.reference_channels 非法值 {raw_refs!r}，按空处理"
+            )
+            reference_channels = ()
+        reference_channels = tuple(
+            c for c in reference_channels if 0 <= c < channels
+        )
+        if channels >= 7 and not reference_channels:
+            logger.warning(
+                "[XiaoAI] 采集声道数 ≥7 但未声明 reference_channels——strongest 选麦"
+                "可能选中播放参考声道（音乐本身被当麦克风信号）。8ch 采集应配 [6, 7]"
+            )
+
         try:
             watchdog_seconds = float(
                 cls.config_manager.get_app_config("audio_input.watchdog_seconds", 1.0)
@@ -139,11 +160,13 @@ class XiaoAI:
             or strategy != cls._channel_strategy
             or fixed_channel != cls._fixed_channel
             or bits != cls._audio_bits
+            or reference_channels != cls._reference_channels
         )
         cls._audio_channels = channels
         cls._audio_bits = bits
         cls._channel_strategy = strategy
         cls._fixed_channel = fixed_channel
+        cls._reference_channels = reference_channels
         cls._recording_watchdog.configure(watchdog_seconds)
         # native 的 start_recording / 连接测试在每次调用时读取这两个环境变量；
         # 以 bridge 配置为唯一事实源，避免「Python 按 6ch/S16 下混、native 仍抓另一格式」。
@@ -158,6 +181,7 @@ class XiaoAI:
                     channels=channels,
                     strategy=strategy,
                     fixed_channel=fixed_channel,
+                    reference_channels=reference_channels,
                 )
             )
             cls._ch0_downmixer = (

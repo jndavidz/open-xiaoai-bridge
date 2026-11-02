@@ -332,6 +332,10 @@ APP_CONFIG = {
         "wakeup_channel": {"playing": "inherit", "idle": "inherit", "fixed_channel": 0},
         # 回声消除（票 04）：默认关；开启需 8ch 采集含 ch6 参考
         "aec": {"enabled": False},
+        # 参考声道（music-far 缺口 2）：8ch 采集时播放参考声道号（LX06 = [6, 7]），
+        # 只作 AEC 输入，不参与选麦（strongest）/平均（average）；6ch 采集留空 []。
+        # 声道数 ≥7 且未声明时启动期告警（防线：strongest 选中音乐本身）。
+        "reference_channels": [],
     },
     "inject": {
         # PC 语音注入模块总开关（ticket 07）。默认关闭：

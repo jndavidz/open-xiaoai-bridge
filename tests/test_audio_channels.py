@@ -230,3 +230,69 @@ class ChannelDownmixerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ReferenceChannelsTest(unittest.TestCase):
+    """参考声道排除（music-far 缺口 2）：8ch 采集的 ch6/7 播放参考不得参与选麦/平均。"""
+
+    CHANNELS = 8
+    RATE = 16000
+
+    def _interleaved(self, per_channel_amplitudes, n=1600) -> bytes:
+        import array as _array
+        import sys as _sys
+
+        frames = []
+        t = list(range(n))
+        for i in t:
+            row = [
+                int(amp * (1 if (i // 40) % 2 == 0 else -1))
+                for amp in per_channel_amplitudes
+            ]
+            frames.append(row)
+        arr = _array.array("h", [v for row in frames for v in row])
+        if _sys.byteorder != "little":
+            arr.byteswap()
+        return arr.tobytes()
+
+    def test_strongest_never_selects_reference_channel(self):
+        """播放期 ch6 能量极高：strongest 必须仍选麦克风声道。"""
+        mixer = ChannelDownmixer(
+            channels=self.CHANNELS,
+            strategy="strongest",
+            reference_channels=(6, 7),
+        )
+        # ch1 中等、ch6 极高（音乐参考）、其余近零
+        amps = [100.0, 3000.0, 50.0, 50.0, 50.0, 50.0, 30000.0, 30000.0]
+        raw = self._interleaved(amps)
+        for _ in range(12):
+            mixer.feed(raw)
+        self.assertEqual(mixer.current_channel, 1, "strongest 不得选中参考声道 ch6")
+        self.assertIn(6, mixer.reference_channels)
+        self.assertNotIn(6, mixer.mic_channels)
+
+    def test_average_excludes_reference_channels(self):
+        """average 只平均麦克风声道：参考声道能量不影响输出。"""
+        base = [100.0] + [0.0] * 5 + [0.0, 0.0]
+        out_a = ChannelDownmixer(
+            channels=self.CHANNELS, strategy="average", reference_channels=(6, 7)
+        ).feed(self._interleaved(base))
+        noisy = [100.0] + [0.0] * 5 + [30000.0, 30000.0]
+        out_b = ChannelDownmixer(
+            channels=self.CHANNELS, strategy="average", reference_channels=(6, 7)
+        ).feed(self._interleaved(noisy))
+        self.assertEqual(out_a, out_b, "参考声道能量不应影响 average 输出")
+
+    def test_reference_channel_validation(self):
+        with self.assertRaises(ValueError):
+            ChannelDownmixer(channels=8, reference_channels=(6, 9))
+        with self.assertRaises(ValueError):
+            ChannelDownmixer(channels=8, reference_channels=tuple(range(8)))
+        with self.assertRaises(ValueError):
+            ChannelDownmixer(channels=8, strategy="beamform_fixed", reference_channels=(6,))
+
+    def test_six_channel_default_unchanged(self):
+        """6ch（现产口径）不声明参考声道 = 行为与今天逐字节一致。"""
+        mixer = ChannelDownmixer(channels=6, strategy="strongest")
+        self.assertEqual(mixer.mic_channels, tuple(range(6)))
+        self.assertEqual(mixer.reference_channels, ())

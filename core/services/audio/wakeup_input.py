@@ -118,6 +118,14 @@ class WakeupInputChain:
         self._aec_params = resolve_aec_params(config.get("aec"), channels)
         self._mixers: dict[str, ChannelDownmixer] = {}
         self._aec = None
+        # 参考声道（music-far 缺口 2）：与主链同源配置，8ch 时排除 ch6/7
+        raw_refs = config.get("reference_channels") or []
+        try:
+            self.reference_channels = tuple(
+                c for c in (int(c) for c in raw_refs) if 0 <= c < self.channels
+            )
+        except (TypeError, ValueError):
+            self.reference_channels = ()
         if self._uses_aec:
             from core.services.audio.aec import EchoCanceller
 
@@ -164,6 +172,7 @@ class WakeupInputChain:
                 channels=self.channels,
                 strategy=mode,
                 fixed_channel=self.fixed_channel,
+                reference_channels=self.reference_channels,
             )
             self._mixers[mode] = mixer
         return mixer
