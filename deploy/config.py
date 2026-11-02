@@ -347,6 +347,8 @@ APP_CONFIG = {
         #     VAD 只判语音帧与端点时机（静音 480ms reset 检测流）。
         #     此前（11-01 起）注释声称"全帧喂 KWS"但主环实际仍是门控——
         #     该偏差由票 02 消除。回滚 = 改 "gate" + 重启容器（旧行为原样保留）。
+        # ✅ 已上生产 2026-11-03（观察窗口至 11-10，采集脚本 deploy/monitor-fa-cpu.sh；
+        #    镜像锚 rollback-pre-vad-endpoint-20261103）
         "vad_mode": "endpoint",
         # 逐词门槛（票 03）：{词: {"boost": 加成, "threshold": 触发门槛}}，
         # 编译进 keywords.txt 后缀（:boost #threshold，官方语法）。缺省 = 空，

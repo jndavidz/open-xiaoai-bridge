@@ -130,6 +130,12 @@ cd bridge/deploy && docker compose up -d --force-recreate
 
 容器启动即重跑 CMD → 重新编译 `keywords.txt`（含新增唤醒词）+ 以 fork 代码运行 `main.py`。
 
+**部署记录（2026-11-03 music-far 票 02 `vad_mode=endpoint` 上生产）**：办公室 WSL worktree 干净快照
+（bridge `edada85`）构建 `home`=`5ad938630398` → SSH 流式推 NAS（注意 buildkit save/load 后 image ID 会变，
+以 CreatedAt + 容器内文件核验为准）→ NAS `config.py` 同步（`.bak-20261103-pre-vad-endpoint` 备份）→ recreate。
+证据：`VAD:[mode:endpoint]`、影子双臂、health 200、CPU 70%。回滚双支点 = 镜像 tag `rollback-pre-vad-endpoint-20261103`
++ config 备份。监控脚本 `deploy/monitor-fa-cpu.sh`（窗口至 11-10）。
+
 > ⚠️ **部署遗漏重灾**（2026-08-26 实踩）：只推镜像（路径 A）而**不同步 config.py** → 新唤醒词全部失效
 > （「你好小塔」可唤醒、「你好助教」无反应——因为词表在 **bind-mount 的 config.py**，不随镜像走）。
 > 完整部署 = **① 推镜像 + ② 同步 `deploy/config.py`（及 compose/.env，若变更）+ ③ recreate** 三步缺一不可；
