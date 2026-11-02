@@ -10,11 +10,14 @@ class _SherpaOnnx:
         config = ConfigManager.instance()
         keywords_score = config.get_app_config("kws.keywords_score", 2.0)
         keywords_threshold = config.get_app_config("kws.keywords_threshold", 0.2)
+        # 主路 beam 宽度同样走配置（此前硬编码 8，配置无法表达主路值，与影子
+        # kws.shadow.max_active_paths 不对称）。默认 8 = 已复评的省 CPU 档。
+        max_active_paths = int(config.get_app_config("kws.max_active_paths", 8))
 
         self.keyword_spotter = sherpa_onnx.KeywordSpotter(
             provider="cpu",
             num_threads=1,
-            max_active_paths=8,
+            max_active_paths=max(1, max_active_paths),
             keywords_score=keywords_score,
             keywords_threshold=keywords_threshold,
             num_trailing_blanks=0,

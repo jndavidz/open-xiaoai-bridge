@@ -306,17 +306,27 @@ APP_CONFIG = {
         # 2026-10-27 A/B 放宽：3.0 -> 2.5（真机 9/10 命中；announce 词表闸门兜底）
         # 2026-10-28 播放中召回 A/B：音量 20 基本都能唤醒 / 音量 60 难唤醒、
         #   贴近音箱可大幅提高 ⇒ 再放宽 2.5 -> 2.0 试运行（观察误唤醒即可回退）。
-        "keywords_score": 2.0,
+        # 2026-11-01 主路切候选 wenetspeech（用户裁决「必须解决」）：2.0 -> 1.0，
+        #   取候选官方起点并与影子 arms 同构；VAD=0 诊断期实测候选 ~10/10 vs 旧模型 5/10。
+        "keywords_score": 1.0,
         # 检测阈值（越低越灵敏）
         # 2026-09-24 收紧：0.2 -> 0.35（incident §5 建议 3，建议区间 0.35~0.4 取下沿）
         # 2026-10-27 A/B 放宽：0.35 -> 0.30（观察期误触发即回退）
-        "keywords_threshold": 0.30,
+        # 2026-11-01 主路切候选：0.30 -> 0.25
+        "keywords_threshold": 0.25,
+        # 主路 KeywordSpotter 的 beam 宽度。候选模型官方示例 16，但 200 段复评（生产
+        # 口径 strongest）p8 与 p16 召回/FPR 零差异、p8 略省 CPU ⇒ 生产取 8。
+        # ⚠ 与 keywords_score/threshold 同属启动期参数：改动需重启容器。
+        "max_active_paths": 8,
         # 判定说完的最小静默时长（ms）
         "min_silence_duration": 480,
         # 影子 KWS：候选模型对同一路音频并行检测，只记录 JSONL、不触发唤醒。
-        # 灰度前影子测试用；model_dir 需挂载到容器内（如 models/shadow）。
+        # 双臂 always-on 影子检测（只写 JSONL，不执行动作）。
+        # ⚠ 2026-11-01 主路/影子**角色已互换**：主路 = 候选 wenetspeech（models/ 根），
+        #   shadow 目录 = **原现网 zipformer** 回滚对照臂（用户要求保留，不退役）。
+        #   本段阈值/宽度生产 config 省略 arms/always_on/max_active_paths 走默认同值。
         "shadow": {
-            # Phase 1：候选模型 always-on 影子（只写 JSONL，不执行动作）
+            # 影子臂 always-on（含 VAD 未放行帧）：只记录，绝不触发唤醒
             "enabled": True,
             "model_dir": "/app/core/models/shadow",
             "score": 1.0,
@@ -329,7 +339,11 @@ APP_CONFIG = {
     "vad": {
         # share 项目客厅环境实战值 0.3（默认 0.10 过敏易误触发）
         # 2026-09-24 收紧：0.3 -> 0.4（incident §5 建议 3）
-        "threshold": 0.4,
+        # 2026-11-01 主路=候选后与影子 strongest 同构（全帧喂 KWS）：0.4 -> 0.2。
+        #   远场 VAD 断续会截碎 chunked 检测流（200 段消融：0.4 门把候选 music_far
+        #   从 75% 压到 10%），误触发改由 keywords_threshold 0.25 承担
+        #   （影子 arms 全天零背景误报佐证）。本项支持热重载。
+        "threshold": 0.2,
         "min_speech_duration": 250,
         "min_silence_duration": 500,
     },

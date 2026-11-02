@@ -138,14 +138,20 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 - 词表在 `config.py` 的 `APP_CONFIG["wakeup"]["keywords"]`（AI 唤醒词 + 全部免唤醒短语都在此）；
   免唤醒动作在 `DIRECT_COMMANDS`（两处必须同步，否则词表命中但无对应动作）
 - 识别不灵：`kws.keywords_threshold` 下调；误触发：上调 + `vad.threshold` 上调
-- **当前值（2026-09-24 收紧，incident §5 建议 3）**：
-  `keywords_score=3.0`（原 2.0）· `keywords_threshold=0.35`（原 0.2）· `vad.threshold=0.4`（原 0.3）
-- ⚠️ **`keywords_score`/`keywords_threshold` 改动需重启容器**（`SherpaOnnx.start()` 只在启动时建 KeywordSpotter；
-  config 热重载只刷 `vad.threshold`/`min_silence`）；词表改动同理（`keywords.txt` 启动时编译）
-  ✅ **已上线 2026-09-24**：新 config.py 同步至 NAS + 新镜像（含播放闸门/命中留证/caller 审计）推送 +
-  `docker compose up -d --force-recreate`；启动日志确认 `KWS: [score:3.0, threshold:0.35], VAD:[threshold:0.4]`；
+- **当前值（2026-11-01 主路切候选 wenetspeech，用户裁决「必须解决」）**：
+  `keywords_score=1.0` · `keywords_threshold=0.25` · `kws.max_active_paths=8` · `vad.threshold=0.2` ·
+  `kws.shadow.enabled=true`（影子目录装的是**原现网 zipformer**，= 回滚对照臂，不退役）
+  - 依据：VAD=0 诊断期同一路音频上影子候选 ~10/10 vs 旧模型 5/10；200 段消融 VAD 0.4 门把
+    候选 `music_far` 从 75% 压到 10%；p8 vs p16 召回/FPR 零差异（p8 略省）。
+  - 历史：2026-09-24 收紧 3.0/0.35/0.4（incident §5 建议 3）→ 10-27 放宽 2.5/0.30 →
+    10-28 放宽 2.0 → 11-01 切候选 1.0/0.25 + VAD 0.2。
+- ⚠️ **`keywords_score`/`keywords_threshold`/`kws.max_active_paths` 改动需重启容器**（三者都在
+  `SherpaOnnx.start()` 建 `KeywordSpotter` 时读取；config 热重载只刷 `vad.threshold`/`min_silence`）；
+  词表改动同理（`keywords.txt` 启动时编译）
+  ✅ 2026-09-24 上线首版：新 config.py 同步至 NAS + 新镜像（含播放闸门/命中留证/caller 审计）推送 +
+  `docker compose up -d --force-recreate`；启动日志确认 `KWS: [score:.., threshold:..], VAD:[threshold:..]`；
 
-- **2026-10-26 白天实测（用户在场，生产 `p3-20261026`）**：24 个免唤醒词唯一命中 **10/24**；复测 6 句中对照组「停止音乐」亦未命中，VAD 对未命中句全部检出语音（2.4–3.2s）⇒ 当前 `score=3.0/threshold=0.35` 下召回不稳，与 2026-09-24 收紧的误触发取舍直接相关。调参需重启容器（同上）且需先评估 announce KWS 闸门对自触发回环的覆盖——**待裁决**，台账 `ws: docs/plan/pending-followups.md` §4。
+- **2026-10-26 白天实测（用户在场，生产 `p3-20261026`，当时档 3.0/0.35）**：24 个免唤醒词唯一命中 **10/24**；复测 6 句中对照组「停止音乐」亦未命中，VAD 对未命中句全部检出语音（2.4–3.2s）⇒ 当时的 score/threshold 下召回不稳，与 2026-09-24 收紧的误触发取舍直接相关。调参需重启容器（同上）且需先评估 announce KWS 闸门对自触发回环的覆盖——台账 `ws: docs/plan/pending-followups.md` §4。
 
 ### 音频输入（六麦 / 看门狗）
 
