@@ -16,6 +16,7 @@
     "strongest"= 滑动窗口最强麦 + 迟滞（同主链口径）
     "fixed"    = 固定声道（fixed_channel，默认 ch0）
     "aec"      = 回声消除输出（播放期参考 ch6；需要 8ch 采集含参考声道）
+    "specsub"  = 谱减回声抑制输出（同一参考声道；实测优于 aec，见 specsub.py 头注释）
 非法值启动期告警并回落 "inherit"，不静默。
 
 播放态判定使用既有宿主状态（speaker.status == "playing"），不在音频路径里
@@ -35,7 +36,8 @@ MODE_INHERIT = "inherit"
 MODE_STRONGEST = STRATEGY_STRONGEST
 MODE_FIXED = STRATEGY_FIXED
 MODE_AEC = "aec"
-VALID_MODES = (MODE_INHERIT, MODE_STRONGEST, MODE_FIXED, MODE_AEC)
+MODE_SPECSUB = "specsub"
+VALID_MODES = (MODE_INHERIT, MODE_STRONGEST, MODE_FIXED, MODE_AEC, MODE_SPECSUB)
 
 DEFAULT_WAKEUP_CHANNEL = {"playing": MODE_INHERIT, "idle": MODE_INHERIT, "fixed_channel": 0}
 DEFAULT_AEC = {
@@ -102,6 +104,23 @@ def resolve_aec_params(section: dict | None, channels: int) -> dict | None:
     return params
 
 
+def resolve_specsub_params(section: dict | None, channels: int) -> dict | None:
+    """解析 audio_input.specsub；不可用（未启用/无参考声道）返回 None。"""
+    section = section if isinstance(section, dict) else {}
+    if not section.get("enabled"):
+        return None
+    params = dict(section)
+    ref_channel = int(params.get("ref_channel", 6))
+    if ref_channel >= channels:
+        logger.warning(
+            f"[WakeupInput] specsub.ref_channel={ref_channel} 超出采集声道数 "
+            f"{channels}（需 8ch 采集含播放参考），谱减不可用",
+            module="XiaoAI",
+        )
+        return None
+    return params
+
+
 class WakeupInputChain:
     """按播放态选择唤醒输入通道并产出 1ch PCM（喂 GlobalStreamKws）。
 
@@ -116,6 +135,8 @@ class WakeupInputChain:
         self.fixed_channel = parsed["fixed_channel"]
         self.channels = int(channels)
         self._aec_params = resolve_aec_params(config.get("aec"), channels)
+        self._specsub_params = resolve_specsub_params(config.get("specsub"), channels)
+        self._specsub = None
         self._mixers: dict[str, ChannelDownmixer] = {}
         self._aec = None
         # 参考声道（music-far 缺口 2）：与主链同源配置，8ch 时排除 ch6/7
@@ -145,12 +166,30 @@ class WakeupInputChain:
                 ref_lead_samples=int(p.get("ref_lead_samples", 64)),
                 ref_polarity_inverted=bool(p.get("ref_polarity_inverted", True)),
             )
+        if self._uses_specsub:
+            from core.services.audio.specsub import SpectralSuppressor
+
+            p = self._specsub_params
+            self._specsub = SpectralSuppressor(
+                channels=self.channels,
+                ref_channel=int(p.get("ref_channel", 6)),
+                mic_channel=self.fixed_channel,
+                alpha=float(p.get("alpha", 0.6)),
+                floor_db=float(p.get("floor_db", -20.0)),
+                ref_lead_samples=int(p.get("ref_lead_samples", 64)),
+            )
         self._last_mode = None
-        self._counters = {"frames_in": 0, "mode_switches": 0, "aec_bypass": 0}
+        self._counters = {"frames_in": 0, "mode_switches": 0, "aec_bypass": 0,
+                          "specsub_bypass": 0}
 
     @property
     def active(self) -> bool:
         return self.playing_mode != MODE_INHERIT or self.idle_mode != MODE_INHERIT
+
+    @property
+    def _uses_specsub(self) -> bool:
+        return (MODE_SPECSUB in (self.playing_mode, self.idle_mode)
+                and self._specsub_params is not None)
 
     @property
     def _uses_aec(self) -> bool:
@@ -160,6 +199,8 @@ class WakeupInputChain:
         mode = self.playing_mode if playing else self.idle_mode
         # aec 配置了但不可用（无参考声道）→ 静默回落固定单麦（旁路语义）
         if mode == MODE_AEC and self._aec_params is None:
+            return MODE_FIXED
+        if mode == MODE_SPECSUB and self._specsub_params is None:
             return MODE_FIXED
         return mode
 
@@ -193,6 +234,12 @@ class WakeupInputChain:
                 self._counters["mode_switches"] += 1
             self._last_mode = mode
 
+        if mode == MODE_SPECSUB and self._specsub is not None:
+            out = self._specsub.feed(raw)
+            st = self._specsub.stats()
+            self._counters["specsub_bypass"] = (
+                st.get("bypass_no_ref", 0) + st.get("bypass_ref_flat", 0))
+            return out
         if mode == MODE_AEC and self._aec is not None:
             stats = self._aec.stats()
             out = self._aec.feed(raw)

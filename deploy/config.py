@@ -396,7 +396,21 @@ APP_CONFIG = {
         # 默认关闭；开启后参考异常/发散/双讲自动旁路直通（见 core/services/audio/aec.py）。
         # 启用步骤：采集切 8ch（channels=8）→ aec.enabled=true →
         #   wakeup_channel.playing="aec" → 重启；回滚 = playing 改 inherit。
+        # ⚠ 2026-11-03 实测：真实音乐下线性 AEC ERLE 仅 2–3.5 dB（连续流也一样），
+        #   召回 music_near 70→85%、music_far 10→15%。首选应是下面的 specsub。
         "aec": {"enabled": False},
+        # 谱减回声抑制（2026-11-03 真机数据选出的最优方案，见 core/services/audio/specsub.py）：
+        # 同一 8ch 参考声道，频域谱减绕开播放链 EQ/DRC 非线性。实测：
+        #   music_near 70% → 90%（α=0.6）、music_far 10% → 30%
+        # 启用步骤：channels=8 + reference_channels=[6,7] → specsub.enabled=true →
+        #   wakeup_channel.playing="specsub" → 重启；回滚 = playing 改 inherit。
+        "specsub": {
+            "enabled": False,
+            "ref_channel": 6,
+            "alpha": 0.6,          # 过减系数（≥1.0 开始损伤人声）
+            "floor_db": -20.0,     # 残留下限，防音乐噪声
+            "ref_lead_samples": 64,  # 参考领先麦克风 ~4 ms
+        },
         # 参考声道（music-far 缺口 2）：8ch 采集时播放参考声道号（LX06 = [6, 7]），
         # 只作 AEC 输入，不参与选麦（strongest）/平均（average）；6ch 采集留空 []。
         # 声道数 ≥7 且未声明时启动期告警（防线：strongest 选中音乐本身）。
