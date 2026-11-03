@@ -428,8 +428,14 @@ APP_CONFIG = {
             "port": 22,
             # 容器内密钥（compose 已挂 /app/keys/lx06-ir:ro，同 native 事件源）
             "key_path": "/app/keys/lx06-ir/id_rsa",
-            # ssh 参数整组替换默认组：容器内用挂载的专用 known_hosts
-            "ssh_opts": ["-o", "StrictHostKeyChecking=yes",
+            # ssh 参数整组替换默认组——⚠ 生产全集（2026-11-04 实测教训）：缺
+            # HostKeyAlgorithms/PubkeyAcceptedAlgorithms 即 "no matching host key
+            # type found"（dropbear 仅 ssh-rsa，见 docs/devices/lx06 + ssh-key-plan §9）
+            "ssh_opts": ["-o", "BatchMode=yes",
+                         "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
+                         "-o", "HostKeyAlgorithms=+ssh-rsa",
+                         "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
+                         "-o", "StrictHostKeyChecking=yes",
                          "-o", "UserKnownHostsFile=/app/keys/lx06-ir/known_hosts"],
             # cmd：直接给完整采集命令（argv 经 shell 词法切分），绕过上面的
             # host/key_path 构造；用于自定拓扑（如 NAS 侧 pump 经 TCP 投喂，
