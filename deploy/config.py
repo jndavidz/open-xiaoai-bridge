@@ -412,9 +412,14 @@ APP_CONFIG = {
             "floor_db": -20.0,     # 残留下限，防音乐噪声
             "ref_lead_samples": 64,  # 参考领先麦克风 ~4 ms
         },
-        # 8ch 旁路采集器（lx06-audio-sidecar spec 票 01/02）：SSH 到设备起
-        # arecord -D noop -c 8（dsnoop 与 client 6ch 并发，已实测不打架），
-        # 为谱减提供 ch6 播放参考（近端与参考同源，勿再另拼 client 流）。
+        # ⛔ sidecar 旁路采集器（历史方案，2026-11-04 起**生产不推荐**）：
+        # 推荐形态 = client 直采 8ch（上方 audio_input.channels=8）+ specsub，
+        # 一条流、近端与参考天然同源、无模式切换。
+        # sidecar 之所以被废弃：它引入两条独立采集管道，播放/空闲切换时
+        # KWS 输入源跳变、流式 zipformer 上下文被打断 ⇒ 识别持续失效
+        # （2026-11-04 真机：播放/停止音乐后连原生唤醒都接不住）。
+        # 原前提「client 硬编码 -c 6」已被证伪：channels 由 bridge 下发。
+        # 以下保留供确实需要第二路采集的场景参考。
         # 启用步骤：enabled=true + host/key_path → wakeup_channel.playing="sidecar"
         # （idle 建议 "strongest"）→ 重启；回滚 = enabled=false 热关（秒级，
         # 唤醒自动回落 strongest 单麦）或 playing 改回 inherit + 重启。
