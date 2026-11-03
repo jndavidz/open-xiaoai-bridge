@@ -330,6 +330,29 @@ APP_CONFIG = {
         # 唤醒输入通道条件化（music-far 票 05）：playing/idle ∈ inherit/strongest/
         # fixed/aec；默认双 inherit = KWS 读主链，零行为变化。用法见 deploy/config.py
         "wakeup_channel": {"playing": "inherit", "idle": "inherit", "fixed_channel": 0},
+        # 8ch 旁路采集器（lx06-audio-sidecar spec 票 01）：SSH 到设备起
+        # arecord -c 8（dsnoop 与 client 并发），为谱减提供 ch6 播放参考。
+        # 默认关。启用 = wakeup_channel.playing="sidecar" + enabled=true +
+        # 填 host/key_path（或自定 cmd）；回滚 = enabled=false（热关）。
+        "sidecar": {
+            "enabled": False,
+            # 设备 SSH：host/key_path 必填（或改用 cmd 直接给完整采集命令）
+            "host": "",
+            "user": "root",
+            "port": 22,
+            "key_path": "",
+            # cmd 非空时优先：直接给完整采集命令（自定拓扑，见 deploy/config.py）；
+            # 此时远端清理不归 bridge 代管
+            # "cmd": "",
+            # 采集规格（16 kHz / S32_LE / 交错原始流，spec 契约）
+            "channels": 8,
+            "rate": 16000,
+            "bits_per_sample": 32,
+            # 断流判定与重连退避（秒）
+            "stall_timeout": 2.0,
+            "backoff_initial": 1.0,
+            "backoff_max": 30.0,
+        },
         # 回声消除（票 04）：默认关；开启需 8ch 采集含 ch6 参考
         "aec": {"enabled": False},
         # 参考声道（music-far 缺口 2）：8ch 采集时播放参考声道号（LX06 = [6, 7]），

@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import os
 import threading
 import time
@@ -62,6 +63,9 @@ class XiaoAI:
     # 唤醒输入独立链（music-far spec 票 05）：默认 None = 不启用（KWS 读主链，
     # 与历史行为一致）；配置 audio_input.wakeup_channel 非 inherit 才构建。
     _wakeup_chain = None
+    # sidecar 8ch 采集器（lx06-audio-sidecar spec 票 01/02）：默认 None
+    _sidecar_runner = None
+    _sidecar_task = None
     _last_input_frame_time = 0.0
     _input_frame_count = 0
     _current_channel = None
@@ -216,6 +220,9 @@ class XiaoAI:
             logger.warning(f"[XiaoAI] wakeup input chain init failed: {exc}")
             cls._wakeup_chain = None
 
+        # sidecar 8ch 采集器（lx06-audio-sidecar spec 票 01/02）
+        cls._apply_sidecar_config()
+
     @classmethod
     async def _reconcile_mic_once(cls):
         """首个事件到达后执行一次麦态自愈（ticket 10）。"""
@@ -224,6 +231,123 @@ class XiaoAI:
             await cls.speaker.reconcile_mic_state()
         except Exception as e:  # noqa: BLE001 - 自愈失败不得影响事件处理
             logger.warning(f"[XiaoAI] mic state reconcile failed: {e}")
+
+    @classmethod
+    def _apply_sidecar_config(cls):
+        """sidecar 8ch 采集器生命周期（随配置热重载；默认关闭零行为变化）。"""
+        try:
+            from core.services.audio import sidecar, wakeup_input
+
+            section = cls.config_manager.get_app_config("audio_input", {}) or {}
+            parsed = wakeup_input.parse_wakeup_channel_config(
+                section.get("wakeup_channel")
+            )
+            sc = section.get("sidecar")
+            sc = sc if isinstance(sc, dict) else {}
+            want = (
+                wakeup_input.MODE_SIDECAR in (parsed["playing"], parsed["idle"])
+                and bool(sc.get("enabled"))
+            )
+            params = sidecar.parse_sidecar_config(sc) if want else None
+            if want and params is None:
+                logger.warning(
+                    "[XiaoAI] sidecar 模式已配置但采集器不可用（配置不完整），"
+                    "唤醒输入将回落 strongest"
+                )
+        except Exception as exc:  # noqa: BLE001 - 配置解析失败不得影响主链
+            logger.warning(f"[XiaoAI] sidecar config parse failed: {exc}")
+            params, want = None, False
+
+        runner = cls._sidecar_runner
+        if not want or params is None:
+            if runner is not None:
+                runner.stop()
+                cls._sidecar_runner = None
+                logger.info("[XiaoAI] sidecar 8ch 采集已关闭（回滚即改回 inherit/关开关）")
+            return
+
+        sig = (
+            tuple(params["command"]),
+            params["cleanup_command"] and tuple(params["cleanup_command"]),
+            params["channels"], params["bits"], params["stall_timeout"],
+            params["backoff_initial"], params["backoff_max"],
+        )
+        if runner is not None and getattr(runner, "config_sig", None) == sig:
+            return  # 配置未变：不动运行中的采集器
+        if runner is not None:
+            runner.stop()
+
+        runner = sidecar.SidecarCaptureRunner(
+            params["command"],
+            cleanup_command=params["cleanup_command"],
+            channels=params["channels"],
+            bits=params["bits"],
+            stall_timeout=params["stall_timeout"],
+            backoff_initial=params["backoff_initial"],
+            backoff_max=params["backoff_max"],
+            on_frame=cls._on_sidecar_frame,
+            config_sig=sig,
+        )
+        cls._sidecar_runner = runner
+        if cls.async_loop is not None:
+            cls._sidecar_task = asyncio.run_coroutine_threadsafe(
+                runner.run(), cls.async_loop
+            )
+            cls._register_sidecar_exit_cleanup()
+            logger.info("[XiaoAI] sidecar 8ch 采集已启动")
+        else:
+            # init_xiaoai 首次调用时 async_loop 尚未建立；start 前会再进一次
+            logger.warning("[XiaoAI] sidecar 异步环未就绪，采集器暂缓启动")
+
+    _sidecar_exit_cleanup_registered = False
+
+    @classmethod
+    def _register_sidecar_exit_cleanup(cls):
+        """进程退出时尽力回收设备侧 arecord（硬约束 5：不能只靠连接断开）。
+
+        覆盖 SIGINT/正常退出（SIGTERM 直杀无 atexit——该场景由下次启用的
+        _spawn 前置 cleanup 兜底回收）。重复注册幂等。
+        """
+        if cls._sidecar_exit_cleanup_registered:
+            return
+        cls._sidecar_exit_cleanup_registered = True
+
+        def _cleanup_at_exit():
+            runner = cls._sidecar_runner
+            if runner is None:
+                return
+            runner.stop()
+            if runner.cleanup_command:
+                try:
+                    import subprocess
+
+                    subprocess.run(
+                        runner.cleanup_command,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5.0,
+                        check=False,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 退出期清理尽力而为
+                    logger.warning(f"[XiaoAI] sidecar exit cleanup failed: {exc}")
+
+        atexit.register(_cleanup_at_exit)
+
+    @classmethod
+    def _on_sidecar_frame(cls, frames: bytes):
+        """sidecar 8ch 帧 → 唤醒链谱减 → GlobalStreamKws（只服务唤醒路径）。"""
+        chain = cls._wakeup_chain
+        if chain is None or not frames:
+            return
+        try:
+            pcm = chain.feed_sidecar(frames)
+        except Exception as exc:  # noqa: BLE001 - sidecar 异常不阻塞采集环
+            logger.warning(f"[XiaoAI] sidecar frame feed failed: {exc}")
+            return
+        if pcm:
+            from core.services.audio.stream import GlobalStreamKws
+
+            GlobalStreamKws.input(pcm)
 
     @classmethod
     def _apply_event_plane_config(cls):
@@ -352,6 +476,12 @@ class XiaoAI:
                 and speaker.status == "playing"
             )
             chain.set_playing(playing)
+            # sidecar 健康（票 02）：随 client 帧节奏轮询采集器，健康跳变
+            # 在链内计数告警并回落 strongest（None = 无采集器）
+            runner = cls._sidecar_runner
+            chain.set_sidecar_health(
+                runner.is_healthy() if runner is not None else None
+            )
             try:
                 kws_pcm = chain.feed(raw)
             except Exception as exc:  # noqa: BLE001 - 链异常静默回落，不打断主链
@@ -555,6 +685,10 @@ class XiaoAI:
         # 唤醒输入链（票 05）：仅激活时出现该键，面板/排障可见当前口径
         if cls._wakeup_chain is not None:
             health["wakeup_input"] = cls._wakeup_chain.stats()
+        # sidecar 采集器（票 03）：采集侧健康段（链侧回落状态在
+        # wakeup_input.sidecar 段内，不另开端点）
+        if cls._sidecar_runner is not None:
+            health["sidecar"] = cls._sidecar_runner.stats()
         return health
 
     @classmethod
@@ -796,6 +930,9 @@ class XiaoAI:
         open_xiaoai_server.register_fn("on_input_data", cls.on_input_data)
         open_xiaoai_server.register_fn("on_event", cls.__on_event)
         cls.__init_background_event_loop()
+        # sidecar 采集器挂专用 async_loop（首次 _apply_audio_input_config 时
+        # 环未建立，这里补一次启动判定）
+        cls._apply_sidecar_config()
         # 看门狗挂在专用 async_loop 上；start_server 之后的代码可能永不返回
         cls._watchdog_task = asyncio.run_coroutine_threadsafe(
             cls._recording_watchdog_loop(),

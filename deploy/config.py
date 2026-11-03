@@ -387,7 +387,8 @@ APP_CONFIG = {
         "watchdog_seconds": 1.0,
         # 唤醒输入通道条件化（music-far spec 票 05）：主路 KWS 按播放态选源。
         #   playing / idle ∈ inherit（默认，读主链 GlobalStream，零行为变化）/
-        #   strongest / fixed / aec（回声消除输出，需 8ch 采集含参考声道）。
+        #   strongest / fixed / aec（回声消除输出，需 8ch 采集含参考声道）/
+        #   sidecar（独立 8ch 采集器 → 谱减 → 1ch，见下方 sidecar 段）。
         # 非法值启动期告警并回落 inherit；改动需重启容器（KWS 流源启动期决定）。
         # ⚠ 只影响 KWS/VAD 路径；对话 ASR 与语音注入的降声道（channel_strategy）
         #   不经此链，逐字节不变。回滚 = 两键改回 inherit + 重启。
@@ -410,6 +411,34 @@ APP_CONFIG = {
             "alpha": 0.6,          # 过减系数（≥1.0 开始损伤人声）
             "floor_db": -20.0,     # 残留下限，防音乐噪声
             "ref_lead_samples": 64,  # 参考领先麦克风 ~4 ms
+        },
+        # 8ch 旁路采集器（lx06-audio-sidecar spec 票 01/02）：SSH 到设备起
+        # arecord -D noop -c 8（dsnoop 与 client 6ch 并发，已实测不打架），
+        # 为谱减提供 ch6 播放参考（近端与参考同源，勿再另拼 client 流）。
+        # 启用步骤：enabled=true + host/key_path → wakeup_channel.playing="sidecar"
+        # （idle 建议 "strongest"）→ 重启；回滚 = enabled=false 热关（秒级，
+        # 唤醒自动回落 strongest 单麦）或 playing 改回 inherit + 重启。
+        # 健康面：/api/health audio.sidecar（帧龄/字节率/对齐错误/重连）
+        #         与 audio.wakeup_input.sidecar（回落计数）。
+        "sidecar": {
+            "enabled": False,
+            # 设备 SSH（key-only + iptables 限源，见 docs/devices/lx06/README §⑤）
+            "host": "10.10.10.20",
+            "user": "root",
+            "port": 22,
+            "key_path": "",   # 容器内可读的私钥路径；留空 = sidecar 不可用
+            # cmd：直接给完整采集命令（argv 经 shell 词法切分），绕过上面的
+            # host/key_path 构造；用于自定拓扑（如 NAS 侧 pump 经 TCP 投喂，
+            # 同 event_plane.native_cmd 模式）。⚠ 外部命令拓扑下 bridge 不代管
+            # 远端清理，残留回收由 pump 自身负责。
+            # 采集规格（16 kHz / S32_LE / 交错原始流，≈512 KB/s LAN 充裕）
+            "channels": 8,
+            "rate": 16000,
+            "bits_per_sample": 32,
+            # 断流判定与重连退避（秒）；退避在连续稳定 ≥60s 后归零
+            "stall_timeout": 2.0,
+            "backoff_initial": 1.0,
+            "backoff_max": 30.0,
         },
         # 参考声道（music-far 缺口 2）：8ch 采集时播放参考声道号（LX06 = [6, 7]），
         # 只作 AEC 输入，不参与选麦（strongest）/平均（average）；6ch 采集留空 []。

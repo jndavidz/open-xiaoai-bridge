@@ -52,7 +52,9 @@ open-xiaoai-bridge/
 │   │   │   ├── speaking_channel.py# 对话循环发声接缝（B-29 步 2）：播放 API 只经 open() 产出 session（进门即物理断录）
 │   │   │   ├── vad/silero.py      # Silero VAD 语音活动检测（ONNX）
 │   │   │   ├── aec.py             # 播放期回声消除（music-far 票 04）：对齐后单抽头 NLMS，ch6 参考，三类旁路静默直通；aec.enabled 默认关
-│   │   │   ├── wakeup_input.py    # 唤醒输入通道条件化（music-far 票 05）：按播放态选 strongest/fixed/aec 喂 GlobalStreamKws；默认 inherit（读主链，零行为变化）
+│   │   │   ├── specsub.py         # 播放期谱减回声抑制（music-far 票 04b）：STFT 域谱减绕开播放链 EQ/DRC 非线性，真实音乐下优于线性 AEC（near 70→90%）
+│   │   │   ├── sidecar.py         # 8ch 旁路采集器（lx06-audio-sidecar 票 01）：SSH `arecord -D noop -c 8` 流式取回、8ch 帧对齐、断流退避重连、远端 PID 精确回收（grep cmdline 守卫，不碰 client 的 arecord）；`audio_input.sidecar` 默认关；**近端与参考必须同源（禁止与 client 6ch 拼接）是 spec 硬约束**
+│   │   │   ├── wakeup_input.py    # 唤醒输入通道条件化（music-far 票 05）：按播放态选 strongest/fixed/aec/specsub/sidecar 喂 GlobalStreamKws；默认 inherit（读主链，零行为变化）
 │   │   │   ├── kws/sherpa.py      # Sherpa KWS 关键词唤醒（kws/__init__ 含 listen_disabled 持久开关 + 播放闸门；vad_mode=endpoint 全帧喂 / gate 回滚）
 │   │   │   ├── kws/shadow.py      # 影子 KWS：候选模型双臂 always-on 并行检测，JSONL + 命中留证 PCM，不唤醒（kws.shadow.enabled，默认关）
 │   │   │   ├── kws/l3_shadow.py   # L3 影子第三臂（music-far 票 06）：逆向三词模型 numpy 复现链，同帧只记录不触发（kws.shadow.arms 含 l3 时启用）
@@ -599,6 +601,8 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒。**启动期参数全部来自配置**：`kws.keywords_score`（当前 1.0）/ `kws.keywords_threshold`（0.25）/ `kws.max_active_paths`（8，默认同值）；三者只在 `start()` 建 `KeywordSpotter` 时读取，**改动需重启容器**（`vad.threshold`/`min_silence` 才支持热重载）。`num_threads=1` 是 N3060 硬约束，不配置化；`kws/__init__` 含 `listen_disabled` 持久开关 + **播放闸门**（`gate_on`/`gate_off`）；VAD 默认 `vad.threshold=0.2`（2026-11-01 主路切候选后不再做前置门，见台账 §1.11） |
 | 影子 KWS | `audio/kws/shadow.py` | `kws.shadow.model_dir` 模型 strongest+ch0 **双臂 always-on** 并行检测（`kws.shadow.always_on` 全帧检测，含 VAD 未放行帧），命中/主命中写 `data/shadow/kws-shadow-YYYYMMDD.jsonl`（context 含 `device_state`←MainApp / `playing` / `vad_prob` 窗口最大值 / `ch0_reads/ch0_short`）+ 留证 PCM `data/kws_snapshots/shadow_<arm>_*.pcm`（每 arm 留 50 个），**绝不触发唤醒**；根 `config.py` 默认关、`deploy/config.py` 生产为开，初始化/运行异常自动停用。⚠ 2026-11-01 起**角色已互换**：主路 = 候选 wenetspeech，影子目录 = 原现网 zipformer（回滚对照臂） |
 | 多声道入口 | `audio/channels.py` | 6ch 帧对齐 + 最强麦（滑窗+迟滞）/等权平均/固定声道降为 1ch；纯 stdlib。另有 `beamform_fixed`/`beamform_doa` 两策略（延迟导入 `audio/beamform.py`，numpy DAS；仅离线验证，未接生产 config） |
+| 唤醒输入链 | `audio/wakeup_input.py` | 按播放态分派 KWS 输入源（inherit/strongest/fixed/aec/specsub/sidecar），产出喂 GlobalStreamKws；`wakeup_channel` 默认双 inherit 零行为变化；不可用态自动回落（aec/specsub 无参考→fixed，sidecar 未就绪/断流→strongest）并计数告警 |
+| 8ch sidecar 采集 | `audio/sidecar.py` + `core/xiaoai.py` | 独立 8ch 采集通道（SSH `arecord -D noop -c 8`，dsnoop 与 client 并发），为谱减供 ch6 参考；断流退避重连、远端 PID 精确回收（启动前/退出/配置关三路清理）、健康面 `audio.sidecar` + 回落态 `audio.wakeup_input.sidecar`；`sidecar.enabled` 默认关，回滚 = 关开关热停或 playing 改回 inherit |
 | 录音看门狗 | `audio/watchdog.py` + `core/xiaoai.py` | 1s 无帧判死 → 先停后启 + 指数退避；`audio_health()` 暴露帧龄/策略/恢复计数 |
 | ASR | `audio/asr/sherpa.py` | Sherpa SenseVoice 离线语音识别（懒加载，INT8 量化） |
 | TTS | `tts/openai.py`, `tts/mlx_audio.py`, `tts/doubao.py` | OpenAI-compatible TTS、MLX-Audio 与豆包 TTS（一次性/本地音频播放） |
@@ -751,7 +755,7 @@ API_SERVER_ENABLE=1 uv run main.py
 - 所有 I/O 使用 `async/await`
 - 线程安全使用 `asyncio.run_coroutine_threadsafe()`
 - `MainApp.loop` 是业务协程主循环
-- `XiaoAI.async_loop` 仅用于原生扩展回调桥接，不挂新业务状态机
+- `XiaoAI.async_loop` 仅用于原生扩展回调桥接，不挂新业务状态机（既有豁免：录音看门狗循环、sidecar 采集泵——均属 I/O 泵而非业务状态机，新增类似挂载先在此注记）
 
 ### 日志规范
 - 所有日志必须带模块标识：通过 `module=` 参数或 `[Module]` 前缀
