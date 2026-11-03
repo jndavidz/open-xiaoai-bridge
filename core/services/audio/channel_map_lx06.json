@@ -1,0 +1,74 @@
+{
+ "device": "LX06",
+ "rate_hz": 16000,
+ "schema": "lx06-channel-map/1",
+ "channel_to_vertex": [
+  2,
+  1,
+  0,
+  5,
+  4,
+  3
+ ],
+ "channel_coords_m": [
+  [
+   0.030311,
+   -0.0175
+  ],
+  [
+   0.030311,
+   0.0175
+  ],
+  [
+   0.0,
+   0.035
+  ],
+  [
+   -0.030311,
+   0.0175
+  ],
+  [
+   -0.030311,
+   -0.0175
+  ],
+  [
+   0.0,
+   -0.035
+  ]
+ ],
+ "hexagon_vertices_m": [
+  [
+   0.0,
+   0.035
+  ],
+  [
+   0.030311,
+   0.0175
+  ],
+  [
+   0.030311,
+   -0.0175
+  ],
+  [
+   0.0,
+   -0.035
+  ],
+  [
+   -0.030311,
+   -0.0175
+  ],
+  [
+   -0.030311,
+   0.0175
+  ]
+ ],
+ "provenance": {
+  "source": "deploy/lx06/kws-beamform-ab/calibrate_channel_map.py",
+  "evidence": "deploy/lx06/kws-beamform-ab/results/calibration/channel-map.json",
+  "data": "200-seg 2026-10-31, quiet_near pos+neg (50 segs)",
+  "median_residual_samples": 0.28120919960311686,
+  "closure_residual_samples": 0.30613480641663304,
+  "azimuth_deg": 0.0,
+  "ambiguity": "ch1/ch3 与 ch0/ch4 各为镜像对（y 轴对称），ch2/ch5 唯一；对 0° 指向 DAS 无影响"
+ }
+}

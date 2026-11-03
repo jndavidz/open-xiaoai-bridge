@@ -46,7 +46,8 @@ open-xiaoai-bridge/
 │   │   │   ├── stream.py          # GlobalStream 全局音频流（多路输入广播）
 │   │   │   ├── codec.py           # 音频编解码
 │   │   │   ├── channels.py        # 六麦帧对齐/选麦/下混（纯 stdlib，ticket 04）；波束策略延迟导入 beamform
-│   │   │   ├── beamform.py        # 六麦延迟-求和波束（numpy；fixed/DOA 两模式，离线验证用，未接生产配置）
+│   │   │   ├── beamform.py        # 六麦延迟-求和波束（numpy；fixed/DOA 两模式，离线验证用，未接生产配置；支持 coords_m 传标定映射）
+│   │   │   ├── channel_map.py     # 通道映射表加载器（stdlib）+ channel_map_lx06.json 标定资产（lx06-mic-array-frontend 票 01）
 │   │   │   ├── watchdog.py        # 录音通道无帧看门狗状态机（ticket 04）
 │   │   │   ├── playback_timing.py # 播放时长/完成等待纯函数原语（B-29 步 1：pcm_duration/sleep_playback_done/文本预算估算）
 │   │   │   ├── speaking_channel.py# 对话循环发声接缝（B-29 步 2）：播放 API 只经 open() 产出 session（进门即物理断录）
@@ -600,7 +601,7 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
 | VAD | `audio/vad/`（`__init__.py` + `silero.py`） | Silero ONNX 语音活动检测 + **公开订阅 seam**（P2 票 04：`subscribe_events`/`subscribe_frames` 多消费者、注销幂等、订阅者异常隔离；回调在检测线程同步上抛；第二消费者一行挂上） |
 | KWS | `audio/kws/sherpa.py` | Sherpa ONNX 关键词唤醒。**启动期参数全部来自配置**：`kws.keywords_score`（当前 1.0）/ `kws.keywords_threshold`（0.25）/ `kws.max_active_paths`（8，默认同值）；三者只在 `start()` 建 `KeywordSpotter` 时读取，**改动需重启容器**（`vad.threshold`/`min_silence` 才支持热重载）。`num_threads=1` 是 N3060 硬约束，不配置化；`kws/__init__` 含 `listen_disabled` 持久开关 + **播放闸门**（`gate_on`/`gate_off`）；VAD 默认 `vad.threshold=0.2`（2026-11-01 主路切候选后不再做前置门，见台账 §1.11） |
 | 影子 KWS | `audio/kws/shadow.py` | `kws.shadow.model_dir` 模型 strongest+ch0 **双臂 always-on** 并行检测（`kws.shadow.always_on` 全帧检测，含 VAD 未放行帧），命中/主命中写 `data/shadow/kws-shadow-YYYYMMDD.jsonl`（context 含 `device_state`←MainApp / `playing` / `vad_prob` 窗口最大值 / `ch0_reads/ch0_short`）+ 留证 PCM `data/kws_snapshots/shadow_<arm>_*.pcm`（每 arm 留 50 个），**绝不触发唤醒**；根 `config.py` 默认关、`deploy/config.py` 生产为开，初始化/运行异常自动停用。⚠ 2026-11-01 起**角色已互换**：主路 = 候选 wenetspeech，影子目录 = 原现网 zipformer（回滚对照臂） |
-| 多声道入口 | `audio/channels.py` | 6ch 帧对齐 + 最强麦（滑窗+迟滞）/等权平均/固定声道降为 1ch；纯 stdlib。另有 `beamform_fixed`/`beamform_doa` 两策略（延迟导入 `audio/beamform.py`，numpy DAS；仅离线验证，未接生产 config） |
+| 多声道入口 | `audio/channels.py` | 6ch 帧对齐 + 最强麦（滑窗+迟滞）/等权平均/固定声道降为 1ch；纯 stdlib。另有 `beamform_fixed`/`beamform_doa` 两策略（延迟导入 `audio/beamform.py`，numpy DAS；仅离线验证，未接生产 config；`beam_coords_m` 可传票 01 标定映射 `channel_map.load_channel_map()`，不传回落兼容默认几何） |
 | 唤醒输入链 | `audio/wakeup_input.py` | 按播放态分派 KWS 输入源（inherit/strongest/fixed/aec/specsub/sidecar），产出喂 GlobalStreamKws；`wakeup_channel` 默认双 inherit 零行为变化；不可用态自动回落（aec/specsub 无参考→fixed，sidecar 未就绪/断流→strongest）并计数告警 |
 | 8ch sidecar 采集 | `audio/sidecar.py` + `core/xiaoai.py` | 独立 8ch 采集通道（SSH `arecord -D noop -c 8`，dsnoop 与 client 并发），为谱减供 ch6 参考；断流退避重连、远端 PID 精确回收（启动前/退出/配置关三路清理）、健康面 `audio.sidecar` + 回落态 `audio.wakeup_input.sidecar`；`sidecar.enabled` 默认关，回滚 = 关开关热停或 playing 改回 inherit |
 | 录音看门狗 | `audio/watchdog.py` + `core/xiaoai.py` | 1s 无帧判死 → 先停后启 + 指数退避；`audio_health()` 暴露帧龄/策略/恢复计数 |

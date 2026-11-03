@@ -56,8 +56,14 @@ def _channel_with_delay(s: np.ndarray, delay_samples: float) -> np.ndarray:
     return np.interp(index, np.arange(len(s), dtype=np.float64), s)
 
 
-def _six_channel_pcm(angle_deg: float, snr_db: float = 0.0, seed: int = 7):
-    """生成六麦交错 int16 PCM：同一平面波按阵列几何到达各麦。"""
+def _six_channel_pcm(
+    angle_deg: float, snr_db: float = 0.0, seed: int = 7, coords_m=None
+):
+    """生成六麦交错 int16 PCM：同一平面波按阵列几何到达各麦。
+
+    `coords_m` 为逐通道坐标表（标定映射）；缺省用测试顶点表原序。
+    """
+    coords = COORDS_M if coords_m is None else np.asarray(coords_m)
     rng = np.random.default_rng(seed)
     n = RATE * 2
     s = _source(n)
@@ -65,7 +71,7 @@ def _six_channel_pcm(angle_deg: float, snr_db: float = 0.0, seed: int = 7):
     direction = np.array([np.sin(theta), np.cos(theta)])  # 0° = 正前方
     noise_sigma = np.sqrt(np.mean(s**2)) * (10 ** (-snr_db / 20.0))
     rows = []
-    for coord in COORDS_M:
+    for coord in coords:
         delay = float(np.dot(coord, direction) / SOUND_SPEED_MPS * RATE)
         channel = _channel_with_delay(s, delay)
         channel = channel + rng.normal(0.0, noise_sigma, n)
@@ -180,6 +186,15 @@ class BeamformContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ChannelDownmixer(channels=8, strategy="beamform_fixed")
 
+    def test_beamform_rejects_reference_channels(self):
+        """波束策略不支持参考声道：8ch 场景 ch6/7 不进波束（语义保持）。"""
+        with self.assertRaises(ValueError):
+            ChannelDownmixer(
+                channels=6,
+                strategy="beamform_fixed",
+                reference_channels=(0,),
+            )
+
     def test_flush_drops_unaligned_multichannel_residue(self):
         mixer = ChannelDownmixer(channels=CHANNELS, strategy="beamform_fixed")
         self.assertEqual(b"", mixer.feed(b"\x01" * 11))
@@ -189,6 +204,88 @@ class BeamformContractTest(unittest.TestCase):
         mixer = ChannelDownmixer(channels=1, strategy="strongest")
         self.assertEqual(b"\x01\x02", mixer.feed(b"\x01\x02\x03"))
         self.assertEqual(b"\x03", mixer.flush())
+
+
+class CalibratedMappingTest(unittest.TestCase):
+    """票 02：波束按标定映射（channel_map_lx06.json）对齐的合成验收。
+
+    信号按标定映射合成（通道 c 在顶点 PERM[c]），波束喂同一映射 ⇒
+    目标方向相干增益应接近理论值 10·log10(6) ≈ 7.8 dB；喂旧假设映射
+    （恒等）⇒ 显著退化——把「映射对不对」从真机实验降级为单元测试。
+    """
+
+    CALIBRATED_PERM = (2, 1, 0, 5, 4, 3)  # 票 01 标定结论
+
+    def _coords(self, perm):
+        return [tuple(COORDS_M[i]) for i in perm]
+
+    def _gain(self, coords_signal, coords_beam, snr_db=0.0, seed=13):
+        pcm, source = _six_channel_pcm(
+            0.0, snr_db=snr_db, seed=seed, coords_m=coords_signal
+        )
+        baseline = ChannelDownmixer(channels=CHANNELS, strategy="strongest")
+        beam = ChannelDownmixer(
+            channels=CHANNELS,
+            strategy="beamform_fixed",
+            beam_coords_m=coords_beam,
+        )
+        snr_base = _aligned_snr(_feed_chunked(baseline, pcm), source)
+        snr_beam = _aligned_snr(_feed_chunked(beam, pcm), source)
+        return snr_beam - snr_base
+
+    def test_calibrated_mapping_reaches_theoretical_coherent_gain(self):
+        # snr=0 工作点（噪声主导）下相干增益实测 ≈7.7 dB；高 SNR 下插值
+        # 失真主导会让测得增益缩水（失真是信号相关的，不是空间白噪声）。
+        gain = self._gain(self._coords(self.CALIBRATED_PERM), self._coords(self.CALIBRATED_PERM))
+        self.assertGreater(
+            gain,
+            6.0,
+            f"标定映射相干增益 {gain:.2f} dB 未接近理论值 7.8 dB",
+        )
+
+    def test_wrong_mapping_significantly_degrades_gain(self):
+        gain_correct = self._gain(self._coords(self.CALIBRATED_PERM), self._coords(self.CALIBRATED_PERM))
+        # 旧代码假设 ch0=正上（恒等映射）：用错表去对齐按标定映射合成的信号
+        gain_wrong = self._gain(self._coords(self.CALIBRATED_PERM), self._coords(range(6)))
+        self.assertLess(
+            gain_wrong,
+            gain_correct - 3.0,
+            f"错映射增益 {gain_wrong:.2f} dB 未显著退化（正确 {gain_correct:.2f} dB）"
+            "——这条测试没有区分力",
+        )
+
+    def test_default_coords_preserved_when_not_provided(self):
+        """不传映射 = 兼容默认几何（旧行为逐字节不变）。"""
+        pcm, _ = _six_channel_pcm(0.0, snr_db=20.0, seed=5)
+        legacy = ChannelDownmixer(channels=CHANNELS, strategy="beamform_fixed")
+        explicit = ChannelDownmixer(
+            channels=CHANNELS,
+            strategy="beamform_fixed",
+            beam_coords_m=self._coords(range(6)),
+        )
+        self.assertEqual(_feed_chunked(legacy, pcm), _feed_chunked(explicit, pcm))
+
+    def test_non_beam_strategies_ignore_coords(self):
+        """strongest/fixed/average 对 beam_coords_m 无感（回归边界）。"""
+        pcm, _ = _six_channel_pcm(0.0, snr_db=20.0, seed=5)
+        for strategy in ("strongest", "average"):
+            plain = ChannelDownmixer(channels=CHANNELS, strategy=strategy)
+            with_coords = ChannelDownmixer(
+                channels=CHANNELS, strategy=strategy, beam_coords_m=self._coords(self.CALIBRATED_PERM)
+            )
+            self.assertEqual(
+                _feed_chunked(plain, pcm),
+                _feed_chunked(with_coords, pcm),
+                f"{strategy} 行为被 beam_coords_m 改变",
+            )
+
+    def test_beam_coords_length_must_match_channels(self):
+        with self.assertRaises(ValueError):
+            ChannelDownmixer(
+                channels=CHANNELS,
+                strategy="beamform_fixed",
+                beam_coords_m=[(0.0, 0.035)] * 5,
+            )
 
 
 if __name__ == "__main__":

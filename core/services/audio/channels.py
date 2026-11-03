@@ -226,10 +226,23 @@ class ChannelDownmixer:
         hysteresis_ratio: float = 1.25,
         min_hold_frames: int = 3,
         reference_channels: collections.abc.Sequence[int] = (),
+        beam_coords_m: collections.abc.Sequence[collections.abc.Sequence[float]] | None = None,
     ) -> None:
         self.channels = max(1, int(channels))
         self.strategy = normalize_strategy(strategy)
         self.fixed_channel = max(0, min(int(fixed_channel), self.channels - 1))
+        # 通道映射（lx06-mic-array-frontend 票 01/02）：波束策略的各通道 (x, y)
+        # 坐标表，来自标定产物 channel_map_lx06.json；不传 = 兼容默认几何。
+        # 仅波束策略消费；其余策略忽略（行为不变）。
+        if beam_coords_m is not None:
+            coords = [(float(x), float(y)) for x, y in beam_coords_m]
+            if len(coords) != self.channels:
+                raise ValueError(
+                    f"beam_coords_m 长度 {len(coords)} 必须等于通道数 {self.channels}"
+                )
+            self.beam_coords_m = coords
+        else:
+            self.beam_coords_m = None
         # 参考声道（music-far 缺口 2）：8ch 采集的 ch6/ch7 是播放 far-end 参考，
         # 只作 AEC 输入，不参与选麦（strongest）与平均（average）。fixed 策略
         # 语义不变（用户显式指定声道号）。
@@ -271,7 +284,7 @@ class ChannelDownmixer:
         from core.services.audio.beamform import Beamformer
 
         mode = "fixed" if self.strategy == STRATEGY_BEAMFORM_FIXED else "doa"
-        return Beamformer(mode=mode, channels=self.channels)
+        return Beamformer(mode=mode, channels=self.channels, coords_m=self.beam_coords_m)
 
     def _initial_channel(self):
         if self.strategy == STRATEGY_FIXED:

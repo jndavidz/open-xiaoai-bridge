@@ -5,8 +5,10 @@
 
 阵列几何来自固件库内常量（正六边形、半径 3.50 cm、共面、每 60° 一个）：
 `docs/devices/lx06/mic-array-6ch-capture.md` §6.5。**通道→几何点的顺序
-是假设值**（ch0 = mic1 起顺时针），尚未用真机脉冲响应验证；离线评测工具
-会把 DOA 估计的通道时延与几何预测做残差对照，用来暴露映射错误。
+已由真机标定证伪旧假设**（lx06-mic-array-frontend 票 01：ch0..ch5 = 从
+右下顶点起逆时针连续，标定器 + `channel_map_lx06.json` 为准）；本模块的
+`MIC_COORDS_M` 仅为向后兼容的默认值——生产/评测应通过 `coords_m` 显式传
+入标定映射（`channel_map.load_channel_map()`）。
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ DOA_STEP_LIMIT = 0.5
 DOA_DEADBAND = 0.25
 
 # ch0..ch5 → 正六边形顶点（米，x 右 / y 正前），ch0=(0,+0.035) 起顺时针。
+# ⚠ 仅为向后兼容默认值；真机标定结论见 channel_map_lx06.json（票 01）。
 MIC_COORDS_M = np.array(
     [
         [0.0, MIC_RADIUS_M],
@@ -40,14 +43,20 @@ MIC_COORDS_M = np.array(
 )
 
 
-def steering_delays(angle_deg: float, rate: int = RATE) -> np.ndarray:
+def steering_delays(
+    angle_deg: float, rate: int = RATE, coords_m=None
+) -> np.ndarray:
     """平面波从 `angle_deg` 到达时，各通道相对阵列中心的到达提前量（样本）。
 
     0° = 正前方，+90° = 右。正值为提前到达；对齐时按该值延迟。
+    `coords_m` 为各通道 (x, y) 坐标表（标定映射）；缺省用兼容默认值。
     """
+    coords = MIC_COORDS_M if coords_m is None else np.asarray(coords_m, dtype=np.float64)
+    if coords.shape != (6, 2):
+        raise ValueError("coords_m 必须是 6×2 的通道坐标表")
     theta = np.deg2rad(angle_deg)
     direction = np.array([np.sin(theta), np.cos(theta)])
-    return MIC_COORDS_M @ direction / SOUND_SPEED_MPS * rate
+    return coords @ direction / SOUND_SPEED_MPS * rate
 
 
 class DelayAndSum:
@@ -166,12 +175,18 @@ class GccPhatDoa:
 class Beamformer:
     """`ChannelDownmixer` 的波束策略实现（bytes 进、bytes 出）。"""
 
-    def __init__(self, mode: str = "fixed", channels: int = 6, angle_deg: float = 0.0) -> None:
+    def __init__(
+        self,
+        mode: str = "fixed",
+        channels: int = 6,
+        angle_deg: float = 0.0,
+        coords_m=None,
+    ) -> None:
         if mode not in ("fixed", "doa"):
             raise ValueError("mode must be 'fixed' or 'doa'")
         self.channels = int(channels)
         self.mode = mode
-        self._steering = steering_delays(angle_deg)
+        self._steering = steering_delays(angle_deg, coords_m=coords_m)
         self._delays = self._steering.copy()
         self.last_delays = self._delays.copy()
         self._das = DelayAndSum(self._delays, channels=self.channels)
