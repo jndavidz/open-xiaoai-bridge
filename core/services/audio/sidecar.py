@@ -126,11 +126,18 @@ def parse_sidecar_config(section: dict | None) -> dict | None:
 
     ``cmd`` 非空时按 shell 词法切分、原样作为采集命令（部署侧自定拓扑，
     例如 NAS 侧 pump 经 TCP 投喂）；否则按 host/key_path 经
-    build_arecord_command 构造。
+    build_arecord_command 构造。``ssh_opts`` 追加 ssh 参数（替换默认组）——
+    生产容器用它注入 StrictHostKeyChecking/UserKnownHostsFile（与
+    event_plane.native_cmd 同款密钥/known_hosts 挂载）。
     """
     section = section if isinstance(section, dict) else {}
     if not section.get("enabled"):
         return None
+    raw_opts = section.get("ssh_opts")
+    ssh_opts = (
+        tuple(str(o) for o in raw_opts) if isinstance(raw_opts, (list, tuple))
+        else DEFAULT_SSH_OPTS
+    )
     try:
         channels = int(section.get("channels", SIDECAR_CHANNELS))
         rate = int(section.get("rate", SIDECAR_RATE))
@@ -157,6 +164,7 @@ def parse_sidecar_config(section: dict | None) -> dict | None:
             user=str(section.get("user", "root")),
             port=port, channels=channels, rate=rate, bits_per_sample=bits,
             pid_file=str(section.get("pid_file", DEFAULT_PID_FILE)),
+            ssh_opts=ssh_opts,
         )
     else:
         logger.warning(
@@ -172,6 +180,7 @@ def parse_sidecar_config(section: dict | None) -> dict | None:
             user=str(section.get("user", "root")),
             port=port,
             pid_file=str(section.get("pid_file", DEFAULT_PID_FILE)),
+            ssh_opts=ssh_opts,
         )
     return {
         "command": command,

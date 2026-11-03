@@ -100,6 +100,21 @@ class CommandConstructionTests(unittest.TestCase):
         # 外部命令拓扑下不代管远端清理
         self.assertIsNone(cfg["cleanup_command"])
 
+    def test_parse_sidecar_config_ssh_opts_override(self):
+        opts = ["-o", "StrictHostKeyChecking=yes",
+                "-o", "UserKnownHostsFile=/app/keys/lx06-ir/known_hosts"]
+        cfg = parse_sidecar_config({
+            "enabled": True, "host": "10.10.10.20", "key_path": "/app/keys/lx06-ir/id_rsa",
+            "ssh_opts": opts,
+        })
+        # ssh_opts 整组替换默认组：新参数在、默认的 ssh-rsa 协商不在
+        argv = " ".join(cfg["command"])
+        self.assertIn("-o StrictHostKeyChecking=yes", argv)
+        self.assertIn("UserKnownHostsFile=/app/keys/lx06-ir/known_hosts", argv)
+        self.assertNotIn("HostKeyAlgorithms", argv)
+        # cleanup 命令同样带 ssh_opts
+        self.assertIn("StrictHostKeyChecking=yes", " ".join(cfg["cleanup_command"]))
+
     def test_parse_sidecar_config_numeric_clamps(self):
         cfg = parse_sidecar_config({
             "enabled": True, "host": "h", "key_path": "k",

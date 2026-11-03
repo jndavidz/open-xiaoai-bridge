@@ -426,7 +426,11 @@ APP_CONFIG = {
             "host": "10.10.10.20",
             "user": "root",
             "port": 22,
-            "key_path": "",   # 容器内可读的私钥路径；留空 = sidecar 不可用
+            # 容器内密钥（compose 已挂 /app/keys/lx06-ir:ro，同 native 事件源）
+            "key_path": "/app/keys/lx06-ir/id_rsa",
+            # ssh 参数整组替换默认组：容器内用挂载的专用 known_hosts
+            "ssh_opts": ["-o", "StrictHostKeyChecking=yes",
+                         "-o", "UserKnownHostsFile=/app/keys/lx06-ir/known_hosts"],
             # cmd：直接给完整采集命令（argv 经 shell 词法切分），绕过上面的
             # host/key_path 构造；用于自定拓扑（如 NAS 侧 pump 经 TCP 投喂，
             # 同 event_plane.native_cmd 模式）。⚠ 外部命令拓扑下 bridge 不代管
