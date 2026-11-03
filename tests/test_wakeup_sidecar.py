@@ -76,6 +76,17 @@ class ModeParseTests(unittest.TestCase):
         cfg = _sidecar_config()
         self.assertTrue(is_chain_active(cfg["wakeup_channel"], CLIENT_CH))
 
+    def test_is_chain_active_accepts_full_audio_input_section(self):
+        """回归（2026-11-04 生产首启实测）：KWS/xiaoai 传整段 audio_input，
+        旧实现按 wakeup_channel 子段解析 → 恒 inherit → KWS 仍读主链。"""
+        cfg = _sidecar_config()
+        self.assertTrue(is_chain_active(cfg, CLIENT_CH))  # 整段形状
+        self.assertTrue(
+            is_chain_active(cfg["wakeup_channel"], CLIENT_CH))  # 子段形状
+        self.assertFalse(is_chain_active(
+            {"wakeup_channel": {"playing": "inherit", "idle": "inherit"}},
+            CLIENT_CH))
+
 
 class DispatchTests(unittest.TestCase):
     def _chain(self, cfg=None) -> WakeupInputChain:

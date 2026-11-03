@@ -273,7 +273,14 @@ class XiaoAI:
             params["backoff_initial"], params["backoff_max"],
         )
         if runner is not None and getattr(runner, "config_sig", None) == sig:
-            return  # 配置未变：不动运行中的采集器
+            return  # 配置未变且已在跑：不动运行中的采集器
+
+        if cls.async_loop is None or cls.async_loop.is_closed():
+            # 2026-11-04 修复：async_loop 未就绪时不创建 runner（否则二次调用
+            # 被 config_sig 早退拦截，协程永不启动——生产首启实测踩中）
+            logger.warning("[XiaoAI] sidecar 异步环未就绪，待 init 完成后重试")
+            return
+
         if runner is not None:
             runner.stop()
 
@@ -289,15 +296,11 @@ class XiaoAI:
             config_sig=sig,
         )
         cls._sidecar_runner = runner
-        if cls.async_loop is not None:
-            cls._sidecar_task = asyncio.run_coroutine_threadsafe(
-                runner.run(), cls.async_loop
-            )
-            cls._register_sidecar_exit_cleanup()
-            logger.info("[XiaoAI] sidecar 8ch 采集已启动")
-        else:
-            # init_xiaoai 首次调用时 async_loop 尚未建立；start 前会再进一次
-            logger.warning("[XiaoAI] sidecar 异步环未就绪，采集器暂缓启动")
+        cls._sidecar_task = asyncio.run_coroutine_threadsafe(
+            runner.run(), cls.async_loop
+        )
+        cls._register_sidecar_exit_cleanup()
+        logger.info("[XiaoAI] sidecar 8ch 采集已启动")
 
     _sidecar_exit_cleanup_registered = False
 

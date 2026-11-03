@@ -87,7 +87,15 @@ def parse_wakeup_channel_config(section: dict | None) -> dict:
 
 
 def is_chain_active(section: dict | None, channels: int) -> bool:
-    """配置是否激活独立唤醒输入链（双方共用同一判定，防两侧漂移）。"""
+    """配置是否激活独立唤醒输入链（双方共用同一判定，防两侧漂移）。
+
+    入参两种形状都收：完整 ``audio_input`` 段（KWS/_apply_audio_input_config
+    的实参）或 ``wakeup_channel`` 子段本身（历史测试口径）——2026-11-04 修复：
+    生产启用 playing=sidecar 时 KWS 侧因传整段恒判 inherit（该路径首次被
+    真实走到）。
+    """
+    if isinstance(section, dict) and "wakeup_channel" in section:
+        section = section.get("wakeup_channel")
     parsed = parse_wakeup_channel_config(section)
     if channels < 2:
         return False  # 单声道采集无可选通道，恒 inherit
