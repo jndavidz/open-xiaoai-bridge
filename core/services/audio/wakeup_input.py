@@ -296,7 +296,14 @@ class WakeupInputChain:
 
         健康 → 不健康的跳变计数并告警；**首次评估即不健康（未就绪回落）也
         计数告警一次**（spec：回落可见，不静默）。
+
+        sidecar 未参与任何模式时（如 ``playing=specsub`` / ``idle=strongest``）
+        直接跳过：这条链路根本不适用，不应产生"回落"告警与计数。
+        2026-11-04 修复——原实现对"无采集器"也发告警，生产切到 client 直采
+        8ch + specsub 后每轮启动都刷一条假告警。
         """
+        if MODE_SIDECAR not in (self.playing_mode, self.idle_mode):
+            return
         prev_ready = self._sidecar_ready()
         self._sidecar_healthy = bool(healthy)
         if self._sidecar_healthy:

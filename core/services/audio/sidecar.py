@@ -1,8 +1,18 @@
 """8ch 旁路采集器（lx06-audio-sidecar spec 票 01）。
 
-为什么存在：client 的采集命令硬编码 ``-c 6``（只推六麦），谱减所需的播放
+⛔ 前提已被证伪（2026-11-04），生产不启用（sidecar.enabled=false）：
+原记「client 硬编码 -c 6、拿不到 ch6」是错的——client 的采集声道数由 bridge 下发
+（audio_input.channels → AUDIO_INPUT_CHANNELS → native input_channels() → AudioConfig，
+capture_config_for_recording 直接 requested.clone()，无白名单），改配置即可 8ch，无需重编。
+正确形态 = 一条流（client 8ch）+ specsub，近端与参考同源天然成立。
+
+本旁路线的死因（保留作教训）：引入两条独立采集管道，播放/空闲切换时 KWS 输入源跳变，
+流式 zipformer 帧级上下文被打断 ⇒ 识别持续失效（2026-11-04 真机：播放/停止后连原生唤醒
+都接不住）。代码保留仅供将来确实需要第二路采集时参考。
+
+以下为历史设计记录（前提已失效，仅存档）：原意是 client 只推六麦，谱减所需的播放
 回环参考（ch6/ch7，见 ws: docs/devices/lx06/mic-array-6ch-capture.md §11）
-根本不在主链里。设备的 ALSA 设备 ``noop`` 是 ``dsnoop``（共享），外部
+不在主链里。设备的 ALSA 设备 ``noop`` 是 ``dsnoop``（共享），外部
 ``arecord -c 8`` 与 client 的 6ch 采集**可以同时跑**（同文 §3.2 实测）。
 本模块把这条路接进 bridge：通过可配置命令（生产 = SSH 到设备执行 8ch
 arecord）把原始交错字节流读回，按 8ch 帧对齐后交给唤醒链（票 02）。

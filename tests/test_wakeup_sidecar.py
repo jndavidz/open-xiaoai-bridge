@@ -206,5 +206,41 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(len(chain.feed_sidecar(_sidecar_pcm(1600))) % 2, 0)
 
 
+
+class SidecarUnusedModeTest(unittest.TestCase):
+    """2026-11-04：sidecar 未参与任何模式时，不应产生回落告警与计数。
+
+    生产形态 = client 直采 8ch + specsub（``playing=specsub / idle=strongest``），
+    sidecar 采集器不启用；原实现仍对"无采集器"发回落告警，每轮启动刷假告警。
+    """
+
+    def _specsub_cfg(self):
+        return {
+            "channels": SIDECAR_CH,
+            "wakeup_channel": {"playing": "specsub", "idle": "strongest",
+                               "fixed_channel": 0},
+            "specsub": {"enabled": True, "ref_channel": 6},
+        }
+
+    def test_specsub_mode_ignores_sidecar_health(self):
+        chain = WakeupInputChain(self._specsub_cfg(), SIDECAR_CH)
+        for _ in range(5):
+            chain.set_sidecar_health(None)
+            chain.set_sidecar_health(False)
+        self.assertEqual(chain.stats()["sidecar_fallbacks"], 0)
+        self.assertEqual(chain.stats()["sidecar_frames"], 0)
+
+    def test_sidecar_mode_still_warns(self):
+        chain = WakeupInputChain(_sidecar_config(), CLIENT_CH)
+        chain.set_sidecar_health(None)
+        self.assertEqual(chain.stats()["sidecar_fallbacks"], 1)
+
+    def test_specsub_idle_strongest_still_feeds(self):
+        """idle=strongest 时 feed 必须返回数据（否则空闲期 KWS 全静默）。"""
+        chain = WakeupInputChain(self._specsub_cfg(), SIDECAR_CH)
+        out = chain.feed(_client_pcm(1600))  # 8ch 帧
+        self.assertGreater(len(out), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
