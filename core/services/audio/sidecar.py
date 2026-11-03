@@ -362,7 +362,9 @@ class SidecarCaptureRunner:
             await asyncio.wait_for(proc.wait(), timeout=3.0)
         except Exception as exc:  # noqa: BLE001 - 清理失败只告警，不阻塞采集
             logger.warning(
-                f"[Sidecar:{self.name}] 清理命令失败: {exc}", module="XiaoAI"
+                f"[Sidecar:{self.name}] 清理命令失败: "
+                f"{type(exc).__name__}: {exc or '(无详情，常见为超时)'}",
+                module="XiaoAI",
             )
 
     async def _teardown(self, proc: asyncio.subprocess.Process) -> None:
