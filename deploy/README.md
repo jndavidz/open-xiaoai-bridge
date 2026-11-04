@@ -141,6 +141,12 @@ config.py 只认 script 名，HA 侧改实现不影响语音层。
 - **当前值（2026-11-01 主路切候选 wenetspeech，用户裁决「必须解决」）**：
   `keywords_score=1.0` · `keywords_threshold=0.25` · `kws.max_active_paths=8` · `vad.threshold=0.2` ·
   `kws.shadow.enabled=true`（影子目录装的是**原现网 zipformer**，= 回滚对照臂，不退役）
+  - ⚠ **2026-11-04 勘误**：上述"影子=原现网 zipformer"**已过时**。实测容器内
+    `/app/core/models/` 与 `/app/core/models/shadow/` 的三个 onnx 文件 **md5 逐一相同**
+    （encoder `096e6cdc…` / decoder `403457f5…` / joiner `f458381d…`），tokens.txt 亦相同
+    ⇒ 影子与主路是**同一份模型**，当前差异只剩 `max_active_paths`（16 vs 8）与前端臂
+    （strongest / ch0）。因此"影子 vs 主路"的对比**不能再当作新模型 vs 旧模型的 A/B**，
+    只能读作"同模型不同搜索宽度/前端"的对照。
   - 依据：VAD=0 诊断期同一路音频上影子候选 ~10/10 vs 旧模型 5/10；200 段消融 VAD 0.4 门把
     候选 `music_far` 从 75% 压到 10%；p8 vs p16 召回/FPR 零差异（p8 略省）。
   - 历史：2026-09-24 收紧 3.0/0.35/0.4（incident §5 建议 3）→ 10-27 放宽 2.5/0.30 →
