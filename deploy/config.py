@@ -380,7 +380,10 @@ APP_CONFIG = {
         # client 采集位深（S16/S32）。bridge 自动同步到 native 的 AUDIO_INPUT_BITS，
         # 并在降声道前统一转成 S16；coderzc client 实测为 S32_LE。
         "bits_per_sample": 32,
-        # 降声道策略：strongest（最强麦+迟滞）/ average（等权平均）/ fixed（固定声道）
+        # 降声道策略：strongest（最强麦+迟滞）/ average（等权平均）/ fixed（固定声道）/
+        #   beamform_fixed｜beamform_doa（延迟-求和波束，lx06-beamform-8ch 票 01 已接：
+        #   参与通道=非参考声道、几何取包内标定表、构建失败告警+计数回落 strongest。
+        #   治「稳态噪声把选麦带偏」；对共址自播放音乐无效（那是 specsub）。切换需重启）
         "channel_strategy": "strongest",
         "fixed_channel": 0,
         # 录音看门狗：连续无帧秒数（client 500ms 无数据即退出读循环）

@@ -60,6 +60,8 @@ class XiaoAI:
     _reference_channels: tuple = ()
     _downmixer: ChannelDownmixer | None = None
     _ch0_downmixer: ChannelDownmixer | None = None
+    # 波束构建失败回落 strongest 的次数（票 01：回落必须可见，不静默）
+    _downmixer_fallbacks: int = 0
     # 唤醒输入独立链（music-far spec 票 05）：默认 None = 不启用（KWS 读主链，
     # 与历史行为一致）；配置 audio_input.wakeup_channel 非 inherit 才构建。
     _wakeup_chain = None
@@ -178,15 +180,8 @@ class XiaoAI:
         os.environ["AUDIO_INPUT_BITS"] = str(bits)
 
         if changed or cls._downmixer is None:
-            cls._downmixer = (
-                None
-                if channels == 1
-                else ChannelDownmixer(
-                    channels=channels,
-                    strategy=strategy,
-                    fixed_channel=fixed_channel,
-                    reference_channels=reference_channels,
-                )
+            cls._downmixer = cls._build_main_downmixer(
+                channels, strategy, fixed_channel, reference_channels
             )
             cls._ch0_downmixer = (
                 None
@@ -222,6 +217,53 @@ class XiaoAI:
 
         # sidecar 8ch 采集器（lx06-audio-sidecar spec 票 01/02）
         cls._apply_sidecar_config()
+
+    @classmethod
+    def _build_main_downmixer(
+        cls,
+        channels: int,
+        strategy: str,
+        fixed_channel: int,
+        reference_channels: tuple,
+    ) -> ChannelDownmixer | None:
+        """构造主链降声道器：波束策略显式注入标定几何，构建失败回落 strongest。
+
+        坐标只能从这里显式传入——`beamform.py` 的兼容默认顶点顺序已被真机标定
+        证伪（错映射批次 beamform 召回 20%，比 strongest 还低），静默退回等于把
+        唤醒整体拖垮。回落与 `wakeup_input` 同口径：告警 + 计数，不静默。
+        """
+        if channels == 1:
+            return None
+        # 函数内导入：tests/test_injection_gate.py 这类桩只替部分音频模块，
+        # 模块级新增依赖会让它们缺名（`import core.xiaoai` 直接 ImportError）。
+        from core.services.audio.channel_map import load_channel_map
+        from core.services.audio.channels import (
+            BEAMFORM_STRATEGIES,
+            STRATEGY_STRONGEST,
+        )
+
+        try:
+            beam_coords = None
+            if strategy in BEAMFORM_STRATEGIES:
+                beam_coords = load_channel_map()["channel_coords_m"]
+            return ChannelDownmixer(
+                channels=channels,
+                strategy=strategy,
+                fixed_channel=fixed_channel,
+                reference_channels=reference_channels,
+                beam_coords_m=beam_coords,
+            )
+        except Exception as exc:  # noqa: BLE001 - 一个策略故障不拖垮唤醒输入
+            logger.warning(
+                f"[XiaoAI] {strategy} 降声道器构建失败（{exc}），回落 strongest"
+            )
+            cls._downmixer_fallbacks += 1
+            return ChannelDownmixer(
+                channels=channels,
+                strategy=STRATEGY_STRONGEST,
+                fixed_channel=fixed_channel,
+                reference_channels=reference_channels,
+            )
 
     @classmethod
     async def _reconcile_mic_once(cls):
@@ -679,6 +721,11 @@ class XiaoAI:
             "channels": cls._audio_channels,
             "bits_per_sample": cls._audio_bits,
             "channel_strategy": cls._channel_strategy,
+            # 实际生效的策略：与配置值不同 ⇒ 发生过构建回落（见 downmixer_fallbacks）
+            "channel_strategy_applied": (
+                cls._downmixer.strategy if cls._downmixer is not None else None
+            ),
+            "downmixer_fallbacks": cls._downmixer_fallbacks,
             "fixed_channel": cls._fixed_channel,
             "current_channel": cls._current_channel,
             "watchdog_state": cls._recording_watchdog.state,

@@ -1,13 +1,16 @@
-"""多声道（LX06 六麦）PCM 入口处理：帧对齐、选麦、下混。
+"""多声道（LX06 六麦 / 8ch 采集）PCM 入口处理：帧对齐、选麦、下混。
 
 设计约束：
 - **纯逻辑 + 仅标准库**：本模块不 import numpy，便于用系统 Python 跑单测；
-  VAD/KWS/ASR 的对外接口保持不变（仍只吃 1ch int16 PCM）。
+  VAD/KWS/ASR 的对外接口保持不变（仍只吃 1ch int16 PCM）。波束策略在
+  `_build_beamformer()` 里延迟导入 numpy 实现（`beamform.py`）。
 - 设备侧 `arecord -c 6 -f S16_LE -r 16000` 给出的是**交错**的 6 路样本；
   直接 `np.frombuffer` 会把它当成连续单声道时间序列 ⇒ 必须先按 `2*channels`
   字节切帧再降声道。
 - 降声道策略默认「滑动窗口内最强单麦 + 迟滞」，避免逐帧切换造成爆音；
-  可切等权平均（average）或固定声道（fixed）。
+  可切等权平均（average）、固定声道（fixed）或延迟-求和波束
+  （beamform_fixed / beamform_doa：只吃 `beam_channels` 参与的声道，
+  8ch 采集的播放参考默认被排除）。
 
 数据形状约定：所有 `feed()` 输入/输出都是小端 int16 交错 PCM 字节。
 """
@@ -211,7 +214,7 @@ class ChannelSelector:
 
 
 class ChannelDownmixer:
-    """六麦入口：帧对齐 → 选麦/平均 → 1ch int16 PCM。
+    """多声道入口：帧对齐 → 选麦/平均/波束 → 1ch int16 PCM。
 
     用法：`feed(chunk)` 可多次拼出同一批样本；返回可能是空串（残留未满帧）。
     `channels=1` 时等价于直通（仅做 2 字节对齐），与旧行为一致。
@@ -227,24 +230,13 @@ class ChannelDownmixer:
         min_hold_frames: int = 3,
         reference_channels: collections.abc.Sequence[int] = (),
         beam_coords_m: collections.abc.Sequence[collections.abc.Sequence[float]] | None = None,
+        beam_channels: collections.abc.Sequence[int] | None = None,
     ) -> None:
         self.channels = max(1, int(channels))
         self.strategy = normalize_strategy(strategy)
         self.fixed_channel = max(0, min(int(fixed_channel), self.channels - 1))
-        # 通道映射（lx06-mic-array-frontend 票 01/02）：波束策略的各通道 (x, y)
-        # 坐标表，来自标定产物 channel_map_lx06.json；不传 = 兼容默认几何。
-        # 仅波束策略消费；其余策略忽略（行为不变）。
-        if beam_coords_m is not None:
-            coords = [(float(x), float(y)) for x, y in beam_coords_m]
-            if len(coords) != self.channels:
-                raise ValueError(
-                    f"beam_coords_m 长度 {len(coords)} 必须等于通道数 {self.channels}"
-                )
-            self.beam_coords_m = coords
-        else:
-            self.beam_coords_m = None
         # 参考声道（music-far 缺口 2）：8ch 采集的 ch6/ch7 是播放 far-end 参考，
-        # 只作 AEC 输入，不参与选麦（strongest）与平均（average）。fixed 策略
+        # 只作 AEC/谱减输入，不参与选麦（strongest）与平均（average）。fixed 策略
         # 语义不变（用户显式指定声道号）。
         ref = sorted({int(c) for c in reference_channels})
         if ref and (ref[0] < 0 or ref[-1] >= self.channels or len(ref) >= self.channels):
@@ -255,8 +247,40 @@ class ChannelDownmixer:
         self.mic_channels = tuple(
             c for c in range(self.channels) if c not in self.reference_channels
         )
-        if self.strategy in BEAMFORM_STRATEGIES and self.reference_channels:
-            raise ValueError("波束策略不支持参考声道（按 6ch 纯麦克风阵列设计）")
+        # 波束参与通道（lx06-beamform-8ch 票 01）：默认全部非参考声道 ⇒ 8ch 采集
+        # 里天然是前六路，播放参考绝不进波束。显式传入时与参考声道相交即报错——
+        # 「静默把音乐当麦克风」是这条票要堵的原始故障形态。
+        # 契约：**`beam_coords_m` 第 i 行 = `beam_channels` 第 i 个声道的坐标**；
+        # 收窄子集时调用方要给出按同序投影过的坐标表（模块无从校验行↔通道对应）。
+        if beam_channels is None:
+            beam = self.mic_channels
+        else:
+            beam = tuple(sorted({int(c) for c in beam_channels}))
+            if not beam or beam[0] < 0 or beam[-1] >= self.channels:
+                raise ValueError(
+                    f"beam_channels {beam} 必须是非空且都在 [0, {self.channels}) 内"
+                )
+            overlap = sorted(set(beam) & set(self.reference_channels))
+            if overlap:
+                raise ValueError(
+                    f"beam_channels 含播放参考声道 {overlap}：参考路进波束等于把"
+                    "正在播的音乐当人声叠加"
+                )
+        self.beam_channels = beam
+        # 通道映射（lx06-mic-array-frontend 票 01）：波束各参与通道的 (x, y)
+        # 坐标表，来自标定产物 channel_map_lx06.json；不传 = 兼容默认几何（波束
+        # 侧打 WARNING，见 beamform.py）。仅波束策略消费；其余策略忽略（行为不变）。
+        if beam_coords_m is not None:
+            coords = [(float(x), float(y)) for x, y in beam_coords_m]
+            if len(coords) != len(self.beam_channels):
+                raise ValueError(
+                    f"beam_coords_m 长度 {len(coords)} 必须等于波束参与通道数 "
+                    f"{len(self.beam_channels)}（channels={self.channels} "
+                    f"reference_channels={list(self.reference_channels)}）"
+                )
+            self.beam_coords_m = coords
+        else:
+            self.beam_coords_m = None
         self.aligner = FrameAligner(self.channels)
         self.beamformer = self._build_beamformer()
         self.selector = (
@@ -278,13 +302,21 @@ class ChannelDownmixer:
             return None
         if self.channels == 1:
             return None  # 1ch 回退直通，与 average/fixed 的兼容语义一致
-        if self.channels != 6:
-            raise ValueError("beamform strategies require channels == 6")
+        if len(self.beam_channels) < 2:
+            raise ValueError(
+                f"波束至少需要 2 个参与通道，当前 {list(self.beam_channels)}"
+                f"（reference_channels={list(self.reference_channels)} 是否声明过多）"
+            )
         # 延迟导入：numpy 只为波束策略付出，其余策略保持纯 stdlib。
         from core.services.audio.beamform import Beamformer
 
         mode = "fixed" if self.strategy == STRATEGY_BEAMFORM_FIXED else "doa"
-        return Beamformer(mode=mode, channels=self.channels, coords_m=self.beam_coords_m)
+        return Beamformer(
+            mode=mode,
+            channels=self.channels,
+            coords_m=self.beam_coords_m,
+            mic_channels=self.beam_channels,
+        )
 
     def _initial_channel(self):
         if self.strategy == STRATEGY_FIXED:

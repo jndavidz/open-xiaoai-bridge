@@ -321,6 +321,10 @@ APP_CONFIG = {
         #   strongest = 滑动窗口内最强单麦 + 迟滞（默认）
         #   average   = 等权平均
         #   fixed     = 固定单声道（见 fixed_channel）
+        #   beamform_fixed / beamform_doa = 延迟-求和波束（lx06-beamform-8ch 票 01）：
+        #     参与通道 = 非参考声道，几何自动取包内标定表 channel_map_lx06.json；
+        #     构建失败告警 + 计数回落 strongest。对稳态噪声选麦误导有效，
+        #     对共址自播放音乐无效（那是 specsub 的活）。改动需重启容器
         "channel_strategy": "strongest",
         # fixed 策略使用的声道号（0-5 有信号，6/7 恒零）
         "fixed_channel": 0,
