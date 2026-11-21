@@ -1686,3 +1686,22 @@ class CchAnnounceTextTest(unittest.TestCase):
     def test_missing_name_uses_placeholder(self):
         self.assertEqual("好的，现在为您播放这首。",
                          song_request._cch_announce_text({}))
+
+
+class TicketHeuristicTest(unittest.TestCase):
+    """票 24 回归：Songloft /media 的 HEAD 是 SPA HTML，判定必须走 Range GET 头。"""
+
+    def test_full_track_range_accepted(self):
+        self.assertTrue(song_request._ticket_looks_playable(
+            "audio/mpeg", "bytes 0-1023/9902692", 1024))
+
+    def test_html_page_rejected(self):
+        self.assertFalse(song_request._ticket_looks_playable(
+            "text/html; charset=utf-8", "", 11772))
+
+    def test_small_audio_treated_as_preview(self):
+        self.assertFalse(song_request._ticket_looks_playable(
+            "audio/mpeg", "bytes 0-1023/120000", 1024))
+
+    def test_no_range_falls_back_to_content_length(self):
+        self.assertTrue(song_request._ticket_looks_playable("audio/mpeg", "", 900000))

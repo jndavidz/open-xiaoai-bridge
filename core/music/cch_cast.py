@@ -195,12 +195,27 @@ def tts_base() -> str:
     return str(_cfg("cch_tts_base", "http://10.10.10.2:9102")).rstrip("/")
 
 
+_token_warned = False
+
+
 def tts_token() -> str:
-    """tts_http 的 Bearer（SPEAK_TOKEN 或 BRIDGE_TOKEN 同源）。"""
+    """tts_http 的 Bearer（SPEAK_TOKEN 或 BRIDGE_TOKEN 同源）。
+
+    缺失时**必须显式告警一次**：2026-11-21 事故（部署漏 BRIDGE_TOKEN）表现为
+    musicctl/speak 全部在客户端前置失败，外部只看到「设备未就绪」，排查成本极高。
+    """
     import os
 
+    global _token_warned
     val = str(_cfg("cch_tts_token", "") or "")
-    return val or os.environ.get("BRIDGE_TOKEN", "")
+    token = val or os.environ.get("BRIDGE_TOKEN", "")
+    if not token and not _token_warned:
+        _token_warned = True
+        logger.warning(
+            "[CchCast] tts token missing (config cch_tts_token / env BRIDGE_TOKEN); "
+            ":9102 calls (speak/musicctl/hostcmd) will fail",
+            module="CchCast")
+    return token
 
 
 async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
@@ -313,16 +328,25 @@ def m5_enabled() -> bool:
 
 
 def host_derived_key() -> str:
-    """HMAC-SHA256(BRIDGE_TOKEN, salt) hex —— 与 dex TokenAuth 同派生（salt 定死常量）。"""
+    """HMAC-SHA256(BRIDGE_TOKEN, salt) hex —— 与 dex TokenAuth 同派生（salt 定死常量）。
+
+    token 缺失返回空串（**不可用空 key 派生**：HMAC("" ,salt) 是公开可算的，
+    等于把 hostcmd 通道令牌公开）。
+    """
     import hashlib
     import hmac
     token = tts_token()
+    if not token:
+        return ""
     return hmac.new(token.encode(), b"cch-m5-auth-v1", hashlib.sha256).hexdigest()
 
 
 async def host_token_deploy() -> tuple[bool, dict]:
     """运行时部署派生 key 到设备内部目录（9102 hosttoken op 走 su = root 域）。幂等。"""
-    return await musicctl("hosttoken", {"key": host_derived_key()})
+    key = host_derived_key()
+    if not key:
+        return False, {"error": "NO_TOKEN"}
+    return await musicctl("hosttoken", {"key": key})
 
 
 async def host_cmd(cmd: str, url: str = None, extra: str = None,
@@ -335,13 +359,18 @@ async def host_cmd(cmd: str, url: str = None, extra: str = None,
     import asyncio
     import uuid
     cmd_id = uuid.uuid4().hex[:12]
-    body = {"cmd": cmd, "token": host_derived_key(), "cmd_id": cmd_id}
+    token = host_derived_key()
+    if not token:
+        return False, "NO_TOKEN"   # 缺 BRIDGE_TOKEN：在客户端前置拒绝，不发明文空 key
+    body = {"cmd": cmd, "token": token, "cmd_id": cmd_id}
     if url:
         body["url"] = url
     if extra:
         body["extra"] = extra
-    ok, _ = await musicctl("hostcmd", body)
+    ok, payload = await musicctl("hostcmd", body)
     if not ok:
+        if str((payload or {}).get("error") or "") == "tts token not configured":
+            return False, "NO_TOKEN"
         return False, "NEED_M5"
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout_s

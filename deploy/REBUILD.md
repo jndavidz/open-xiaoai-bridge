@@ -136,6 +136,15 @@ cd bridge/deploy && docker compose up -d --force-recreate
 证据：`VAD:[mode:endpoint]`、影子双臂、health 200、CPU 70%。回滚双支点 = 镜像 tag `rollback-pre-vad-endpoint-20261103`
 + config 备份。监控脚本 `deploy/monitor-fa-cpu.sh`（窗口至 11-10）。
 
+> 🔴 **2026-11-21 事故（compose 整体覆盖抹掉 NAS 独有 env）**：把仓库 `docker-compose.yml` 直接 scp 覆盖
+> NAS 版本，抹掉了 NAS 独有的 `BRIDGE_TOKEN` → `musicctl`/`speak` 在客户端前置失败、`host_cmd` 报
+> `NEED_M5`，外部只看到「设备未就绪 / 点歌不放」。
+> **权威模型（用户定，强制）**：① **代码库是唯一权威**——compose / config.py / 部署脚本的**形态**都来自仓库；
+> ② NAS `.env` 只承载**值**（凭据不入库），键名必须在 `.env.example` 出现；③ NAS 出现仓库没有的配置行 =
+> **漂移**，先把漂移回写仓库再部署，禁止就地改 NAS。
+> **落地**：`bash preflight-deploy.sh` 校验「repo→NAS 漂移 + 必填 .env 键」，非零退出即禁止部署；
+> `upgrade-image.sh` 已改为「preflight → 推镜像 → 同步 compose+config.py → recreate」，`.env` 只校验键名不传值。
+
 > ⚠️ **部署遗漏重灾**（2026-08-26 实踩）：只推镜像（路径 A）而**不同步 config.py** → 新唤醒词全部失效
 > （「你好小塔」可唤醒、「你好助教」无反应——因为词表在 **bind-mount 的 config.py**，不随镜像走）。
 > 完整部署 = **① 推镜像 + ② 同步 `deploy/config.py`（及 compose/.env，若变更）+ ③ recreate** 三步缺一不可；

@@ -382,15 +382,22 @@ async def _run_cch(action: str, args: dict) -> str:
                     ticket_url = await resolve_ticket_url(
                         ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
                     async with aiohttp.ClientSession() as http:
-                        async with http.head(ticket_url, timeout=aiohttp.ClientTimeout(total=10)) as hr:
-                            clen = int(hr.headers.get("Content-Length") or 0)
+                        # 用 Range GET 而非 HEAD：Songloft /media 的 HEAD 未注册（SPA 兜底成
+                        # text/html），HEAD 判定会把全曲票据误杀。只取 1KB 头部即可判类型/总长。
+                        async with http.get(
+                            ticket_url, headers={"Range": "bytes=0-1023"},
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as hr:
                             ctype = str(hr.headers.get("Content-Type") or "")
-                    if clen >= 500000 and "audio" in ctype:
+                            crange = str(hr.headers.get("Content-Range") or "")
+                            clen = int(hr.headers.get("Content-Length") or 0)
+                            await hr.read()
+                    if _ticket_looks_playable(ctype, crange, clen):
                         play_url = ticket_url
                     else:
                         logger.warning(
-                            f"[SongRequest] ticket preview-like (len={clen} type={ctype}); fallback direct",
-                            module="SongRequest")
+                            f"[SongRequest] ticket rejected (type={ctype} range={crange} len={clen});"
+                            " fallback direct", module="SongRequest")
                 except Exception as exc:  # noqa: BLE001 - 票据链失败降级直链
                     logger.warning(f"[SongRequest] ticket chain failed: {type(exc).__name__}; fallback direct",
                                    module="SongRequest")
@@ -678,6 +685,31 @@ _SOURCE_LABEL = {
     "migu": "咪咕",
     "qianqian": "千千",
 }
+
+
+_TICKET_MIN_BYTES = 500000
+
+
+def _ticket_looks_playable(content_type: str, content_range: str, content_length: int) -> bool:
+    """票据可用判定：音频类型 + 全曲大小 ≥ 500KB（预览降级判据）。
+
+    `content_range`（`bytes 0-1023/9902692`）里的总长优先于 Content-Length（后者是本次
+    区间的长度）。旧实现用 HEAD：Songloft `/media` 未注册 HEAD 路由，会被 SPA 兜底成
+    `text/html` 200 ⇒ 全曲票据被误判为预览而丢弃（2026-11-21 事故）。
+    """
+    ctype = str(content_type or "").lower()
+    if "audio" not in ctype:
+        return False
+    total = 0
+    cr = str(content_range or "").strip()
+    if "/" in cr:
+        try:
+            total = int(cr.rsplit("/", 1)[1])
+        except ValueError:
+            total = 0
+    if total <= 0:
+        total = int(content_length or 0)
+    return total >= _TICKET_MIN_BYTES
 
 
 def _cch_announce_text(item: dict) -> str:

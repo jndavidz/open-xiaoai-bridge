@@ -19,6 +19,9 @@ services:
       - BRIDGE_API_TOKEN=${BRIDGE_API_TOKEN}
       # 具名 token 集合（票 12，可选）：label:token 逗号分隔；与上面并存时旧值 = label legacy
       - BRIDGE_API_TOKENS=${BRIDGE_API_TOKENS:-}
+      # CCH 下行通道凭据（cch-tts :9102 的 Bearer + M5 hostcmd 派生 key 的 HMAC 种子）：
+      # 缺了 = musicctl/speak 全部在客户端前置失败（NEED_M5 / 静默），务必与 cch-capture 同值。
+      - BRIDGE_TOKEN=${BRIDGE_TOKEN}
       # PC 语音注入（可选）：留空=关闭；1/true/yes/on=开启（监听 :9093）
       - INJECT_ENABLE=${INJECT_ENABLE:-}
       # 9093 数据面鉴权（票 12）：启用注入后未配 CIDR 且未显式 INJECT_ALLOW_ANON=1 ⇒ 拒绝监听 9093
