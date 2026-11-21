@@ -1,12 +1,15 @@
-"""工具：song_request（语音点歌，kw-qq-music-api spike，票 01）。
+"""工具：song_request（语音点歌，票 01 / 票 24 取源重构）。
 
-数据面：NAS kw-qq-music-api（默认 http://10.10.10.2:3003，内网 10.10.10.0/24
-免 key）。单曲两跳：`/{source}/search` 搜歌 → `/{source}/song/url` 取 320k 直链，
-经 `speaker.play(url=...)`（announce 双闸门内建）在 LX06 播放。专辑走
-`/{source}/album`（API-REFERENCE §4.4：一次调用给候选专辑 + 首选专辑官方曲序），
+取源分工（票 24）：
+- **首选 Songloft**（音乐服务端）：`core/music/songloft_api.py` 经 `/api/v1/jsplugin/kwqq/*`
+  拿聚合搜索（插件按 酷狗→网易云→QQ→酷我→咪咕→千千 交错合并）与跨源歌词（含逐字 `lxlyric`）；
+- **兜底门面 kwqq-api**（默认 http://10.10.10.2:3003，内网免 key）：Songloft 不可用时按同一
+  源序逐源回落，单曲两跳 `/{source}/search` → `/{source}/song/url`（320k）。
+
+专辑走 `/{source}/album`（API-REFERENCE §4.4：一次调用给候选专辑 + 首选专辑官方曲序），
 曲目解析复用同一条 song/url 二段式。
 
-契约事实源：musicdl 仓库 docs/API-REFERENCE.md v1.1——业务端点统一信封
+契约事实源：musicdl 仓库 docs/API-REFERENCE.md——业务端点统一信封
 `{code,msg,data,timestamp}`，`code != 200` 即业务失败（HTTP 200 不代表成功）；
 `ekey` 加密件不进播放层（ADR-0002）；quality 固定 320k（消费铁律 ≤320k mp3）。
 
@@ -67,11 +70,10 @@ _QUALITY = "320k"
 # 单次搜索拉取的候选数（「换一首」在候选集内轮转）
 _SEARCH_LIMIT = 5
 
-# 默认源策略（要点 6）：按序尝试、首源失败回落。
-# 排除 bilibili——其直链必须随 Referer/UA headers，设备 mediaplayer
-# player_play_url 无 headers 通道 ⇒ 403；migu 不入默认列表
-# （copyrightId 回传链复杂化 spike，留配置可加）。
-_DEFAULT_SOURCES = ("kuwo", "netease", "qq")
+# 兜底用的门面逐源顺序：与 Songloft kwqq 插件的 SEARCH_SOURCE_ORDER 对齐
+# （唯一权威在插件；这里只在 Songloft 不可用时按同一顺序逐源回退，票 24）。
+# bilibili 不入表——直链必须随 Referer/UA headers，设备 mediaplayer 无 headers 通道。
+_DEFAULT_SOURCES = ("kugou", "netease", "qq", "kuwo", "migu", "qianqian")
 
 # 专辑端点的源策略（API-REFERENCE §4.4，2026-10-28 v1.7）：仅 netease 已接入，
 # 其余源返回 HTTP 501（能力缺失）。列表/单曲的源策略与专辑互不影响。
@@ -204,7 +206,24 @@ def _managed_mode() -> bool:
 
 async def _managed_collect(query: str, requested_source, *, artist: str = "",
                            album: bool = False) -> list[dict]:
-    """复用既有搜索/专辑候选逻辑，只把「队列归属」换到托管面。"""
+    """复用既有搜索/专辑候选逻辑，只把「队列归属」换到托管面。
+
+    单曲：**先走 Songloft 聚合搜索**（插件按 酷狗→网易云→QQ→酷我→咪咕→千千 交错合并，
+    歌词/平台字段同源），Songloft 不可用时按同一顺序逐源回落门面；专辑仍走门面专辑端点。
+    显式指定 source 时直接走门面该源（用户的定向意图优先）。
+    """
+    if not album and requested_source is None:
+        try:
+            from core.music import songloft_api
+
+            async with aiohttp.ClientSession() as http:
+                items = await songloft_api.search(query, page_size=_SEARCH_LIMIT, http=http)
+            items = _dedupe_items(_drop_query_variants(items, query))
+            if items:
+                return items
+        except Exception as exc:  # noqa: BLE001 - Songloft 不可用即回落门面（票 24 保留兜底）
+            logger.warning(f"[SongRequest] songloft search failed, facade fallback: {type(exc).__name__}",
+                           module="SongRequest")
 
     sources = _sources(requested_source)
     if not sources:
@@ -336,7 +355,7 @@ async def _run_cch(action: str, args: dict) -> str:
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")
         try:
-            meta = await kwqq_meta(ref["id"])
+            meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
             if m5_enabled():
                 # M5 轨：songloft 票据为主（多源统一门面 + 可撤销 + 代次闸门 +
                 # 凭据隔离；poll 404 已加 re-prepare 自愈）。票据链失败/预览 ⇒
@@ -362,7 +381,7 @@ async def _run_cch(action: str, args: dict) -> str:
                                    module="SongRequest")
                 if not play_url:
                     async with aiohttp.ClientSession() as http:
-                        for src in _sources(ref["source"] or None):
+                        for src in _sources(None):
                             play_url = await _pick_url(http, src, item)
                             if play_url:
                                 break
@@ -372,12 +391,22 @@ async def _run_cch(action: str, args: dict) -> str:
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
-                # 歌词通道（A3）：kwqq LRC → 设备本地 httpd → lyricUrl；失败不阻塞播放
+                # 歌词通道（A3）：Songloft 跨源回搜（优先）→ 门面同源（兜底）→ 设备本地 httpd
                 try:
+                    lrc = ""
                     async with aiohttp.ClientSession() as http:
-                        lr = await _api(http, f"/{ref['source'] or 'kuwo'}/lyric",
-                                        {"id": ref["id"]})
-                    lrc = str((lr or {}).get("lyric") or "") if isinstance(lr, dict) else ""
+                        try:
+                            from core.music import songloft_api
+
+                            ly = await songloft_api.lyric(
+                                str(item.get("name") or ""),
+                                str(item.get("artist") or item.get("singer") or ""),
+                                http=http)
+                            lrc = songloft_api.pick_lrc(ly)
+                        except Exception:  # noqa: BLE001 - Songloft 不可用回落门面同源
+                            lr = await _api(http, f"/{ref['source'] or 'kuwo'}/lyric",
+                                            {"id": ref["id"]})
+                            lrc = str((lr or {}).get("lyric") or "") if isinstance(lr, dict) else ""
                     if lrc:
                         lok, _ = await musicctl("lyric", {"id": ref["id"], "lrc": lrc})
                         if lok:
@@ -593,15 +622,13 @@ async def _pick_url(session, source: str, item: dict) -> str | None:
 
 
 def _sources(requested) -> list[str]:
-    """按序源列表：显式指定时限定在配置集合内；bilibili 任何情况下排除。"""
-    configured = _cfg("sources") or list(_DEFAULT_SOURCES)
-    configured = [str(s).strip().lower() for s in configured if s]
+    """按序源列表：缺省 = 插件同序的 `_DEFAULT_SOURCES`（单一真相，不再读旧 `sources` 配置）。"""
     if requested:
         src = str(requested).strip().lower()
-        if src == "bilibili":
+        if src == "bilibili" or src not in _DEFAULT_SOURCES:
             return []
-        return [src] if src in configured else []
-    return [s for s in configured if s != "bilibili"]
+        return [src]
+    return list(_DEFAULT_SOURCES)
 
 
 def _album_sources(requested) -> list[str]:

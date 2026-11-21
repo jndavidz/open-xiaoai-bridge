@@ -203,15 +203,20 @@ def tts_token() -> str:
     return val or os.environ.get("BRIDGE_TOKEN", "")
 
 
-async def kwqq_meta(song_id: str) -> dict:
-    """kwqq-api 曲目元数据（envelope 契约）。失败返回空 dict（renderData 退化用 id）。"""
+async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
+    """门面曲目元数据（envelope 契约）。失败返回空 dict（renderData 退化用 id）。
+
+    `source` 必须是被点曲目的实际源（Songloft 聚合后常为 kugou/netease 等），
+    固定 `/kuwo/` 会拿不到 id（票 24 review 修复）。
+    """
     import aiohttp
 
     base = str(_cfg("api_base", "http://10.10.10.2:3003")).rstrip("/")
+    src = str(source or "kuwo").strip().lower() or "kuwo"
     try:
         async with aiohttp.ClientSession() as http:
             async with http.get(
-                f"{base}/kuwo/song/info", params={"id": song_id},
+                f"{base}/{src}/song/info", params={"id": song_id},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
@@ -221,7 +226,7 @@ async def kwqq_meta(song_id: str) -> dict:
             return body.get("data") or {}
         return {}
     except Exception as exc:  # noqa: BLE001 —— 元数据失败不阻塞点播
-        logger.warning(f"[CchCast] kwqq_meta({song_id}) err: {type(exc).__name__}", module="CchCast")
+        logger.warning(f"[CchCast] kwqq_meta({src}/{song_id}) err: {type(exc).__name__}", module="CchCast")
         return {}
 
 

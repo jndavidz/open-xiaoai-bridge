@@ -521,11 +521,11 @@ class PlayPathTest(unittest.TestCase):
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("netease", out)
         self.assertIn("已确认出声", out)
-        # 回落即停：kuwo 失败一跳 + netease 成功（另有一次同源按歌手补歌，见
+        # 回落即停：kugou 失败一跳 + netease 成功（另有一次同源按歌手补歌，见
         # _extend_with_singer），qq 不得再空转
         search_urls = [u for u, _ in api.calls_for("search")]
         self.assertFalse([u for u in search_urls if "qq" in u])
-        self.assertEqual("kuwo", search_urls[0].split("/")[3])
+        self.assertEqual("kugou", search_urls[0].split("/")[3])   # 票 24：插件序首位
         self.assertTrue(all("netease" in u for u in search_urls[1:]))
 
     def test_ekey_item_ignored(self):
@@ -588,15 +588,20 @@ class PlayPathTest(unittest.TestCase):
     def test_source_outside_config_rejected(self):
         api = _ApiStub([])
         speaker = FakeSpeaker()
-        patches = _play_env(api, speaker)  # 默认 kuwo/netease/qq
+        patches = _play_env(api, speaker)
         with patches[0], patches[1], patches[2], patches[3]:
-            out = _run(song_request.run({"action": "play", "query": "x", "source": "kugou"}))
+            # 票 24：非兜底源（如 deezer/bilibili）仍拒绝；kugou 已入兜底序，不再算「未启用」
+            out = _run(song_request.run({"action": "play", "query": "x", "source": "deezer"}))
         self.assertIn("未启用", out)
         self.assertEqual([], api.calls)
 
-    def test_default_sources_exclude_bilibili_and_migu(self):
-        # 要点 6：默认段只有 kuwo/netease/qq；migu 留配置可加
-        self.assertEqual(("kuwo", "netease", "qq"), song_request._DEFAULT_SOURCES)
+    def test_default_sources_follow_plugin_order(self):
+        # 票 24：兜底顺序与 Songloft kwqq 插件 SEARCH_SOURCE_ORDER 对齐（唯一权威在插件）；
+        # bilibili 需 headers/remux，不进兜底。
+        self.assertEqual(
+            ("kugou", "netease", "qq", "kuwo", "migu", "qianqian"),
+            song_request._DEFAULT_SOURCES,
+        )
 
     def test_missing_speaker(self):
         api = _ApiStub([
@@ -1600,3 +1605,60 @@ class WaitTrackEndQualityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourcingSeamTest(unittest.IsolatedAsyncioTestCase):
+    """票 24：Songloft 优先 / 门面按插件序回落 / 显式 source 直达（seam = run 之下的取源面）。"""
+
+    def test_default_sources_are_plugin_order(self):
+        self.assertEqual(("kugou", "netease", "qq", "kuwo", "migu", "qianqian"),
+                         tuple(song_request._sources(None)))
+
+    def test_explicit_source_is_honoured(self):
+        self.assertEqual(["kugou"], song_request._sources("kugou"))
+        self.assertEqual([], song_request._sources("bilibili"))
+        self.assertEqual([], song_request._sources("unknown-platform"))
+
+    async def test_songloft_hit_skips_facade(self):
+        from unittest import mock
+
+        from core.music import songloft_api
+
+        hit = [{"name": "晴天", "artist": "周杰伦", "source": "kugou", "id": "H1"}]
+        with mock.patch.object(songloft_api, "search", mock.AsyncMock(return_value=hit)):
+            with mock.patch.object(song_request, "_search", mock.AsyncMock(
+                    side_effect=AssertionError("facade must not be used"))):
+                items = await song_request._managed_collect("晴天", None)
+        self.assertEqual("kugou", items[0]["source"])
+
+    async def test_songloft_failure_falls_back_in_plugin_order(self):
+        from unittest import mock
+
+        from core.music import songloft_api
+
+        facade_hit = [{"name": "晴天", "singer": "周杰伦", "source": "kugou", "id": "H1"}]
+        calls = []
+
+        async def fake_search(session, source, query):
+            calls.append(source)
+            return facade_hit if source == "kugou" else []
+
+        with mock.patch.object(songloft_api, "search",
+                               mock.AsyncMock(side_effect=songloft_api.SongloftError("down"))):
+            with mock.patch.object(song_request, "_search", side_effect=fake_search):
+                items = await song_request._managed_collect("晴天", None)
+        self.assertEqual(["kugou"], calls)          # 首个源就是插件序首位，不是 kuwo
+        self.assertEqual("kugou", items[0]["source"])
+
+    async def test_explicit_source_bypasses_songloft(self):
+        from unittest import mock
+
+        from core.music import songloft_api
+
+        facade_hit = [{"name": "晴天", "singer": "周杰伦", "source": "netease", "id": "N1"}]
+        with mock.patch.object(songloft_api, "search",
+                               mock.AsyncMock(side_effect=AssertionError("bypassed"))):
+            with mock.patch.object(song_request, "_search",
+                                   mock.AsyncMock(return_value=facade_hit)):
+                items = await song_request._managed_collect("晴天", "netease")
+        self.assertEqual("netease", items[0]["source"])

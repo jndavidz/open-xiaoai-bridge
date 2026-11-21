@@ -55,7 +55,7 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
         async def fake_resolve(ref, *, session, epoch, entry):
             return f"http://songloft/media?media_ticket={entry}"
 
-        async def fake_meta(song_id):
+        async def fake_meta(song_id, source="kuwo"):
             return {"name": f"歌{song_id}", "singer": "歌手", "album": "专辑",
                     "cover": "http://cover", "duration": 180, "id": song_id}
 

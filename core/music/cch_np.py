@@ -121,7 +121,7 @@ async def _advance_if_finished() -> dict:
             ticket_url = await resolve_ticket_url(
                 ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
                 entry=str(item.get("id") or f"cch-{nxt}"))
-            meta = await kwqq_meta(ref["id"])
+            meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
             render_data = build_render_data(ticket_url, item, meta)
             if m5_enabled():
                 await host_token_deploy()
@@ -212,7 +212,7 @@ async def _recast_current() -> dict:
         ticket_url = await resolve_ticket_url(
             ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
             entry=str(item.get("id") or f"cch-{idx}"))
-        meta = await kwqq_meta(ref["id"])
+        meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
         render_data = build_render_data(ticket_url, item, meta)
         await prepare_playback()  # 预清残留 + 条件重注册（facts §2.48）
         ok, detail = await cast_native(render_data)
