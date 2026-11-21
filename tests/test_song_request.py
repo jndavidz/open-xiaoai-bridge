@@ -1718,3 +1718,26 @@ class TtsWaitEstimateTest(unittest.TestCase):
         self.assertEqual(0.0, song_request._tts_wait_seconds(""))
         self.assertGreaterEqual(song_request._tts_wait_seconds("一"), 1.2)
         self.assertLessEqual(song_request._tts_wait_seconds("字" * 200), 12.0)
+
+
+class TargetResolutionTest(unittest.TestCase):
+    """用户 2026-11-21：CCH 屏点歌被模型连续误投 LX06 —— 上下文优先，需原话点名设备。"""
+
+    def tearDown(self):
+        song_request.reset_playback_target()
+
+    def test_context_cch_overrides_stray_lx06(self):
+        song_request.set_playback_target("cch", text="播放王菲的歌")
+        self.assertEqual("cch", song_request._resolve_target("lx06"))
+
+    def test_explicit_lx06_allowed_when_utters_device(self):
+        song_request.set_playback_target("cch", text="在小爱音箱上播放王菲的歌")
+        self.assertEqual("lx06", song_request._resolve_target("lx06"))
+
+    def test_context_cch_default(self):
+        song_request.set_playback_target("cch", text="播放晴天")
+        self.assertEqual("cch", song_request._resolve_target(None))
+
+    def test_no_context_keeps_explicit(self):
+        self.assertEqual("lx06", song_request._resolve_target("lx06"))
+        self.assertEqual("cch", song_request._resolve_target("cch"))

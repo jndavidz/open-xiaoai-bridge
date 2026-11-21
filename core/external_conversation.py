@@ -331,7 +331,8 @@ class ExternalConversationController:
         from core.tools.song_request import set_playback_target
 
         _asr_source = str(req.get("source") or "").lower()
-        set_playback_target("cch" if "cch" in _asr_source else "lx06")
+        set_playback_target("cch" if "cch" in _asr_source else "lx06",
+                            text=str(req.get("text") or ""))
         try:
             result = await self._run_one_turn()
             # 单轮语义：continue 也结束会话（外部轮无下一轮）。

@@ -44,25 +44,47 @@ RISK = "a"
 # 外部文本轮按 ASR 来源设置（cch-screen→cch，LX06 原生→lx06）；轮末 reset。
 # 模块级在途上下文——单事件循环串行会话，与 suppress_reply 同构。
 _playback_target_context = ""
+_playback_target_text = ""
 
 
-def set_playback_target(target: str) -> None:
-    """由会话层在轮首设置本轮默认目标（cch/lx06）；仅接受白名单值。"""
-    global _playback_target_context
+def set_playback_target(target: str, text: str | None = None) -> None:
+    """由会话层在轮首设置本轮默认目标（cch/lx06）与原话；仅接受白名单值。
+
+    `text` 用于区分「用户点名了小爱音箱」与「模型被历史带偏」——上下文为 cch 时，
+    只有原话含设备关键词才允许显式投 lx06。
+    """
+    global _playback_target_context, _playback_target_text
     _playback_target_context = target if target in ("cch", "lx06") else ""
+    _playback_target_text = str(text or "")
 
 
 def reset_playback_target() -> None:
     """轮末清除本轮默认目标（仿 suppress_reply 的复位点）。"""
-    global _playback_target_context
+    global _playback_target_context, _playback_target_text
     _playback_target_context = ""
+    _playback_target_text = ""
 
 
 def _resolve_target(explicit) -> str:
-    """目标判定（两层结合）：LLM 显式 target 优先，否则本轮上下文兜底，默认 lx06。"""
+    """目标判定（两层结合）：本轮上下文优先于 LLM 显式值，避免模型被历史对话带偏。
+
+    - 上下文 = cch（CCH 屏说话）：只有**本轮原话点名设备**（小爱/音箱/客厅音响）才允许
+      投 lx06；否则一律 cch（2026-11-21 实测：模型连续两轮把 CCH 点歌误投 LX06）。
+    - 无上下文的唤醒路径：LLM 显式值优先，默认 lx06。
+    """
+    ctx = _playback_target_context
     if isinstance(explicit, str) and explicit.strip().lower() in ("cch", "lx06"):
-        return explicit.strip().lower()
-    return _playback_target_context or "lx06"
+        explicit = explicit.strip().lower()
+    else:
+        explicit = None
+    if ctx == "cch":
+        if explicit == "lx06":
+            if re.search(r"小爱|音箱|客厅音响", _playback_target_text or ""):
+                return "lx06"   # 用户本轮原话点名了音箱设备
+            logger.info("[SongRequest] target lx06 ignored: no device keyword in utterance; using cch",
+                        module="SongRequest")
+        return "cch"
+    return explicit or ctx or "lx06"
 
 # 消费铁律（spec §0）：播放类消费方只吃 ≤320k mp3
 _QUALITY = "320k"
@@ -342,6 +364,15 @@ async def _run_cch(action: str, args: dict) -> str:
             return "CCH 暂不支持上一首"
         # play / album：搜歌 → songloft prepare → renderData → 9102 /cmd
         query = str(args.get("query") or "").strip()
+        if action == "play":
+            # 立即暂停（用户 2026-11-21「点歌后没有立刻暂停」）：先把派生 key 部署到设备，
+            # 再 stop 当前会话——放在搜索/取票之前，避免 1–2s 解析期里旧曲继续响。
+            try:
+                await host_token_deploy()
+                await host_cmd("stop", timeout_s=1.5)   # 早停只等短回执，不拖慢解析
+            except Exception as exc:  # noqa: BLE001 - 早停失败不阻塞后续
+                logger.warning(f"[SongRequest] cch early stop failed: {type(exc).__name__}",
+                               module="SongRequest")
         items = await _managed_collect(
             query, args.get("source"),
             artist=str(args.get("artist") or "").strip(),
@@ -362,18 +393,13 @@ async def _run_cch(action: str, args: dict) -> str:
         entry = str(item.get("id") or "cch-1")
 
         async def _pre_play_announce() -> None:
-            """点歌前：停旧曲 → 播报 → **等播报读完**，再起播（用户 2026-11-21 口径）。
+            """起播前播报，并**等播报读完**再起播（用户 2026-11-21 口径）。
 
-            顺序原因：原厂 TTS 会 suspend 当前曲、结束自动 resume（不停旧曲会闪回旧曲）；
-            `/speak` 异步下发（不等出声，立即起播会盖住播报）。
+            旧曲已在进入 play 分支时立即 stop（见上方 early stop），这里只负责播报与等待；
+            `/speak` 异步下发（不等出声），立即起播会盖住播报。
             """
             if action != "play" or not _cfg("cch_announce_on_play", True):
                 return
-            try:
-                await host_cmd("stop")
-            except Exception as exc:  # noqa: BLE001 - 停旧曲失败不阻塞
-                logger.warning(f"[SongRequest] cch pre-announce stop failed: {type(exc).__name__}",
-                               module="SongRequest")
             try:
                 text = _cch_announce_text(item)
                 ok_speak, _ = await speak(text)

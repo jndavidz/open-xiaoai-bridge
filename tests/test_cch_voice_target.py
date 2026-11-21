@@ -37,11 +37,16 @@ class TargetResolutionTest(unittest.TestCase):
         sr.set_playback_target("cch")
         self.assertEqual(sr._resolve_target(None), "cch")
 
-    def test_explicit_overrides_context(self):
+    def test_context_cch_ignores_stray_lx06(self):
+        # 2026-11-21：CCH 上下文优先；无原话点名设备时模型显式 lx06 视为误判
         sr.set_playback_target("cch")
-        self.assertEqual(sr._resolve_target("lx06"), "lx06")
+        self.assertEqual(sr._resolve_target("lx06"), "cch")
         sr.set_playback_target("lx06")
         self.assertEqual(sr._resolve_target("cch"), "cch")
+
+    def test_context_cch_honours_lx06_when_utterance_names_device(self):
+        sr.set_playback_target("cch", text="在小爱音箱上播放晴天")
+        self.assertEqual(sr._resolve_target("lx06"), "lx06")
 
     def test_context_reset(self):
         sr.set_playback_target("cch")
