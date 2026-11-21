@@ -253,6 +253,8 @@ APP_CONFIG = {
         # bridge = 控制/状态端。关闭时 target=cch 的点歌不再 prepare / 不再 /cch/cast，
         # 原厂云链自行播放（我方投送只会造出并发的第二声源，§2.27/§2.30）。
         "cch_cast_enabled": False,
+        # 票 22：点歌播报开关（CCH 云端 TTS）；dev 默认开，与 deploy 一致。
+        "cch_announce_on_play": True,
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）

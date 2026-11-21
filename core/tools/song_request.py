@@ -298,6 +298,7 @@ async def _run_cch(action: str, args: dict) -> str:
         prepare_playback,
         resolve_ticket_url,
         revoke,
+        speak,
         wait_np_play,
     )
     from core.tools.registry import suppress_reply
@@ -359,6 +360,15 @@ async def _run_cch(action: str, args: dict) -> str:
         ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")
+        # 票 22：点歌播报（CCH 云端 TTS）。必须**先播报、后起播**——TTS 自带打断，
+        # 起播后播报会切断歌曲。开关 song_request.cch_announce_on_play 默认开；
+        # 仅 play 动作播报（album 连续起播不打断）。
+        if action == "play" and _cfg("cch_announce_on_play", True):
+            try:
+                await speak(_cch_announce_text(item))
+            except Exception as exc:  # noqa: BLE001 - 播报失败不阻塞起播
+                logger.warning(f"[SongRequest] cch announce failed: {type(exc).__name__}",
+                               module="SongRequest")
         try:
             meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
             if m5_enabled():
@@ -657,6 +667,31 @@ def _announce_text(item: dict) -> str:
     if singer:
         text += f"，{singer}"
     return text + "，这就为你播放"
+
+
+# 门面/插件 source → 人话平台名（票 22 播报用；未知源不硬编）
+_SOURCE_LABEL = {
+    "kugou": "酷狗",
+    "netease": "网易云",
+    "kuwo": "酷我",
+    "qq": "QQ音乐",
+    "migu": "咪咕",
+    "qianqian": "千千",
+}
+
+
+def _cch_announce_text(item: dict) -> str:
+    """CCH 点歌播报：「好的，现在为您播放{歌手}的{曲名}，来自于{平台}。」（票 22 用户口径）"""
+    name = str(item.get("name") or "").strip() or "这首"
+    singer = str(item.get("artist") or item.get("singer") or "").strip()
+    label = _SOURCE_LABEL.get(str(item.get("source") or "").strip().lower(), "")
+    text = "好的，现在为您播放"
+    if singer:
+        text += f"{singer}的"
+    text += name
+    if label:
+        text += f"，来自于{label}"
+    return text + "。"
 
 
 async def _speak_and_start(speaker, message: str, url: str) -> tuple[bool, int]:

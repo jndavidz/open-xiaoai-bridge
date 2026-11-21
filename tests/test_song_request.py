@@ -1668,3 +1668,21 @@ class SourcingSeamTest(unittest.IsolatedAsyncioTestCase):
                                    mock.AsyncMock(return_value=facade_hit)):
                 items = await song_request._managed_collect("晴天", "netease")
         self.assertEqual("netease", items[0]["source"])
+
+
+class CchAnnounceTextTest(unittest.TestCase):
+    """票 22：CCH 点歌播报文案（用户口径，平台名取实际命中源）。"""
+
+    def test_full_text(self):
+        self.assertEqual("好的，现在为您播放周杰伦的青花瓷，来自于酷狗。",
+                         song_request._cch_announce_text(
+                             {"name": "青花瓷", "artist": "周杰伦", "source": "kugou"}))
+
+    def test_falls_back_to_singer_field_and_omits_unknown_platform(self):
+        self.assertEqual("好的，现在为您播放邓丽君的月亮代表我的心。",
+                         song_request._cch_announce_text(
+                             {"name": "月亮代表我的心", "singer": "邓丽君", "source": "x"}))
+
+    def test_missing_name_uses_placeholder(self):
+        self.assertEqual("好的，现在为您播放这首。",
+                         song_request._cch_announce_text({}))

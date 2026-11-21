@@ -284,6 +284,10 @@ APP_CONFIG = {
         # M5 未就绪时 cast 轨事后验证返 NEED_M5（死实例感知）。回滚 = 两开关置 False。
         "cch_np_enabled": True,
         "cch_m5_enabled": True,
+        # 票 22：点歌成功后的 CCH 云端 TTS 播报（「好的，现在为您播放{歌手}的{曲名}，
+        # 来自于{平台}。」）。必须先播报后起播（TTS 自带打断）；合成走阿里云，断网不可用。
+        # 关闭 = 不播报、起播时延回到基线。
+        "cch_announce_on_play": True,
     },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
