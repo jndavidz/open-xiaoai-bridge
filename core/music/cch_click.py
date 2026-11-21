@@ -29,10 +29,16 @@ _FAIL_STREAK_SLOW = 3
 _RECV_MAX = 10           # 单次 clickpoll 拉取上限（与 tts_http 默认一致）
 _DEDUPE_CAP = 32         # design §2.6：deque 容量 32
 _DEDUPE_DEFAULT_S = 8.0
+_DEBOUNCE_DEFAULT_S = 3.0  # last-tap-wins 去抖（票 23 双发实测；cch_click_debounce_s 可配）
 _RESUME_AFTER_S = 1.5    # design §2.7：起播后 1.5s 读 state，paused 补一次 resume
 
 # (ts, norm_name, norm_artist) 环形窗——每次主动点播（语音 + worker 自身）前登记
 _recent: deque = deque(maxlen=_DEDUPE_CAP)
+
+# 去抖状态：未决事件 + 其计时任务；播放链串行锁（song_request.run ~35s）
+_pending_ev: dict | None = None
+_pending_task: asyncio.Task | None = None
+_play_lock = asyncio.Lock()
 
 # 尾部括注（全/半角括号）：历史条目名常带「(四段)」「（Live）」等版本后缀
 _BRACKET_RE = re.compile(r"[（(][^）)]*[）)]\s*$")
@@ -104,12 +110,60 @@ async def _resume_if_paused() -> None:
 
 
 async def _handle_event(ev: dict) -> None:
-    """单事件：去重 → 占窗 → 复用语音点歌链（target=cch）。"""
+    """兼容别名：直接播放（跳过去抖）。单测与外部调用沿用。"""
+    await _play_event(ev)
+
+
+def _accept_event(ev: dict) -> None:
+    """事件入口（worker 拉取循环调用，同步）：去重 → 去抖 last-tap-wins。
+
+    去抖依据（票 23 真机实测）：云端对一次点击**先发队列头回声、再发被点歌**，
+    双发两播（先刘巧儿后正确歌）。新事件替换未决事件并重置计时，
+    静默 `cch_click_debounce_s`（默认 3s）后只播最后一条——回声与连点天然收敛。
+    """
+    global _pending_ev, _pending_task
+    name = str(ev.get("name") or "")
+    source = str(ev.get("source") or "")
+    reason = dedupe(name, str(ev.get("artist") or ""))
+    if reason:
+        logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",
+                    module="CchClick")
+        return
+    _pending_ev = ev
+    if _pending_task is not None:
+        _pending_task.cancel()
+    _pending_task = asyncio.create_task(_debounced_play(ev))
+    logger.info(f"[CchClick] recv name={name} src={source} action=hold(debounce={_debounce_s():g}s)",
+                module="CchClick")
+
+
+async def _debounced_play(ev: dict) -> None:
+    global _pending_ev, _pending_task
+    try:
+        await asyncio.sleep(_debounce_s())
+    except asyncio.CancelledError:
+        return   # 被更新的点击替换（last-tap-wins）
+    _pending_ev = None
+    _pending_task = None
+    async with _play_lock:           # 上一播放链（~35s）未完时串行等待
+        await _play_event(ev)
+
+
+def _debounce_s() -> float:
+    try:
+        return float(_cfg("cch_click_debounce_s", _DEBOUNCE_DEFAULT_S) or _DEBOUNCE_DEFAULT_S)
+    except (TypeError, ValueError):
+        return _DEBOUNCE_DEFAULT_S
+
+
+async def _play_event(ev: dict) -> None:
+    """实际播放：二次去重防线 → 占窗 → 复用语音点歌链（target=cch）→ 单发收尾。"""
     name = str(ev.get("name") or "")
     artist = str(ev.get("artist") or "")
     source = str(ev.get("source") or "")
     reason = dedupe(name, artist)
     if reason:
+        # 去抖窗口内状态变化（如更早的播放刚占窗）——二次防线，宁少播不重播
         logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",
                     module="CchClick")
         return
@@ -121,6 +175,12 @@ async def _handle_event(ev: dict) -> None:
                                      "artist": artist, "target": "cch"})
     logger.info(f"[CchClick] play done name={name} result={str(result)[:80]}",
                 module="CchClick")
+    # 单发收尾（票 23 实测病灶）：点击播 = 单曲意图；清换代队列，防
+    # STATE finish → cch_np advance 连播搜索变体（「都是刘巧儿不同片段」）。
+    try:
+        song_request._cch_state.update({"entry": 0, "items": []})
+    except Exception:  # noqa: BLE001
+        pass
     asyncio.create_task(_resume_if_paused())
 
 
@@ -132,26 +192,35 @@ async def run_worker() -> None:
     logger.info("[CchClick] worker started (poll=1s)", module="CchClick")
     fail_streak = 0
     delay = _POLL_S
-    while True:
-        try:
-            from core.music import cch_cast
+    try:
+        while True:
+            try:
+                from core.music import cch_cast
 
-            ok, payload = await cch_cast.musicctl("clickpoll", {"max": _RECV_MAX})
-            events = payload.get("events") if ok and isinstance(payload, dict) else None
-            if events is None:
-                raise RuntimeError("clickpoll not ok")
-            fail_streak = 0
-            delay = _POLL_S
-            for ev in events:
-                try:
-                    await _handle_event(ev)
-                except Exception as exc:  # noqa: BLE001 - 单条失败不影响 worker
-                    logger.warning(f"[CchClick] handle err: {type(exc).__name__}",
-                                   module="CchClick")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - 拉取失败降频续跑
-            fail_streak += 1
+                ok, payload = await cch_cast.musicctl("clickpoll", {"max": _RECV_MAX})
+                events = payload.get("events") if ok and isinstance(payload, dict) else None
+                if events is None:
+                    raise RuntimeError("clickpoll not ok")
+                fail_streak = 0
+                delay = _POLL_S
+                for ev in events:
+                    try:
+                        _accept_event(ev)
+                    except Exception as exc:  # noqa: BLE001 - 单条失败不影响 worker
+                        logger.warning(f"[CchClick] handle err: {type(exc).__name__}",
+                                       module="CchClick")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 拉取失败降频续跑
+                fail_streak += 1
+                if fail_streak >= _FAIL_STREAK_SLOW:
+                    delay = _SLOW_POLL_S
+                logger.warning(f"[CchClick] poll err ({fail_streak}): {type(exc).__name__}",
+                               module="CchClick")
+            await asyncio.sleep(delay)
+    finally:
+        if _pending_task is not None:
+            _pending_task.cancel()
             if fail_streak >= _FAIL_STREAK_SLOW:
                 delay = _SLOW_POLL_S
             logger.warning(f"[CchClick] poll err ({fail_streak}): {type(exc).__name__}",

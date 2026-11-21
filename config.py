@@ -258,6 +258,7 @@ APP_CONFIG = {
         # 票 23：播放历史点击 worker；dev 默认关（依赖模块 v0.4.9 刷机 + 设备在场）。
         "cch_click_enabled": False,
         "cch_click_dedupe_s": 8.0,
+        "cch_click_debounce_s": 3.0,
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）

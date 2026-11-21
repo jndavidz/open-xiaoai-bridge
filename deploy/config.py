@@ -294,6 +294,9 @@ APP_CONFIG = {
         "cch_click_enabled": False,
         # 去重时间窗（秒）：连续 5 次语音点歌 0 次重复起播 = 验收门（design §2.8）。
         "cch_click_dedupe_s": 8.0,
+        # 去抖 last-tap-wins（秒）：云端对一次点击先发队列头回声、再发被点歌（真机实测
+        # 双发两播）——静默本窗后只播最后一条。0 = 关去抖（不推荐）。
+        "cch_click_debounce_s": 3.0,
     },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
