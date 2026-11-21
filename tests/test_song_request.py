@@ -1705,3 +1705,16 @@ class TicketHeuristicTest(unittest.TestCase):
 
     def test_no_range_falls_back_to_content_length(self):
         self.assertTrue(song_request._ticket_looks_playable("audio/mpeg", "", 900000))
+
+
+class TtsWaitEstimateTest(unittest.TestCase):
+    """播报后再起播：按字数估算 TTS 时长（facts §2.20 采样）。"""
+
+    def test_grows_with_length(self):
+        self.assertLess(song_request._tts_wait_seconds("好的"),
+                        song_request._tts_wait_seconds("好的，现在为您播放周杰伦的青花瓷，来自于酷狗。"))
+
+    def test_bounds(self):
+        self.assertEqual(0.0, song_request._tts_wait_seconds(""))
+        self.assertGreaterEqual(song_request._tts_wait_seconds("一"), 1.2)
+        self.assertLessEqual(song_request._tts_wait_seconds("字" * 200), 12.0)

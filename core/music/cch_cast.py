@@ -271,6 +271,10 @@ def build_render_data(ticket_url: str, item: dict, meta: dict) -> dict:
         "totalEpisode": 0, "audioUrl": ticket_url, "appId": "200",
         "audioAlbum": album, "rawId": sid, "soundQuality": "高音质",
         "audioImageUrl": cover, "copyRight": 0,
+        # 全屏歌词页/播控页的整屏背景：云端 ContentPlay 会带 backgroundImage，
+        # 我们只给 cover 会导致背景沿用上一首云端图（2026-11-21 用户反馈「所有歌背景都是
+        # 李健《想念你》」）。这里显式下发同源封面，并清空背景署名。
+        "backgroundImage": cover, "lyricbackGroundAuhor": "",
         "itemRawId": sid, "audioUid": sid, "itemId": sid,
         "toast": "", "audioName": name, "collect": False, "template": "",
         "albumName": album, "audioExt": audio_ext,
