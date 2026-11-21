@@ -115,11 +115,12 @@ async def _handle_event(ev: dict) -> None:
 
 
 def _accept_event(ev: dict) -> None:
-    """事件入口（worker 拉取循环调用，同步）：去重 → 去抖 last-tap-wins。
+    """事件入口（worker 拉取循环调用，同步）：去重 → 源优先级 → 去抖 last-tap-wins。
 
-    去抖依据（票 23 真机实测）：云端对一次点击**先发队列头回声、再发被点歌**，
-    双发两播（先刘巧儿后正确歌）。新事件替换未决事件并重置计时，
-    静默 `cch_click_debounce_s`（默认 3s）后只播最后一条——回声与连点天然收敛。
+    源优先级（票 23 真机实证 16:58 同毫秒双事件）：`HIST`（tap hook join 出的
+    用户 UI 直拆意图）在去抖窗内**压过** `KG`——云端对点击只回队列头（facts
+    §2.73/2.74：被点歌从不以 CP 形态出现），窗内的 KG 事件必为回声 → drop。
+    其余情形维持 last-tap-wins（新事件替换未决并重置计时）。
     """
     global _pending_ev, _pending_task
     name = str(ev.get("name") or "")
@@ -129,6 +130,13 @@ def _accept_event(ev: dict) -> None:
         logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",
                     module="CchClick")
         return
+    if _pending_ev is not None:
+        pending_src = str(_pending_ev.get("source") or "")
+        if pending_src == "HIST" and source != "HIST":
+            logger.info(f"[CchClick] recv name={name} src={source} "
+                        f"action=drop(echo-behind-hist:{_norm(str(_pending_ev.get('name') or ''))})",
+                        module="CchClick")
+            return
     _pending_ev = ev
     if _pending_task is not None:
         _pending_task.cancel()
