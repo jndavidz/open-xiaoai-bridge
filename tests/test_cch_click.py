@@ -93,7 +93,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
              mock.patch("core.tools.song_request.run", fake_run), \
              mock.patch.object(cch_click, "_resume_if_paused", noop_resume):
-            cch_click._accept_event({"name": "晴天", "artist": "周杰伦", "source": "KWQQ"})
+            cch_click._accept_event({"name": "晴天", "artist": "周杰伦", "source": "HIST"})
             t = cch_click._pending_task
             self.assertIsNotNone(t)
             await asyncio.wait_for(t, timeout=2)
@@ -114,10 +114,10 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.2), \
              mock.patch("core.tools.song_request.run", fake_run), \
              mock.patch.object(cch_click, "_resume_if_paused", noop_resume):
-            cch_click._accept_event({"name": "刘巧儿", "artist": "", "source": "KG"})
+            cch_click._accept_event({"name": "刘巧儿", "artist": "", "source": "HIST"})
             t1 = cch_click._pending_task
             await asyncio.sleep(0.05)    # echo 先到；debounce=0.2s 未到期
-            cch_click._accept_event({"name": "七里香", "artist": "", "source": "KG"})
+            cch_click._accept_event({"name": "七里香", "artist": "", "source": "HIST"})
             t2 = cch_click._pending_task
             self.assertIsNot(t1, t2, "新事件必须替换未决任务")
             await asyncio.wait_for(t2, timeout=2)   # 确定性等最后一条播完
@@ -188,7 +188,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
 
         async def fake_musicctl(op, body=None):
             calls.append((op, body))
-            return True, {"events": [{"name": "歌一", "artist": "", "source": "KG"}],
+            return True, {"events": [{"name": "歌一", "artist": "", "source": "HIST"}],
                           "dropped": 0}
 
         played = []
@@ -242,8 +242,8 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state["n"] >= 2, "poll 失败后继续轮询")
 
     async def test_hist_event_beats_later_kg_echo(self):
-        """票 23 真机 16:58 同毫秒双事件：HIST(晴天) 先 hold，KG 回声(刘巧儿)后到
-        → 必须被 drop，播 HIST 的晴天。"""
+        """票 23 真机 16:58 同毫秒双事件：HIST(晴天) hold，KG 回声(刘巧儿)后到
+        → 源准入直接 drop，播 HIST 的晴天。"""
         played = []
 
         async def fake_run(args):
@@ -263,26 +263,19 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(t, timeout=2)
         self.assertEqual(played, ["晴天"], "KG 回声不得顶掉 HIST 意图")
 
-    async def test_kg_first_then_hist_still_wins(self):
-        """回声先到的反向时序：KG hold → HIST 到 → 正常替换，HIST 赢。"""
+    async def test_kg_source_dropped_at_accept(self):
+        """01:11 真机：语音搜索结果 KG CP 被 worker 当点击播 → 与语音链竞速。
+        源准入后 KG 一律 drop（HIST 覆盖 tap intent，语音链自管语音）。"""
         played = []
 
         async def fake_run(args):
             played.append(args.get("query"))
             return "ok"
 
-        async def noop_resume():
-            return
-
-        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.2), \
-             mock.patch("core.tools.song_request.run", fake_run), \
-             mock.patch.object(cch_click, "_resume_if_paused", noop_resume):
-            cch_click._accept_event({"name": "刘巧儿 (四段)", "artist": "", "source": "KG"})
-            await asyncio.sleep(0.05)
-            cch_click._accept_event({"name": "晴天", "artist": "", "source": "HIST"})
-            t = cch_click._pending_task
-            await asyncio.wait_for(t, timeout=2)
-        self.assertEqual(played, ["晴天"])
+        with mock.patch("core.tools.song_request.run", fake_run):
+            cch_click._accept_event({"name": "亲爱的小孩", "artist": "", "source": "KG"})
+        self.assertEqual(played, [], "KG 事件不得触发播放")
+        self.assertIsNone(cch_click._pending_ev)
 
     async def test_worker_backs_off_after_3_failures(self):
         state = {"n": 0}
