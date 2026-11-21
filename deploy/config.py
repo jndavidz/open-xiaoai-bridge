@@ -288,6 +288,12 @@ APP_CONFIG = {
         # 来自于{平台}。」）。必须先播报后起播（TTS 自带打断）；合成走阿里云，断网不可用。
         # 关闭 = 不播报、起播时延回到基线。
         "cch_announce_on_play": True,
+        # 票 23：播放历史点击转 bridge 点播 worker（设备 :core spool → 9102 clickpoll
+        # → 本 worker 8s 窗去重 → song_request 同一条 M5 链）。默认关：需模块 v0.4.9
+        # （批 A）刷机后才可打开；开关 = 修改后重启服务。窗宽见 cch_click_dedupe_s。
+        "cch_click_enabled": False,
+        # 去重时间窗（秒）：连续 5 次语音点歌 0 次重复起播 = 验收门（design §2.8）。
+        "cch_click_dedupe_s": 8.0,
     },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）

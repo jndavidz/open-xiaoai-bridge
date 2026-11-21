@@ -431,6 +431,16 @@ async def _run_cch(action: str, args: dict) -> str:
                 if _artist in str(it.get("artist") or ""):
                     item = it
                     break
+        # 票 23：登记本次主动点播（cch_click worker 8s 时间窗去重的事实源）——
+        # 云端对同一次点播会回发 ContentPlay/createlist（§2.71 实测），native 无法
+        # 区分语音点歌与历史点击，靠这里占窗丢弃回声。占窗失败不阻塞点播。
+        try:
+            from core.music.cch_click import note_recent_play
+
+            note_recent_play(str(item.get("name") or ""), str(item.get("artist") or ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[SongRequest] cch note_recent_play err: {type(exc).__name__}",
+                           module="SongRequest")
         ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")

@@ -475,6 +475,8 @@ class APIServer:
         self.inject_enabled = resolve_inject_enabled(self.config)
         self.inject_relay = InjectRelay(enabled=self.inject_enabled)   # 注入流式中继（数据面）
         self._inject_expire_task: asyncio.Task | None = None
+        # 票 23：历史点击 worker 任务（cch_click_enabled=False 时不创建）
+        self._cch_click_task: asyncio.Task | None = None
         # 外部文本轮 per-caller 限流器（B-37）：键 = token label + TCP peer
         self._external_text_throttle = ExternalTextThrottle()
         global _relay_singleton
@@ -682,10 +684,29 @@ class APIServer:
                 "[APIServer] external_text 模块未启用（external_text.enabled=false）："
                 "端点返回 503 code=external_text_disabled"
             )
+        # 票 23：历史点击 worker（设备 spool → 9102 clickpoll → song_request M5 点播）。
+        # enabled=False 不启动；开/关 = 配置后重启服务（与其他 CCH 开关同语义）。
+        try:
+            from core.music import cch_click
+
+            if cch_click.enabled():
+                self._cch_click_task = asyncio.create_task(cch_click.run_worker())
+                logger.info("[APIServer] cch_click worker started（cch_click_enabled=true）")
+            else:
+                logger.info("[APIServer] cch_click worker 未启用（cch_click_enabled=false）")
+        except Exception as exc:  # noqa: BLE001 - worker 启动失败不影响 HTTP 服务
+            logger.error(f"[APIServer] cch_click worker start failed: {type(exc).__name__}")
 
     async def stop(self):
         """Stop the HTTP server"""
         self._cancel_inject_expiry()
+        task, self._cch_click_task = self._cch_click_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         await self.inject_relay.stop()
         if self.runner:
             await self.runner.cleanup()

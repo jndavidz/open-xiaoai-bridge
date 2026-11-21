@@ -255,6 +255,9 @@ APP_CONFIG = {
         "cch_cast_enabled": False,
         # 票 22：点歌播报开关（CCH 云端 TTS）；dev 默认开，与 deploy 一致。
         "cch_announce_on_play": True,
+        # 票 23：播放历史点击 worker；dev 默认关（依赖模块 v0.4.9 刷机 + 设备在场）。
+        "cch_click_enabled": False,
+        "cch_click_dedupe_s": 8.0,
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）
