@@ -245,7 +245,8 @@ async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
         return {}
 
 
-def build_render_data(ticket_url: str, item: dict, meta: dict) -> dict:
+def build_render_data(ticket_url: str, item: dict, meta: dict,
+                      background_image: str = "") -> dict:
     """构造原厂 MusicService parseIntent 的 renderData（28 字段，facts §2.34 已验字段集）。
 
     item = song_request 搜索项（name/artist/album/cover/source/id）；
@@ -271,10 +272,10 @@ def build_render_data(ticket_url: str, item: dict, meta: dict) -> dict:
         "totalEpisode": 0, "audioUrl": ticket_url, "appId": "200",
         "audioAlbum": album, "rawId": sid, "soundQuality": "高音质",
         "audioImageUrl": cover, "copyRight": 0,
-        # 全屏歌词页/播控页的整屏背景：云端 ContentPlay 会带 backgroundImage，
-        # 我们只给 cover 会导致背景沿用上一首云端图（2026-11-21 用户反馈「所有歌背景都是
-        # 李健《想念你》」）。这里显式下发同源封面，并清空背景署名。
-        "backgroundImage": cover, "lyricbackGroundAuhor": "",
+        # 全屏歌词页/播控页的整屏背景：优先用服务端虚化图（bg_cache），否则回退封面。
+        # 云端 ContentPlay 会带专门的艺术背景图；我们无该素材，用虚化封面替代
+        # （用户口径 2026-11-21：背景应为虚化效果，不是清晰专辑图）。
+        "backgroundImage": str(background_image or cover), "lyricbackGroundAuhor": "",
         "itemRawId": sid, "audioUid": sid, "itemId": sid,
         "toast": "", "audioName": name, "collect": False, "template": "",
         "albumName": album, "audioExt": audio_ext,
@@ -491,3 +492,24 @@ async def speak(text: str) -> tuple[bool, str]:
             logger.info(f"[CchCast] /speak http={resp.status} len={len(text or '')} ok={ok}",
                         module="CchCast")
             return ok, f"http {resp.status}"
+
+
+def bg_base() -> str:
+    """虚化背景图的对外基址（设备侧直取，默认走 bridge API 的 NAS 地址）。"""
+    return str(_cfg("cch_bg_base", "http://10.10.10.2:9092")).rstrip("/")
+
+
+async def host_cmd_nowait(cmd: str, url: str = None, extra: str = None) -> bool:
+    """fire-and-forget 版 hostcmd（不轮询 last_result）——用于「立即暂停」这类不需要回执的动作。"""
+    import uuid
+
+    token = host_derived_key()
+    if not token:
+        return False
+    body = {"cmd": cmd, "token": token, "cmd_id": uuid.uuid4().hex[:12]}
+    if url:
+        body["url"] = url
+    if extra:
+        body["extra"] = extra
+    ok, _ = await musicctl("hostcmd", body)
+    return ok

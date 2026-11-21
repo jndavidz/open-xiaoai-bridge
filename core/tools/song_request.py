@@ -220,6 +220,21 @@ async def run(args: dict) -> str:
 
 # ---- 托管队列迁移（B-06）：flag 打开后队列归 ManagedStore，旧 _state 不再维护 ----
 
+_host_key_at = 0.0
+
+
+async def _ensure_host_key() -> None:
+    """把 M5 派生 key 部署到设备（10 分钟内复用，省掉每轮的 9102 往返）。"""
+    global _host_key_at
+    if time.time() - _host_key_at < 600:
+        return
+    from core.music.cch_cast import host_token_deploy
+
+    ok, _ = await host_token_deploy()
+    if ok:
+        _host_key_at = time.time()
+
+
 def _managed_mode() -> bool:
     from core.music import song_bridge
 
@@ -312,6 +327,7 @@ async def _run_cch(action: str, args: dict) -> str:
         cast_native,
         cast_native_simple,
         host_cmd,
+        host_cmd_nowait,
         host_token_deploy,
         kwqq_meta,
         m5_enabled,
@@ -365,11 +381,11 @@ async def _run_cch(action: str, args: dict) -> str:
         # play / album：搜歌 → songloft prepare → renderData → 9102 /cmd
         query = str(args.get("query") or "").strip()
         if action == "play":
-            # 立即暂停（用户 2026-11-21「点歌后没有立刻暂停」）：先把派生 key 部署到设备，
-            # 再 stop 当前会话——放在搜索/取票之前，避免 1–2s 解析期里旧曲继续响。
+            # 立即暂停（用户 2026-11-21）：派生 key 有 10 分钟缓存，stop 走 fire-and-forget，
+            # 让旧曲在 ~100ms 内静音，不等回执拖慢后续解析。
             try:
-                await host_token_deploy()
-                await host_cmd("stop", timeout_s=1.5)   # 早停只等短回执，不拖慢解析
+                await _ensure_host_key()
+                await host_cmd_nowait("stop")
             except Exception as exc:  # noqa: BLE001 - 早停失败不阻塞后续
                 logger.warning(f"[SongRequest] cch early stop failed: {type(exc).__name__}",
                                module="SongRequest")
@@ -392,14 +408,8 @@ async def _run_cch(action: str, args: dict) -> str:
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")
 
-        async def _pre_play_announce() -> None:
-            """起播前播报，并**等播报读完**再起播（用户 2026-11-21 口径）。
-
-            旧曲已在进入 play 分支时立即 stop（见上方 early stop），这里只负责播报与等待；
-            `/speak` 异步下发（不等出声），立即起播会盖住播报。
-            """
-            if action != "play" or not _cfg("cch_announce_on_play", True):
-                return
+        async def _announce_only() -> None:
+            """播报并等读完（与取票并行启动，隐藏 ~2s 解析耗时）。"""
             try:
                 text = _cch_announce_text(item)
                 ok_speak, _ = await speak(text)
@@ -409,8 +419,26 @@ async def _run_cch(action: str, args: dict) -> str:
                 logger.warning(f"[SongRequest] cch announce failed: {type(exc).__name__}",
                                module="SongRequest")
 
+        # 播报与「取元数据/票据/背景图」并行：TTS 是 5s 级，解析是 1–2s，重叠可省时间。
+        ann_task = None
+        if action == "play" and _cfg("cch_announce_on_play", True):
+            ann_task = asyncio.create_task(_announce_only())
+
         try:
             meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
+            # 虚化背景图（与播报并行）：封面 → 服务端高斯模糊 → 缓存 → 公开 URL
+            bg_url = ""
+            try:
+                from core.music import bg_cache
+                from core.music.cch_cast import bg_base
+
+                async with aiohttp.ClientSession() as http:
+                    bg_url = await bg_cache.ensure(
+                        str(meta.get("cover") or item.get("cover") or ""),
+                        base=bg_base(), http=http)
+            except Exception as exc:  # noqa: BLE001 - 背景失败回退封面
+                logger.warning(f"[SongRequest] bg blur failed: {type(exc).__name__}",
+                               module="SongRequest")
             if m5_enabled():
                 # M5 轨：songloft 票据为主（多源统一门面 + 可撤销 + 代次闸门 +
                 # 凭据隔离；poll 404 已加 re-prepare 自愈）。票据链失败/预览 ⇒
@@ -449,8 +477,9 @@ async def _run_cch(action: str, args: dict) -> str:
                                 break
                 if not play_url:
                     return "CCH 音源暂不可用（kwqq 解析冷却/预览降级），请稍后再试或换音源"
-                await _pre_play_announce()   # 停旧曲 → 播报 → 等读完
-                render_data = build_render_data(play_url, item, meta)
+                if ann_task is not None:
+                    await ann_task
+                render_data = build_render_data(play_url, item, meta, background_image=bg_url)
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
@@ -488,8 +517,9 @@ async def _run_cch(action: str, args: dict) -> str:
                 # 事后验证 cast_need_m5（8s 保守值，P95 基线待采）
                 ticket_url = await resolve_ticket_url(
                     ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
-                render_data = build_render_data(ticket_url, item, meta)
-                await _pre_play_announce()   # 停旧曲 → 播报 → 等读完
+                render_data = build_render_data(ticket_url, item, meta, background_image=bg_url)
+                if ann_task is not None:
+                    await ann_task
                 ok, detail = await cast_native(render_data)
                 if ok and not await wait_np_play(8.0):
                     return "CCH 点播未起播（NEED_M5：死实例，待 M5 刷机）"
@@ -763,7 +793,7 @@ def _tts_wait_seconds(text: str) -> float:
     n = len(str(text or "").strip())
     if n <= 0:
         return 0.0
-    return max(1.2, min(12.0, 0.22 * n + 0.8))
+    return max(1.0, min(10.0, 0.20 * n + 0.5))
 
 
 def _cch_announce_text(item: dict) -> str:

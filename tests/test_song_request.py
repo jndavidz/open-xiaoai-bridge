@@ -1716,8 +1716,8 @@ class TtsWaitEstimateTest(unittest.TestCase):
 
     def test_bounds(self):
         self.assertEqual(0.0, song_request._tts_wait_seconds(""))
-        self.assertGreaterEqual(song_request._tts_wait_seconds("一"), 1.2)
-        self.assertLessEqual(song_request._tts_wait_seconds("字" * 200), 12.0)
+        self.assertGreaterEqual(song_request._tts_wait_seconds("一"), 1.0)
+        self.assertLessEqual(song_request._tts_wait_seconds("字" * 200), 10.0)
 
 
 class TargetResolutionTest(unittest.TestCase):

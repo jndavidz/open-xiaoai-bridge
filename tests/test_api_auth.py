@@ -415,3 +415,17 @@ class ConfiguredTokensTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class CchBgRouteTest(unittest.TestCase):
+    """虚化背景图（/api/cch/bg/<sha1>.jpg）：GET 只读放行，写方法仍需鉴权。"""
+
+    def test_bg_get_is_read(self):
+        self.assertEqual(classify_route("/api/cch/bg/26aeac706e7d9f3a.jpg", "GET"), KIND_READ)
+        self.assertEqual(classify_route("/api/cch/bg/26aeac706e7d9f3a.jpg", "HEAD"), KIND_READ)
+
+    def test_bg_post_is_write(self):
+        self.assertEqual(classify_route("/api/cch/bg/26aeac706e7d9f3a.jpg", "POST"), KIND_WRITE)
+
+    def test_other_cch_paths_still_write(self):
+        self.assertEqual(classify_route("/api/cch/collect", "POST"), KIND_WRITE)

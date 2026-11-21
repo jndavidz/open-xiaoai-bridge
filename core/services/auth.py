@@ -57,6 +57,9 @@ READ_ROUTES = frozenset({
     "/api/tts/doubao_voices",
 })
 
+# 只读前缀（动态文件名）：设备侧 <img> 无 Bearer 直取；名字不可猜且只读
+READ_PREFIXES = ("/api/cch/bg/",)
+
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # 未配置 token 时的固定提示：只给变量名与调用方式，不给内部路径
@@ -121,6 +124,8 @@ def classify_route(path: str, method: str = "GET") -> str:
         if p in HEALTH_ROUTES:
             return KIND_HEALTH
         if p in READ_ROUTES:
+            return KIND_READ
+        if any(p.startswith(prefix) for prefix in READ_PREFIXES):
             return KIND_READ
     return KIND_WRITE
 

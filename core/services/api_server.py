@@ -578,6 +578,7 @@ class APIServer:
         self.app.router.add_post("/api/external/text", self.handle_external_text)  # 外部 ASR 文本入口（B-37）
         self.app.router.add_post("/api/external/np", self.handle_external_np)  # CCH 音乐事件（票 03 编排面）
         self.app.router.add_post("/api/cch/collect", self.handle_cch_collect)  # CCH 收藏幂等（票 13）
+        self.app.router.add_get("/api/cch/bg/{name}", self.handle_cch_bg)  # 虚化背景图（只读、键不可猜）
         self.app.router.add_post("/api/inject/stream", self.inject_relay.handle_upstream)  # PC 上行 PCM
         self.app.router.add_get("/api/inject/relay", self.inject_relay.handle_health)  # 中继观测
         self.app.router.add_get("/api/inject/text", self.inject_relay.handle_ws_text)  # 文本回传 WS
@@ -1611,6 +1612,23 @@ class APIServer:
                 {"success": False, "code": "np_orchestration_error",
                  "error": type(exc).__name__}, status=500,
             )
+
+    async def handle_cch_bg(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/cch/bg/{name} —— 点歌虚化背景图（只读；文件名 = 封面 sha1 前 16 位）。
+
+        设备侧 <img> 直取，不能带 Bearer；名字不可猜（sha1 前缀）且只读，风险等同公开封面。
+        """
+        name = str(request.match_info.get("name") or "")
+        if not re.fullmatch(r"[0-9a-f]{16}\.jpg", name):
+            return web.Response(status=404)
+        from core.music import bg_cache
+
+        path = bg_cache.file_path(name[:-4])
+        if not os.path.exists(path):
+            return web.Response(status=404)
+        resp = web.FileResponse(path)
+        resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
+        return resp
 
     async def handle_cch_collect(self, request: web.Request) -> web.Response:
         """POST /api/cch/collect —— CCH 收藏幂等（票 13 服务端收尾，2026-11-20）。
