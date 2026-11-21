@@ -360,15 +360,6 @@ async def _run_cch(action: str, args: dict) -> str:
         ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")
-        # 票 22：点歌播报（CCH 云端 TTS）。必须**先播报、后起播**——TTS 自带打断，
-        # 起播后播报会切断歌曲。开关 song_request.cch_announce_on_play 默认开；
-        # 仅 play 动作播报（album 连续起播不打断）。
-        if action == "play" and _cfg("cch_announce_on_play", True):
-            try:
-                await speak(_cch_announce_text(item))
-            except Exception as exc:  # noqa: BLE001 - 播报失败不阻塞起播
-                logger.warning(f"[SongRequest] cch announce failed: {type(exc).__name__}",
-                               module="SongRequest")
         try:
             meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
             if m5_enabled():
@@ -409,6 +400,20 @@ async def _run_cch(action: str, args: dict) -> str:
                                 break
                 if not play_url:
                     return "CCH 音源暂不可用（kwqq 解析冷却/预览降级），请稍后再试或换音源"
+                # 票 22（2026-11-21 用户反馈修正）：点歌播报必须**先停旧曲、再播报、后起播**。
+                # 只做「先播报后起播」不够：原厂 TTS 会把当前曲 suspend，TTS 结束自动 resume
+                # ⇒ 新曲起播前会先回放一瞬旧曲。先 stop 清掉当前会话即可根除。
+                if action == "play" and _cfg("cch_announce_on_play", True):
+                    try:
+                        await host_cmd("stop")
+                    except Exception as exc:  # noqa: BLE001 - 停旧曲失败不阻塞
+                        logger.warning(f"[SongRequest] cch pre-announce stop failed: {type(exc).__name__}",
+                                       module="SongRequest")
+                    try:
+                        await speak(_cch_announce_text(item))
+                    except Exception as exc:  # noqa: BLE001 - 播报失败不阻塞起播
+                        logger.warning(f"[SongRequest] cch announce failed: {type(exc).__name__}",
+                                       module="SongRequest")
                 render_data = build_render_data(play_url, item, meta)
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
@@ -448,6 +453,17 @@ async def _run_cch(action: str, args: dict) -> str:
                 ticket_url = await resolve_ticket_url(
                     ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
                 render_data = build_render_data(ticket_url, item, meta)
+                if action == "play" and _cfg("cch_announce_on_play", True):
+                    try:
+                        await host_cmd("stop")
+                    except Exception as exc:  # noqa: BLE001 - 停旧曲失败不阻塞
+                        logger.warning(f"[SongRequest] cch pre-announce stop failed: {type(exc).__name__}",
+                                       module="SongRequest")
+                    try:
+                        await speak(_cch_announce_text(item))
+                    except Exception as exc:  # noqa: BLE001 - 播报失败不阻塞起播
+                        logger.warning(f"[SongRequest] cch announce failed: {type(exc).__name__}",
+                                       module="SongRequest")
                 ok, detail = await cast_native(render_data)
                 if ok and not await wait_np_play(8.0):
                     return "CCH 点播未起播（NEED_M5：死实例，待 M5 刷机）"
