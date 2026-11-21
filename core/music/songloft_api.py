@@ -72,6 +72,52 @@ def to_item(result: dict) -> dict:
     }
 
 
+# ---- UI 队列载荷（票 21）：门面统一构造，所有消费者（CCH / songloft App / 未来其他）同源 ----
+# 门面 item 的 source = source_data.s（kwqq 插件产出的平台标识），是平台字段的唯一真相；
+# 不在此处另建映射或透传未经门面归一的字段。平台展示名由各消费者按门面 source 自行渲染。
+
+def queue_topn() -> int:
+    """UI 队列下发条数（票 21）；缺省 20，边界 1..100（宿主 QueueWriter 上限）。"""
+    from core.utils.config import ConfigManager
+
+    try:
+        n = int(ConfigManager.instance().get_app_config("song_request.cch_queue_topn", 20))
+    except (TypeError, ValueError):
+        n = 20
+    return max(1, min(100, n))
+
+
+def queue_payload(items: list) -> str:
+    """门面 item 列表 → 宿主队列 itemsJson（票 21，UI 播放列表层）。
+
+    只投影元数据（曲名/歌手/专辑/封面/平台/id/时长），**绝不含 audioUrl/票据 URL**——
+    Songloft 票据 DefaultTTL=30min，整队列预票据会过期 ⇒ audioUrl 播放时逐曲取票。
+    字段别名对齐宿主 QueueWriter.newSong；平台 = 门面 item.source，原样传递不加工。
+    """
+    out = []
+    for item in (items or [])[:queue_topn()]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        sid = str(item.get("id") or "").strip()
+        if not name or not sid:
+            continue  # 无 id 无法逐曲取票，跳过
+        try:
+            duration = int(float(item.get("duration_s") or 0))
+        except (TypeError, ValueError):
+            duration = 0
+        out.append({
+            "name": name,
+            "artist": str(item.get("artist") or item.get("singer") or ""),
+            "album": str(item.get("album") or ""),
+            "cover": str(item.get("cover") or ""),
+            "source": str(item.get("source") or ""),
+            "id": sid,
+            "duration_s": duration,
+        })
+    return json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+
+
 _LX_WORD_TAG = re.compile(r"<[^<>]*>")
 
 

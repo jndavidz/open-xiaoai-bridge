@@ -284,6 +284,25 @@ def build_render_data(ticket_url: str, item: dict, meta: dict,
     }
 
 
+async def push_queue(items: list) -> tuple[bool, str]:
+    """把门面搜索结果 topN 元数据经 hostcmd queue 写宿主 UI 队列（票 21）。
+
+    载荷由门面统一构造（`songloft_api.queue_payload`）——平台字段取门面 source_data.s，
+    与 songloft App 经 kwqq 插件消费同一标识，不在投送层另建映射。保持搜索原序整批
+    replace；原厂列表高亮是否自动跟随播放曲待真机窗口验证（票 21 Comments 挂账）。
+    失败不抛（队列是体验增强，不阻塞起播）。
+    """
+    from core.music import songloft_api
+
+    meta = songloft_api.queue_payload(items)
+    if not meta or meta == "[]":
+        return False, "empty"
+    ok, status = await host_cmd("queue", extra=meta)
+    logger.info(f"[CchCast] hostcmd queue n={len(items)} ok={ok} status={status}",
+                module="CchCast")
+    return ok, status
+
+
 async def cast_native(render_data: dict) -> tuple[bool, str]:
     """POST 9102 /cmd COMMAND 7（Bearer）。返回 (ok, detail)——ok = HTTP 2xx，
     生效与否看设备侧 observable（CchBridgeMeta/audio_flinger），调用方负责回读。"""

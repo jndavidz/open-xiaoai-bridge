@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import unittest
 
 from core.music import songloft_api
@@ -167,3 +168,62 @@ class FavoritesContractTest(unittest.IsolatedAsyncioTestCase):
             songloft_api._request = orig
         self.assertEqual(("POST", "/api/v1/playlists/1/songs", {"song_ids": [42]}), calls[1])
         self.assertEqual(("DELETE", "/api/v1/playlists/1/songs/42", None), calls[2])
+
+
+class QueuePayloadTest(unittest.TestCase):
+    """票 21：门面统一构造 UI 队列载荷（脱敏 / 门面 source 平台标识 / topN / 边界）。"""
+
+    def _item(self, name, sid, source="kuwo", **kw):
+        d = {"name": name, "id": sid, "source": source, "artist": "歌手",
+             "album": "专辑", "cover": "http://img/x.jpg", "duration_s": 200.0}
+        d.update(kw)
+        return d
+
+    def test_fields_no_ticket_and_facade_source(self):
+        raw = songloft_api.queue_payload([self._item("晴天", "94237", source="kugou")])
+        row = json.loads(raw)[0]
+        self.assertEqual("晴天", row["name"])
+        self.assertEqual("94237", row["id"])
+        self.assertEqual("kugou", row["source"])  # 门面 source_data.s 原样，不加工
+        self.assertEqual("歌手", row["artist"])
+        self.assertEqual("专辑", row["album"])
+        self.assertEqual(200, row["duration_s"])
+        self.assertIn("cover", row)
+        self.assertNotIn("audioUrl", raw)
+        self.assertNotIn("media_ticket", raw)   # 票据不进队列（30min TTL 会过期）
+
+    def test_singer_alias_and_missing_id_skipped(self):
+        arr = json.loads(songloft_api.queue_payload([
+            {"name": "A", "id": "1", "singer": "王力宏", "source": "kuwo"},
+            {"name": "无ID"}, {"id": "2"},
+            {"name": "B", "id": "3", "artist": "李健", "source": "netease"},
+        ]))
+        self.assertEqual(["A", "B"], [r["name"] for r in arr])
+        self.assertEqual("王力宏", arr[0]["artist"])
+        self.assertEqual("李健", arr[1]["artist"])
+        self.assertEqual("netease", arr[1]["source"])
+
+    def test_invalid_duration_and_empty(self):
+        arr = json.loads(songloft_api.queue_payload(
+            [self._item("x", "1", duration_s="bad")]))
+        self.assertEqual(0, arr[0]["duration_s"])
+        self.assertEqual("[]", songloft_api.queue_payload([]))
+        self.assertEqual("[]", songloft_api.queue_payload(None))
+
+    def test_topn_from_facade_config_and_bounds(self):
+        from core.utils.config import ConfigManager
+
+        orig = ConfigManager.instance().get_app_config
+        try:
+            ConfigManager.instance().get_app_config = lambda key, default: 3
+            arr = json.loads(songloft_api.queue_payload(
+                [self._item(f"s{i}", str(i)) for i in range(10)]))
+            self.assertEqual(3, len(arr), "topN 读门面配置 song_request.cch_queue_topn")
+            ConfigManager.instance().get_app_config = lambda key, default: 999
+            self.assertEqual(100, songloft_api.queue_topn(), "上限钳制 100")
+            ConfigManager.instance().get_app_config = lambda key, default: -1
+            self.assertEqual(1, songloft_api.queue_topn(), "下限钳制 1")
+            ConfigManager.instance().get_app_config = lambda key, default: "bad"
+            self.assertEqual(20, songloft_api.queue_topn(), "非法值回落缺省 20")
+        finally:
+            ConfigManager.instance().get_app_config = orig

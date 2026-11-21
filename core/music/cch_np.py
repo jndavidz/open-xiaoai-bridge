@@ -132,6 +132,9 @@ async def _advance_if_finished() -> dict:
                 ok, detail = await cast_native(render_data)
                 if ok and not await wait_np_play(5.0):
                     ok, detail = False, "NEED_M5"
+            # 票 21：UI 队列在点歌时整批下发一次（保持搜索原序）。曲末 advance 不重写队列——
+            # 宿主 QueueWriter 只有 replace 无"设置选中项"op，重排会破坏 spec「顺序一致」；
+            # 原厂列表高亮是否自动跟随播放曲待真机验证（票 21 Comments 挂账）。
             _last_advance_at = loop.time()
             logger.info(f"[CchNp] advance {idx}->{nxt} ok={ok} detail={detail}", module="CchNp")
             return {"action": "advanced", "index": nxt, "ok": ok}

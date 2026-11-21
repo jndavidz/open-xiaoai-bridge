@@ -360,6 +360,7 @@ async def _run_cch(action: str, args: dict) -> str:
         musicctl,
         np_enabled,
         prepare_playback,
+        push_queue,
         resolve_ticket_url,
         revoke,
         speak,
@@ -560,6 +561,12 @@ async def _run_cch(action: str, args: dict) -> str:
             return f"CCH 点播失败：{type(exc).__name__}"
         # 存整队供 cch_np 换代编排（STATE finish → advance 下一首）；票据按 entry 逐条 prepare
         _cch_state.update({"entry": 0, "items": items})
+        # 票 21：UI 队列下发（搜索结果 topN 元数据，脱敏无票据）。失败不阻塞起播。
+        try:
+            await push_queue(items)
+        except Exception as exc:  # noqa: BLE001 - 队列是体验增强
+            logger.warning(f"[SongRequest] cch queue push failed: {type(exc).__name__}",
+                           module="SongRequest")
         suppress_reply()   # kwqq 源已起播：本轮收尾 TTS 不得顶掉它
         name = str(render_data.get("audioName") or "歌曲")
         return f"已在 CCH 上为你播放《{name}》（队列 {len(items)} 首）"
