@@ -1,6 +1,6 @@
 services:
   open-xiaoai-bridge:
-    image: open-xiaoai-bridge:cch-voice-20261119  # 路径A：WSL build -t 本 tag → save | ssh docker load；回滚改回 :home（旧镜像 NAS 保留）
+    image: open-xiaoai-bridge:home  # 生产统一 tag（构建即 home；回滚 = 换回 rollback-* tag 或上一版镜像 ID）
     container_name: open-xiaoai-bridge
     restart: unless-stopped
     # host 网络：4399/9092 直接监听群晖宿主，音箱与 HA 均可直达，无需端口映射
