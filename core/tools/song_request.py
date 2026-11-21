@@ -235,6 +235,32 @@ async def _ensure_host_key() -> None:
         _host_key_at = time.time()
 
 
+async def _confirm_stop() -> None:
+    try:
+        from core.music import cch_cast
+
+        await cch_cast.host_cmd("stop", timeout_s=2.0)
+    except Exception:  # noqa: BLE001 - 确认失败不阻塞
+        pass
+
+
+async def _robust_stop() -> None:
+    """停当前 M5 会话：广播有间歇丢失（facts §2.64 实测）。
+
+    快路径连发 3 次（约 0.36s，保证「立刻暂停」），带回执的确认丢到后台任务，
+    不拖慢后续搜索/取票。
+    """
+    from core.music import cch_cast
+
+    for _ in range(3):
+        try:
+            await cch_cast.host_cmd_nowait("stop")
+        except Exception:  # noqa: BLE001 - 单次失败不影响重发
+            pass
+        await asyncio.sleep(0.12)
+    asyncio.create_task(_confirm_stop())
+
+
 def _managed_mode() -> bool:
     from core.music import song_bridge
 
@@ -381,11 +407,11 @@ async def _run_cch(action: str, args: dict) -> str:
         # play / album：搜歌 → songloft prepare → renderData → 9102 /cmd
         query = str(args.get("query") or "").strip()
         if action == "play":
-            # 立即暂停（用户 2026-11-21）：派生 key 有 10 分钟缓存，stop 走 fire-and-forget，
-            # 让旧曲在 ~100ms 内静音，不等回执拖慢后续解析。
+            # 立即暂停（用户 2026-11-21）：派生 key 有 10 分钟缓存；stop 走「连发+回执」，
+            # 广播有间歇丢失，单发一次不够（否则旧曲会在播报前继续响）。
             try:
                 await _ensure_host_key()
-                await host_cmd_nowait("stop")
+                await _robust_stop()
             except Exception as exc:  # noqa: BLE001 - 早停失败不阻塞后续
                 logger.warning(f"[SongRequest] cch early stop failed: {type(exc).__name__}",
                                module="SongRequest")
@@ -443,8 +469,7 @@ async def _run_cch(action: str, args: dict) -> str:
                 # M5 轨：songloft 票据为主（多源统一门面 + 可撤销 + 代次闸门 +
                 # 凭据隔离；poll 404 已加 re-prepare 自愈）。票据链失败/预览 ⇒
                 # kwqq 直链 fallback（走 _sources 多源策略 + 预览检测）。
-                await host_token_deploy()
-                import aiohttp
+                await _ensure_host_key()
                 play_url = None
                 try:
                     ticket_url = await resolve_ticket_url(
@@ -479,6 +504,11 @@ async def _run_cch(action: str, args: dict) -> str:
                     return "CCH 音源暂不可用（kwqq 解析冷却/预览降级），请稍后再试或换音源"
                 if ann_task is not None:
                     await ann_task
+                # TTS 的 suspend/resume 可能把旧会话唤醒 ⇒ 起播前再补一发 stop（幂等、几十 ms）
+                try:
+                    await host_cmd_nowait("stop")
+                except Exception:  # noqa: BLE001
+                    pass
                 render_data = build_render_data(play_url, item, meta, background_image=bg_url)
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
