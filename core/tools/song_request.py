@@ -570,7 +570,8 @@ async def _run_cch(action: str, args: dict) -> str:
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
             return f"CCH 点播失败：{type(exc).__name__}"
         # 存整队供 cch_np 换代编排（STATE finish → advance 下一首）；票据按 entry 逐条 prepare
-        _cch_state.update({"entry": 0, "items": items})
+        # no_advance=False：清除点击播的单发标志（票 23），恢复语音队列的正常换代
+        _cch_state.update({"entry": 0, "items": items, "no_advance": False})
         # 票 21：UI 队列下发（搜索结果 topN 元数据，脱敏无票据）。失败不阻塞起播。
         try:
             await push_queue(items)

@@ -180,10 +180,12 @@ async def _play_event(ev: dict) -> None:
                                      "artist": artist, "target": "cch"})
     logger.info(f"[CchClick] play done name={name} result={str(result)[:80]}",
                 module="CchClick")
-    # 单发收尾（票 23 实测病灶）：点击播 = 单曲意图；清换代队列，防
+    # 单发收尾（票 23 实测病灶）：点击播 = 单曲意图；置 no_advance 标志防
     # STATE finish → cch_np advance 连播搜索变体（「都是刘巧儿不同片段」）。
+    # 不清 items——收藏（票 13 collect_favorite）读当前曲队列；
+    # 标志由下一次语音点歌路径显式清除。
     try:
-        song_request._cch_state.update({"entry": 0, "items": []})
+        song_request._cch_state.update({"entry": 0, "no_advance": True})
     except Exception:  # noqa: BLE001
         pass
     asyncio.create_task(_resume_if_paused())

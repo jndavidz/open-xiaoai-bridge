@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 from core.music import cch_cast  # noqa: E402
 from core.music import cch_click  # noqa: E402
 from core.music import cch_np  # noqa: E402
+from core.tools import song_request as sr  # noqa: E402
 
 
 class CchClickTest(unittest.IsolatedAsyncioTestCase):
@@ -37,6 +38,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
         cch_click._pending_task = None
+        sr._cch_state.update({"entry": 0, "items": [], "no_advance": False})
         self._saved_musicctl = cch_cast.musicctl
         self._saved_host_cmd = cch_cast.host_cmd
 
@@ -46,6 +48,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
         cch_click._pending_task = None
+        sr._cch_state.update({"entry": 0, "items": [], "no_advance": False})
         cch_cast.musicctl = self._saved_musicctl
         cch_cast.host_cmd = self._saved_host_cmd
 
@@ -123,12 +126,10 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(t2, timeout=2)   # 确定性等最后一条播完
         self.assertEqual(played, ["七里香"], "回声被替换，只播最后一条（刘巧儿未播）")
 
-    async def test_play_event_clears_cch_state_single_shot(self):
-        """点击播 = 单曲意图：play 后换代队列必须清空（防变体连播病灶）。"""
-        sr = sys.modules.get("core.tools.song_request")
-        if sr is None:
-            from core.tools import song_request as sr
-        sr._cch_state.update({"entry": 0, "items": [{"id": "x", "name": "刘巧儿"}]})
+    async def test_play_event_sets_no_advance_keeps_items(self):
+        """点击播 = 单曲意图：置 no_advance 换代抑制；items 保留（收藏读当前曲）。"""
+        sr._cch_state.update({"entry": 0, "items": [{"id": "x", "name": "刘巧儿"}],
+                              "no_advance": False})
 
         async def fake_run(args):
             return "ok"
@@ -139,8 +140,9 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch("core.tools.song_request.run", fake_run), \
              mock.patch.object(cch_click, "_resume_if_paused", noop_resume):
             await cch_click._play_event(
-                {"name": "晴天", "artist": "周杰伦", "source": "KWQQ"})
-        self.assertEqual(sr._cch_state.get("items"), [])
+                {"name": "晴天", "artist": "", "source": "HIST"})
+        self.assertEqual(sr._cch_state.get("no_advance"), True)
+        self.assertEqual(len(sr._cch_state.get("items") or []), 1, "items 保留供收藏")
 
     # ---- _play_event ----
 

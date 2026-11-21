@@ -92,6 +92,12 @@ async def _advance_if_finished() -> dict:
             return {"action": "advance_cooldown"}
         items = sr._cch_state.get("items") or []
         idx = int(sr._cch_state.get("entry", 0))
+        # 票 23 单发标志：点击播 = 单曲意图，曲终不换代（防搜索变体连播）。
+        # 标志由点击播设置、下一次语音点歌路径显式清除。
+        if sr._cch_state.get("no_advance"):
+            logger.info("[CchNp] advance suppressed (no_advance single-shot)", module="CchNp")
+            _last_advance_at = now
+            return {"action": "no_advance"}
         # 旧票逐条撤（spec 裁决 4）：尽力而为，失败不阻塞 advance
         if idx < len(items):
             await _revoke_entry(idx, items[idx])
