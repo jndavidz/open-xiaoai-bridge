@@ -291,50 +291,96 @@ class SpeakResumeTest(CchNpTestBase):
 
 
 class CollectFavoriteTest(CchNpTestBase):
-    """票 13：收藏幂等（读 isFavorite 决定 collect 方向，不盲发翻转）。"""
+    """票 13（2026-11-21 裁决）：收藏只写 Songloft，屏蔽原厂 tap。"""
 
-    async def test_noop_when_already_favorite(self):
-        rec = self.fake_downlink()
-        cch_np._np_state["meta"] = {"extras": {"Title": "歌", "isFavorite": "1"}}
+    def _queue(self, item=None):
+        sr._cch_state.update({"entry": 0, "items": [item or {
+            "name": "青花瓷", "artist": "周杰伦", "album": "我很忙", "source": "kuwo",
+            "id": "R1", "duration_s": 239}]})
+
+    def _patches(self, added=1, fail=None):
+        from unittest import mock
+
+        from core.music import songloft_api
+
+        calls = {"add": [], "remove": [], "ensure": []}
+
+        async def ensure(item, *, http):
+            calls["ensure"].append(item.get("id"))
+            if fail == "ensure":
+                raise songloft_api.SongloftError("down")
+            return 42
+
+        async def add(song_id, *, http):
+            calls["add"].append(song_id)
+            return {"added": added, "skipped": 1 - added}
+
+        async def remove(song_id, *, http):
+            calls["remove"].append(song_id)
+            return {"message": "ok"}
+
+        return calls, (
+            mock.patch.object(songloft_api, "ensure_song", ensure),
+            mock.patch.object(songloft_api, "add_to_favorites", add),
+            mock.patch.object(songloft_api, "remove_from_favorites", remove),
+        )
+
+    async def test_no_track_when_queue_empty(self):
+        sr._cch_state.update({"entry": 0, "items": []})
         result = await cch_np.collect_favorite(True)
-        self.assertEqual(result["action"], "noop")
-        self.assertEqual(result["favorite"], True)
-        self.assertEqual(rec["simple"], [], "已收藏不再发 like tap")
+        self.assertEqual("no_track", result["action"])
 
-    async def test_tap_unlike_when_intent_false(self):
-        rec = self.fake_downlink()
-        cch_np._np_state["meta"] = {"extras": {"isFavorite": "1"}}
-        result = await cch_np.collect_favorite(False)
-        self.assertEqual(result["action"], "tapped")
-        self.assertEqual(result["favorite"], False)
-        self.assertEqual(rec["simple"], [9], "已收藏 + 意图取消 → COMMAND 9 tap")
+    async def test_added_to_songloft_favorites(self):
+        self._queue()
+        calls, patches = self._patches(added=1)
+        for p in patches:
+            p.start()
+        try:
+            result = await cch_np.collect_favorite(True)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual("added", result["action"])
+        self.assertEqual([42], calls["add"])
+        self.assertEqual(["R1"], calls["ensure"])
 
-    async def test_tap_like_when_not_favorite(self):
-        rec = self.fake_downlink()
-        cch_np._np_state["meta"] = {"extras": {"isFavorite": "0"}}
-        result = await cch_np.collect_favorite(True)
-        self.assertEqual(result["action"], "tapped")
-        self.assertEqual(rec["simple"], [9])
+    async def test_duplicate_favorite_is_noop(self):
+        self._queue()
+        calls, patches = self._patches(added=0)
+        for p in patches:
+            p.start()
+        try:
+            result = await cch_np.collect_favorite(True)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual("noop", result["action"])
 
-    async def test_unknown_state_refuses(self):
-        rec = self.fake_downlink()
-        result = await cch_np.collect_favorite(True)
-        self.assertEqual(result["action"], "unknown_state")
-        self.assertEqual(rec["simple"], [], "态未知不盲发翻转（失败关闭）")
+    async def test_unfavorite_removes_from_playlist(self):
+        self._queue()
+        calls, patches = self._patches()
+        for p in patches:
+            p.start()
+        try:
+            result = await cch_np.collect_favorite(False)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual("removed", result["action"])
+        self.assertEqual([42], calls["remove"])
 
-    async def test_garbage_value_treated_unknown(self):
-        rec = self.fake_downlink()
-        cch_np._np_state["meta"] = {"extras": {"isFavorite": "maybe"}}
-        result = await cch_np.collect_favorite(True)
-        self.assertEqual(result["action"], "unknown_state")
-        self.assertEqual(rec["simple"], [])
-
-    async def test_tap_failed_reported(self):
-        rec = self.fake_downlink(simple_ok=False)
-        cch_np._np_state["meta"] = {"extras": {"isFavorite": "0"}}
-        result = await cch_np.collect_favorite(True)
-        self.assertEqual(result["action"], "tap_failed")
-        self.assertEqual(rec["simple"], [9])
+    async def test_songloft_failure_is_explicit(self):
+        self._queue()
+        calls, patches = self._patches(fail="ensure")
+        for p in patches:
+            p.start()
+        try:
+            result = await cch_np.collect_favorite(True)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual("failed", result["action"], "Songloft 不可用时不回退原厂 tap")
+        self.assertEqual([], calls["add"])
 
 
 if __name__ == "__main__":

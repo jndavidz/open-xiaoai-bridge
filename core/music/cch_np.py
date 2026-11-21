@@ -280,37 +280,38 @@ async def speak_with_resume(text: str, *, delay_s: float | None = None) -> dict:
     return {"action": "speak_scheduled_resume", "delay_s": round(float(delay_s), 2)}
 
 
-# ---- 票 13：收藏幂等（bridge 读 isFavorite 决定 collect 方向，不盲发翻转） ----
-
-def _favorite_current() -> bool | None:
-    """读 np 直报数据面的收藏态。缺失/非预期值 → None（态未知，失败关闭）。"""
-    meta = (_np_state.get("meta") or {}).get("extras") or {}
-    v = meta.get("isFavorite")
-    if v is None:
-        return None
-    s = str(v).strip().lower()
-    if s in ("1", "true"):
-        return True
-    if s in ("0", "false"):
-        return False
-    return None
+# ---- 票 13：收藏（Songloft 服务端为唯一落点，2026-11-21 用户裁决） ----
 
 
 async def collect_favorite(intent: bool) -> dict:
-    """收藏/取消收藏（票 13 任务 3）：先读态再写，一致即 noop，不重复 tap。
+    """收藏/取消收藏（票 13，2026-11-21 用户裁决：**只写 Songloft，屏蔽原厂 tap**）。
 
-    COMMAND 9 = UI tap 爱心（翻转型，facts §2.35）；方向由本函数读态决定。
-    独立于 np_enabled 闸门——原厂 TME 播放的收藏同样走此路径（D 方向语义：
-    收藏归 bridge 控制 + 状态同步，票 13 裁决）。
+    落点 = Songloft 内置收藏歌单：点播曲目先按插件引用（kwqq + source_data）入库，
+    再入单/出单；不依赖原厂账号，也不调用 COMMAND 9。
+    当前曲 = `song_request._cch_state` 的队列当前项（单会话语义）。
     """
-    fav = _favorite_current()
-    if fav is None:
-        return {"action": "unknown_state", "favorite": None}
-    if fav == bool(intent):
-        return {"action": "noop", "favorite": fav}
-    from core.music.cch_cast import cast_native_simple
+    from core.tools import song_request as sr
 
-    ok, detail = await cast_native_simple(9)
-    if not ok:
-        return {"action": "tap_failed", "detail": detail}
-    return {"action": "tapped", "favorite": bool(intent)}
+    items = sr._cch_state.get("items") or []
+    idx = int(sr._cch_state.get("entry", 0))
+    if not (0 <= idx < len(items)):
+        return {"action": "no_track", "favorite": None}
+    item = items[idx]
+    try:
+        import aiohttp
+
+        from core.music import songloft_api
+
+        async with aiohttp.ClientSession() as http:
+            song_id = await songloft_api.ensure_song(item, http=http)
+            if intent:
+                res = await songloft_api.add_to_favorites(song_id, http=http)
+                action = "added" if int(res.get("added") or 0) > 0 else "noop"
+            else:
+                await songloft_api.remove_from_favorites(song_id, http=http)
+                action = "removed"
+    except Exception as exc:  # noqa: BLE001 - Songloft 不可用时明确失败，不回退原厂
+        logger.warning(f"[CchNp] collect_favorite failed: {type(exc).__name__}: {exc}",
+                       module="CchNp")
+        return {"action": "failed", "detail": type(exc).__name__, "favorite": None}
+    return {"action": action, "favorite": bool(intent)}

@@ -104,3 +104,66 @@ class PickLrcTest(unittest.TestCase):
     def test_empty_payload(self):
         self.assertEqual("", songloft_api.pick_lrc({}))
         self.assertEqual("", songloft_api.pick_lrc({"lyric": "  ", "lxlyric": ""}))
+
+
+class FavoritesContractTest(unittest.IsolatedAsyncioTestCase):
+    """票 13：收藏落 Songloft 内置歌单（插件引用入库 → 入单/出单）。"""
+
+    def setUp(self):
+        songloft_api._FAV_PLAYLIST.clear()
+
+    async def test_ensure_song_posts_plugin_reference(self):
+        stub = _AsyncStub({"songs": [{"id": 42}]})
+        orig = songloft_api._request
+        songloft_api._request = stub
+        try:
+            song_id = await songloft_api.ensure_song(
+                {"name": "青花瓷", "artist": "周杰伦", "album": "我很忙",
+                 "source": "kugou", "id": "H1", "duration_s": 239.0, "cover": "http://c"},
+                http=object())
+        finally:
+            songloft_api._request = orig
+        self.assertEqual(42, song_id)
+        method, path, _, body = stub.calls[0]
+        self.assertEqual("POST", method)
+        self.assertTrue(path.endswith("/api/v1/songs/remote"))
+        rec = body[0]
+        self.assertEqual("kwqq", rec["plugin_entry_path"])
+        self.assertEqual("kwqq_kugou_H1", rec["dedup_key"])
+        self.assertIn(rec.get("url"), (None, ""))
+        self.assertIn('"s":"kugou"', rec["source_data"])
+
+    async def test_favorites_playlist_picks_built_in_normal(self):
+        stub = _AsyncStub({"playlists": [
+            {"id": 3, "type": "radio", "labels": ["built_in"]},
+            {"id": 1, "type": "normal", "labels": ["built_in"]},
+        ]})
+        orig = songloft_api._request
+        songloft_api._request = stub
+        try:
+            pl = await songloft_api.favorites_playlist_id(http=object())
+        finally:
+            songloft_api._request = orig
+        self.assertEqual(1, pl)
+        _, path, params, _ = stub.calls[0]
+        self.assertTrue(path.endswith("/api/v1/playlists"))
+        self.assertEqual("normal", params["type"])
+
+    async def test_add_and_remove_hit_playlist_members(self):
+        calls = []
+
+        async def fake_request(http, method, path, *, params=None, json_body=None):
+            calls.append((method, path, json_body))
+            if path.endswith("/api/v1/playlists"):
+                return {"playlists": [{"id": 1, "type": "normal", "labels": ["built_in"]}]}
+            return {"added": 1, "skipped": 0, "message": "ok"}
+
+        orig = songloft_api._request
+        songloft_api._request = fake_request
+        try:
+            await songloft_api.add_to_favorites(42, http=object())
+            await songloft_api.remove_from_favorites(42, http=object())
+        finally:
+            songloft_api._request = orig
+        self.assertEqual(("POST", "/api/v1/playlists/1/songs", {"song_ids": [42]}), calls[1])
+        self.assertEqual(("DELETE", "/api/v1/playlists/1/songs/42", None), calls[2])

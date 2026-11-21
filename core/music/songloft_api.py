@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 
 import aiohttp
@@ -45,7 +46,7 @@ async def _request(http, method: str, path: str, *, params=None, json_body=None)
     headers = {"Authorization": f"Bearer {token}"}
     async with http.request(method, f"{base}{path}", params=params, json=json_body,
                             headers=headers, timeout=_HTTP_TIMEOUT) as resp:
-        if resp.status != 200:
+        if not 200 <= resp.status < 300:
             raise SongloftError(f"{method} {path}: http {resp.status}")
         data = await resp.json(content_type=None)
     if not isinstance(data, dict):
@@ -121,3 +122,73 @@ async def lyric(title: str, artist: str = "",
     return await _request(http, "GET", f"{_PLUGIN_PATH}/lyric-search",
                           params={"title": str(title).strip(),
                                   "artist": str(artist or "").strip()})
+
+
+# ---- 收藏（票 13：只写 Songloft，屏蔽原厂 tap）----
+# 落点 = Songloft 内置收藏歌单（`built_in` 标签、type=normal），成员是库内歌曲 ID；
+# 点播曲目先经 /songs/remote 以插件引用（kwqq + source_data + dedup_key）入库再入单，
+# 保证之后可被插件重新解析播放，而不是绑一个 30 分钟票据 URL。
+
+_FAV_PLAYLIST: dict = {}
+
+
+async def ensure_song(item: dict, *, http) -> int:
+    """把点播曲目落成 Songloft 库内歌曲，返回 song_id（幂等：dedup_key 去重）。"""
+    source = str(item.get("source") or "").strip().lower()
+    rid = str(item.get("id") or "").strip()
+    if not source or not rid:
+        raise SongloftError("ensure_song: item missing source/id")
+    title = str(item.get("name") or "").strip()
+    if not title:
+        raise SongloftError("ensure_song: item missing title")
+    artist = str(item.get("artist") or item.get("singer") or "")
+    album = str(item.get("album") or "")
+    duration = float(item.get("duration_s") or 0)
+    source_data = {"s": source, "i": rid, "n": title, "a": artist, "al": album, "d": duration}
+    body = [{
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "cover_url": str(item.get("cover") or ""),
+        "duration": duration,
+        "plugin_entry_path": "kwqq",
+        "source_data": json.dumps(source_data, ensure_ascii=False, separators=(",", ":")),
+        "dedup_key": f"kwqq_{source}_{rid}",
+        "is_video": False,
+    }]
+    data = await _request(http, "POST", "/api/v1/songs/remote", json_body=body)
+    songs = data.get("songs")
+    if not isinstance(songs, list) or not songs:
+        raise SongloftError("ensure_song: no songs returned")
+    try:
+        return int(songs[0]["id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SongloftError(f"ensure_song: bad song id ({exc})") from exc
+
+
+async def favorites_playlist_id(*, http) -> int:
+    """内置收藏歌单 ID（`built_in` + type=normal；电台收藏是 type=radio，不选）。"""
+    cached = _FAV_PLAYLIST.get("id")
+    if cached:
+        return int(cached)
+    data = await _request(http, "GET", "/api/v1/playlists", params={"type": "normal"})
+    playlists = data.get("playlists")
+    if not isinstance(playlists, list):
+        raise SongloftError("favorites: unexpected playlist body")
+    for pl in playlists:
+        labels = [str(x) for x in (pl.get("labels") or [])]
+        if "built_in" in labels and str(pl.get("type") or "normal") == "normal":
+            _FAV_PLAYLIST["id"] = int(pl["id"])
+            return int(pl["id"])
+    raise SongloftError("favorites: built-in playlist not found")
+
+
+async def add_to_favorites(song_id: int, *, http) -> dict:
+    pl = await favorites_playlist_id(http=http)
+    return await _request(http, "POST", f"/api/v1/playlists/{pl}/songs",
+                          json_body={"song_ids": [int(song_id)]})
+
+
+async def remove_from_favorites(song_id: int, *, http) -> dict:
+    pl = await favorites_playlist_id(http=http)
+    return await _request(http, "DELETE", f"/api/v1/playlists/{pl}/songs/{int(song_id)}")
