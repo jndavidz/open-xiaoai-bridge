@@ -218,11 +218,17 @@ def _play_env(api, speaker, **cfg):
         "sources": ["kuwo", "netease", "qq"],
     }
     merged.update(cfg)
+    from core.music import songloft_api
+
     return (
         mock.patch.object(song_request, "_fetch", api),
         _patch_cfg(**merged),
         _patch_speaker(speaker),
         mock.patch.object(song_request, "_CONFIRM_INTERVAL_S", 0.0),
+        # 票 24：默认让 Songloft 不可用，测试走门面回落（离线确定性）；
+        # 需要 Songloft 命中的用例自行 patch songloft_api.search。
+        mock.patch.object(song_request, "_songloft_candidates",
+                          mock.AsyncMock(side_effect=songloft_api.SongloftError("offline"))),
     )
 
 
@@ -336,7 +342,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertTrue(reply_suppressed())
 
@@ -351,7 +357,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             _run(song_request.run({"action": "play", "query": "乱写的词"}))
         self.assertFalse(reply_suppressed())
 
@@ -362,7 +368,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
 
         self.assertIn("晴天", out)
@@ -391,7 +397,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "冷门曲"}))
         self.assertIn("没有找到", out)
         self.assertFalse([p for p in speaker.play_calls if p["url"]])
@@ -404,7 +410,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "乱写的词"}))
         self.assertIn("没有找到", out)
 
@@ -418,7 +424,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
 
         self.assertIn("kuwo", out)
@@ -433,7 +439,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("没有找到", out)
         self.assertFalse([p for p in speaker.play_calls if p["url"]])
@@ -459,7 +465,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             _run(song_request.run({"action": "play", "query": "晴天"}))
 
         # 三个版本合并为一首，再按歌手补出别的歌
@@ -477,7 +483,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             _run(song_request.run({"action": "play", "query": "周杰伦 晴天"}))
 
         names = [c["name"] for c in song_request._state["candidates"]]
@@ -502,7 +508,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             _run(song_request.run({"action": "play", "query": "晴天"}))
 
         names = [c["name"] for c in song_request._state["candidates"]]
@@ -517,7 +523,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("netease", out)
         self.assertIn("已确认出声", out)
@@ -538,7 +544,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("netease", out)
         # mflac 加密件从未被送去播放
@@ -554,7 +560,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("没有找到", out)
         self.assertFalse([p for p in speaker.play_calls if p["url"]])
@@ -569,7 +575,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker, sources=["migu"])
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天", "source": "migu"}))
         self.assertIn("已确认出声", out)
         url_params = api.calls_for("song/url")[0][1]
@@ -580,7 +586,7 @@ class PlayPathTest(unittest.TestCase):
         api = _ApiStub([])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker, sources=["bilibili"])
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天", "source": "bilibili"}))
         self.assertIn("bilibili", out)
         self.assertEqual([], api.calls)
@@ -589,7 +595,7 @@ class PlayPathTest(unittest.TestCase):
         api = _ApiStub([])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             # 票 24：非兜底源（如 deezer/bilibili）仍拒绝；kugou 已入兜底序，不再算「未启用」
             out = _run(song_request.run({"action": "play", "query": "x", "source": "deezer"}))
         self.assertIn("未启用", out)
@@ -609,7 +615,7 @@ class PlayPathTest(unittest.TestCase):
             ("song/url", "kuwo", _envelope(200, {"url": "http://cdn/1.mp3"})),
         ])
         patches = _play_env(api, None)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("音箱", out)
         self.assertFalse([p for p in FakeSpeaker().play_calls])
@@ -639,7 +645,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker(playing="paused", start_playing=False)
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("未确认出声", out)
         self.assertIn("晴天", out)
@@ -654,7 +660,7 @@ class PlayPathTest(unittest.TestCase):
         patches = _play_env(api, speaker)
         speaker_module = __import__("tests.fake_device", fromlist=["load_speaker_module"]).load_speaker_module()
         speaker.announce_error = speaker_module.AnnounceRejected("停止音乐")
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("已确认出声", out)
         played = [p["url"] for p in speaker.play_calls if p["url"]]
@@ -672,7 +678,7 @@ class PlayPathTest(unittest.TestCase):
         ])
         speaker = FakeSpeaker()
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             out = _run(song_request.run({"action": "play", "query": "晴天"}))
         self.assertIn("netease", out)
         self.assertIn("已确认出声", out)
@@ -741,7 +747,7 @@ class QueueTest(unittest.TestCase):
 
     def _act(self, api, speaker, args):
         patches = _play_env(api, speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             return _run(song_request.run(args))
 
     def test_has_queue_reflects_state(self):
@@ -890,7 +896,7 @@ class AlbumPathTest(unittest.TestCase):
     def _act(self, api, speaker, args, **cfg):
         cfg.setdefault("album_sources", ["netease"])
         patches = _play_env(api, speaker, **cfg)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             return _run(song_request.run(args))
 
     def _album_env(self, items, albums=None):
@@ -1204,7 +1210,7 @@ class AutoAdvanceTest(unittest.TestCase):
             return song_request._advance_task
 
         patches = _play_env(self._api(), FakeSpeaker())
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             self.assertIsNone(_run(fn()))
 
     def test_unreadable_playback_stops_advance(self):
@@ -1276,7 +1282,7 @@ class PauseResumeTest(unittest.TestCase):
 
     def _act(self, speaker, args):
         patches = _play_env(_ApiStub([]), speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             return _run(song_request.run(args))
 
     def test_resume_action_resumes_paused_playback(self):
@@ -1312,7 +1318,7 @@ class PauseResumeTest(unittest.TestCase):
         self.assertFalse(song_request._paused_for_wakeup)
 
         patches = _play_env(_ApiStub([]), speaker)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             resumed = _run(song_request.resume_after_wakeup("conversation_end"))
         self.assertFalse(resumed)
         self.assertEqual("paused", speaker.playing_states[-1])

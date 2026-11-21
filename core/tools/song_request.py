@@ -204,6 +204,15 @@ def _managed_mode() -> bool:
     return song_bridge.managed_enabled()
 
 
+async def _songloft_candidates(query: str) -> list[dict]:
+    """Songloft 聚合搜索（插件按 SEARCH_SOURCE_ORDER 合并）→ 去重候选。失败抛 SongloftError。"""
+    from core.music import songloft_api
+
+    async with aiohttp.ClientSession() as http:
+        items = await songloft_api.search(query, page_size=_SEARCH_LIMIT, http=http)
+    return _dedupe_items(_drop_query_variants(items, query))
+
+
 async def _managed_collect(query: str, requested_source, *, artist: str = "",
                            album: bool = False) -> list[dict]:
     """复用既有搜索/专辑候选逻辑，只把「队列归属」换到托管面。
@@ -214,11 +223,7 @@ async def _managed_collect(query: str, requested_source, *, artist: str = "",
     """
     if not album and requested_source is None:
         try:
-            from core.music import songloft_api
-
-            async with aiohttp.ClientSession() as http:
-                items = await songloft_api.search(query, page_size=_SEARCH_LIMIT, http=http)
-            items = _dedupe_items(_drop_query_variants(items, query))
+            items = await _songloft_candidates(query)
             if items:
                 return items
         except Exception as exc:  # noqa: BLE001 - Songloft 不可用即回落门面（票 24 保留兜底）
@@ -814,6 +819,38 @@ async def _extend_with_singer(session, source: str, items: list[dict]) -> list[d
 # ---- play 主路径 ----
 
 
+async def _try_play_group(speaker, session, raw_items: list[dict], items: list[dict],
+                          label: str) -> str | None:
+    """对一组候选逐个尝试起播；成功返回回执文案，全失败返回 None。"""
+    for item in raw_items:
+        ok, confirmed, _played, play_seq = await _start_item(
+            speaker, session, item, _announce_text(item)
+        )
+        if not ok:
+            continue  # 无直链/加密件/设备拒收：候选内继续，不行再落下一源
+        queue = _queue_for(item, items)
+        if len(queue) < 2:
+            # 队列只剩同一首：按歌手补别的歌后再按当前曲过滤
+            extra = await _extend_with_singer(
+                session, str(item.get("source") or label).strip().lower() or label, items)
+            queue = _queue_for(item, list(items) + extra)
+        _note_played(item, queue, play_seq=play_seq)
+        logger.info(
+            f"[SongRequest] playing {item.get('name')!r} via {label} "
+            f"(confirmed={confirmed})"
+        )
+        # 工具已自行播报并起播：本轮收尾 TTS 会打断音乐，置免播
+        from core.tools.registry import suppress_reply
+
+        suppress_reply()
+        suffix = (
+            "，已确认出声" if confirmed
+            else "，未确认出声（音源可能不可达，可让我停止）"
+        )
+        return f"已开始播放《{item.get('name')}》-{item.get('singer')}（音源 {label}）{suffix}"
+    return None
+
+
 async def _do_play(query: str, requested_source) -> str:
     if not query:
         return "已拒绝：play 需要 query（歌名或歌手）"
@@ -827,37 +864,29 @@ async def _do_play(query: str, requested_source) -> str:
         return "音箱服务还没就绪，稍后再试"
 
     async with aiohttp.ClientSession() as session:
+        # 票 24：Songloft 聚合搜索优先（未指定 source 时），失败回落门面逐源
+        if requested_source is None:
+            try:
+                candidates = await _songloft_candidates(query)
+            except Exception as exc:  # noqa: BLE001 - 回落门面（保留兜底）
+                logger.warning(
+                    f"[SongRequest] songloft search failed, facade fallback: {type(exc).__name__}",
+                    module="SongRequest")
+                candidates = []
+            if candidates:
+                done = await _try_play_group(
+                    speaker, session, candidates, candidates,
+                    str(candidates[0].get("source") or "songloft"))
+                if done:
+                    return done
         for source in sources:
             raw_items = _drop_query_variants(await _search(session, source, query), query)
             items = _dedupe_items(raw_items)
             if not items:
                 continue
-            # 尝试用原始候选（同曲其他版本可作为取链失败的兜底），队列用去重结果
-            for item in raw_items:
-                ok, confirmed, _played, play_seq = await _start_item(
-                    speaker, session, item, _announce_text(item)
-                )
-                if not ok:
-                    continue  # 无直链/加密件/设备拒收：候选内继续，不行再落下一源
-                queue = _queue_for(item, items)
-                if len(queue) < 2:
-                    # 队列只剩同一首：按歌手补别的歌后再按当前曲过滤
-                    extra = await _extend_with_singer(session, source, items)
-                    queue = _queue_for(item, list(items) + extra)
-                _note_played(item, queue, play_seq=play_seq)
-                logger.info(
-                    f"[SongRequest] playing {item.get('name')!r} via {source} "
-                    f"(confirmed={confirmed})"
-                )
-                # 工具已自行播报并起播：本轮收尾 TTS 会打断音乐，置免播
-                from core.tools.registry import suppress_reply
-
-                suppress_reply()
-                suffix = (
-                    "，已确认出声" if confirmed
-                    else "，未确认出声（音源可能不可达，可让我停止）"
-                )
-                return f"已开始播放《{item.get('name')}》-{item.get('singer')}（音源 {source}）{suffix}"
+            done = await _try_play_group(speaker, session, raw_items, items, source)
+            if done:
+                return done
 
     logger.info(f"[SongRequest] no playable result for {query!r} in {sources}")
     return f"没有找到能播放的《{query}》，换个说法或换个源试试"
