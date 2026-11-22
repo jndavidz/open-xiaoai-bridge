@@ -262,3 +262,137 @@ async def add_to_favorites(song_id: int, *, http, playlist_id=None) -> dict:
 async def remove_from_favorites(song_id: int, *, http, playlist_id=None) -> dict:
     pl = int(playlist_id) if playlist_id is not None else await favorites_playlist_id(http=http)
     return await _request(http, "DELETE", f"/api/v1/playlists/{pl}/songs/{int(song_id)}")
+
+
+# ---- 票 25 数据面：Songloft 歌单 → 原厂收藏 tab item schema -------------------------
+# 真机 schema 冻结点 = facts §2.76-4（V2 响应 data.model[] 实测，2026-11-22）。
+# 关键口径：UI 列表行曲名取 title、歌手取 authors[].title（singer 恒 null，按 singer 映射会全空）。
+
+async def playlist_songs(playlist_id: int, *, http, limit=200) -> list:
+    """读歌单歌曲（票 25：收藏列表下发设备文件用）。
+
+    端点由 Songloft 源码实证：GET /api/v1/playlists/{id}/songs → {songs,total,limit,offset}
+    （routers.go:204 / playlist.go:499）。仅取元数据，不含 audioUrl/票据 URL。
+    """
+    data = await _request(http, "GET", f"/api/v1/playlists/{int(playlist_id)}/songs",
+                          params={"limit": int(limit), "offset": 0, "sort": "position", "order": "asc"})
+    songs = data.get("songs")
+    if not isinstance(songs, list):
+        raise SongloftError("playlist_songs: unexpected body")
+    return songs
+
+
+def _fav_cover(img: str) -> dict:
+    """原厂 cover 壳（实测字段：img 必填，其余可 null）。"""
+    i = str(img or "").strip()
+    return {"img": i, "large": None, "mediam": None, "medium": None, "small": None,
+            "canResize": False, "vertical": None, "horizontal": None,
+            "displayRatio": None, "verticalLarge": None, "horizontalLarge": None}
+
+
+def _fav_authors(artist: str, source: str) -> list:
+    """原厂 authors[] 壳——UI 的**歌手列取这里**（song.singer 恒 null）。"""
+    a = str(artist or "").strip()
+    if not a:
+        return []
+    return [{"rawId": "", "source": source, "order": 0, "id": 0, "title": a,
+             "alias": None, "cleanTitle": None, "description": None,
+             "isOnline": True, "type": "program", "isAudition": None,
+             "gender": {"name": "DEFAULT"},
+             "authorTypes": [{"name": "SINGER"}], "cover": None}]
+
+
+def favorite_item_schema(songs: list) -> list:
+    """Songloft 歌曲对象 → 原厂「我的收藏」item schema（票 25，纯函数可单测）。
+
+    字段逐项对齐 facts §2.76-4 的真实 V2 响应（不是最小 12 字段版——缺 cover/authors
+    会让原厂列表无封面、无歌手）。缺失关键字段宁可跳过该曲，绝不输出空值项。
+
+    凭据纪律（票 25 硬红线 3）：只取元数据；screenPlayUrl 用固定 genie:// 深链 +
+    平台/原始 id 拼 contentList（原厂样本同款形态），不读也不下发任何票据 URL。
+    """
+    out = []
+    for pos, song in enumerate(songs or []):
+        if not isinstance(song, dict):
+            continue
+        title = str(song.get("title") or "").strip()
+        if not title:
+            continue
+        # source_data 是 JSON 字符串（ensure_song 写入 {s,i,n,a,al,d}）
+        source, raw_id, sd_artist, sd_album = "", "", "", ""
+        try:
+            sd = song.get("source_data")
+            if isinstance(sd, str) and sd:
+                parsed = json.loads(sd)
+                if isinstance(parsed, dict):
+                    source = str(parsed.get("s") or "").strip()
+                    raw_id = str(parsed.get("i") or "").strip()
+                    sd_artist = str(parsed.get("a") or "").strip()
+                    sd_album = str(parsed.get("al") or "").strip()
+        except (ValueError, TypeError):
+            pass
+        if not raw_id:
+            raw_id = str(song.get("dedup_key") or "").strip()
+        if not raw_id:
+            continue    # 无原始 id 无法逐曲点播，跳过
+        try:
+            sid = int(song.get("id") or 0)
+        except (TypeError, ValueError):
+            sid = 0
+        if sid <= 0:
+            continue
+        try:
+            duration = int(float(song.get("duration") or 0))
+        except (TypeError, ValueError):
+            duration = 0
+        src = (source or "kwqq").upper()
+        artist = str(song.get("artist") or sd_artist or "").strip()
+        album = str(song.get("album") or sd_album or "").strip()
+        cover = str(song.get("cover_url") or "").strip()
+        out.append({
+            "duration": duration,
+            "albumRawId": "0",
+            "text": None,
+            "otherTypeIds": None,
+            "lyric": None,
+            "lastPage": None,
+            "id": sid,
+            "source": src,
+            "category": "audio",
+            "type": "music",
+            "isCharge": False,
+            "isAudition": None,
+            "copyright": 0,
+            "title": title,
+            "rawId": raw_id,
+            "pos": pos,
+            "packageType": None,
+            "audioType": None,
+            "singer": None,          # 实测恒 null；歌手走 authors[]
+            "collect": True,
+            "playFrom": "playFavorite",
+            "vip": False,
+            "chargeStatus": None,
+            "screenPlayUrl": ("genie://com.alibaba.ailabs.genie.musicplayer?cmd=start"
+                              "&data={\"type\":\"content\"}&contentList="
+                              "[{\"rawId\":\"%s\",\"source\":\"%s\"}]" % (raw_id, src)),
+            "sourceIcon": None,
+            "playUrls": [],
+            "bindingSourceList": None,
+            "extendInfo": None,
+            "itemType": {"name": "CONTENT"},
+            "valid": {"name": "VALID"},
+            "cover": _fav_cover(cover),
+            "authors": _fav_authors(artist, src),
+            "albumItem": ({"id": 0, "rawId": "0", "source": src, "title": album,
+                           "category": "audio", "type": "music", "isCharge": False,
+                           "isAudition": False, "copyright": 0, "boughtStatus": False,
+                           "albumType": {"name": "ALBUM"}, "finished": {"name": "NOT_FINISHED"},
+                           "itemType": {"name": "ALBUM"}, "valid": {"name": "VALID"},
+                           "online": {"name": "OFFLINE"}, "cover": _fav_cover(cover),
+                           "alias": [album] if album else [], "authors": None,
+                           "appIds": ["160"], "contentCopyright": ["has_genie_right"]}
+                          if album else None),
+            "revealLabel": None,
+        })
+    return out

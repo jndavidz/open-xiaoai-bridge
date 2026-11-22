@@ -303,6 +303,32 @@ async def push_queue(items: list) -> tuple[bool, str]:
     return ok, status
 
 
+async def push_favorites(playlist_id=None) -> tuple[bool, dict]:
+    """读 Songloft 收藏歌单 → 映射原厂 item schema → 经 9102 favfile 落设备文件（票 25）。
+
+    唯一真相在 Songloft（票 13）；本函数只做「读 → 映射 → 下发」，不在投送层另建映射。
+    playlist_id 缺省 = 内置收藏歌单。下发失败不抛（收藏写已成功，文件同步是增强），
+    由调用方决定是否重试。
+    """
+    import aiohttp
+
+    from core.music import songloft_api
+
+    try:
+        async with aiohttp.ClientSession() as http:
+            pl = int(playlist_id) if playlist_id is not None else await songloft_api.favorites_playlist_id(http=http)
+            songs = await songloft_api.playlist_songs(pl, http=http)
+    except Exception as exc:  # noqa: BLE001 - Songloft 读失败，明确返回不抛
+        logger.warning(f"[CchCast] push_favorites read failed: {type(exc).__name__}: {exc}",
+                       module="CchCast")
+        return False, {"error": f"read:{type(exc).__name__}"}
+    items = songloft_api.favorite_item_schema(songs)
+    ok, payload = await musicctl("favfile", {"items": items})
+    logger.info(f"[CchCast] favfile n={len(items)} playlist={pl} ok={ok} status={payload}",
+                module="CchCast")
+    return ok, {"n": len(items), "playlist_id": pl, "ok": ok, "detail": payload}
+
+
 async def cast_native(render_data: dict) -> tuple[bool, str]:
     """POST 9102 /cmd COMMAND 7（Bearer）。返回 (ok, detail)——ok = HTTP 2xx，
     生效与否看设备侧 observable（CchBridgeMeta/audio_flinger），调用方负责回读。"""

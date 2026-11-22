@@ -277,3 +277,83 @@ class QueuePayloadTest(unittest.TestCase):
             self.assertEqual(20, songloft_api.queue_topn(), "非法值回落缺省 20")
         finally:
             ConfigManager.instance().get_app_config = orig
+
+
+class FavoriteSchemaTest(unittest.IsolatedAsyncioTestCase):
+    """票 25：Songloft 歌曲 → 原厂收藏 item schema（按 facts §2.76-4 真机 V2 响应校准）。"""
+
+    def _song(self, sid=4076, title="晴天", source="kwqq", raw="HASH1",
+              artist="周杰伦", album="叶惠美", cover="http://img/x.jpg"):
+        return {"id": sid, "title": title, "artist": artist, "album": album,
+                "cover_url": cover, "duration": 269,
+                "source_data": json.dumps({"s": source, "i": raw, "n": title,
+                                           "a": artist, "al": album, "d": 269},
+                                          ensure_ascii=False),
+                "dedup_key": "kwqq_%s_%s" % (source, raw)}
+
+    def test_maps_core_fields(self):
+        item = songloft_api.favorite_item_schema([self._song()])[0]
+        self.assertEqual(4076, item["id"])
+        self.assertEqual("晴天", item["title"])
+        self.assertEqual("KWQQ", item["source"])
+        self.assertEqual("HASH1", item["rawId"])
+        self.assertEqual("playFavorite", item["playFrom"])
+        self.assertTrue(item["collect"])
+        self.assertEqual("music", item["type"])
+        self.assertEqual(269, item["duration"])
+        self.assertEqual({"name": "CONTENT"}, item["itemType"])
+        self.assertEqual({"name": "VALID"}, item["valid"])
+        self.assertNotIn("audioUrl", item)
+
+    def test_artist_goes_to_authors_not_singer(self):
+        """UI 歌手列取 authors[].title；singer 恒 null（真机实测）。"""
+        item = songloft_api.favorite_item_schema([self._song()])[0]
+        self.assertIsNone(item["singer"])
+        self.assertEqual(1, len(item["authors"]))
+        self.assertEqual("周杰伦", item["authors"][0]["title"])
+        self.assertEqual("KWQQ", item["authors"][0]["source"])
+        self.assertEqual([{"name": "SINGER"}], item["authors"][0]["authorTypes"])
+
+    def test_cover_shell_matches_device_shape(self):
+        item = songloft_api.favorite_item_schema([self._song()])[0]
+        self.assertEqual("http://img/x.jpg", item["cover"]["img"])
+        for k in ("large", "mediam", "medium", "small", "vertical", "horizontal"):
+            self.assertIsNone(item["cover"][k])
+
+    def test_screen_play_url_is_fixed_deeplink_with_content_list(self):
+        item = songloft_api.favorite_item_schema([self._song()])[0]
+        url = item["screenPlayUrl"]
+        self.assertTrue(url.startswith("genie://com.alibaba.ailabs.genie.musicplayer"))
+        self.assertIn('"rawId":"HASH1"', url)
+        self.assertIn('"source":"KWQQ"', url)
+
+    def test_skips_song_without_raw_id(self):
+        song = {"id": 1, "title": "无源曲", "duration": 100, "source_data": "{}"}
+        self.assertEqual([], songloft_api.favorite_item_schema([song]))
+
+    def test_skips_song_without_title_or_id(self):
+        songs = [{"id": 1, "source_data": '{"s":"kwqq","i":"H"}'},
+                 {"title": "曲", "source_data": '{"s":"kwqq","i":"H"}'}]
+        self.assertEqual([], songloft_api.favorite_item_schema(songs))
+
+    def test_pos_is_enumeration_index(self):
+        items = songloft_api.favorite_item_schema(
+            [self._song(1, "A", raw="H1"), self._song(2, "B", raw="H2")])
+        self.assertEqual([0, 1], [i["pos"] for i in items])
+
+    async def test_playlist_songs_reads_documented_endpoint(self):
+        calls = []
+
+        async def fake_request(http, method, path, *, params=None, json_body=None):
+            calls.append((method, path, params))
+            return {"songs": [self._song()], "total": 1, "limit": 200, "offset": 0}
+
+        orig = songloft_api._request
+        songloft_api._request = fake_request
+        try:
+            songs = await songloft_api.playlist_songs(1, http=object())
+        finally:
+            songloft_api._request = orig
+        self.assertEqual(1, len(songs))
+        self.assertEqual("GET", calls[0][0])
+        self.assertEqual("/api/v1/playlists/1/songs", calls[0][1])
