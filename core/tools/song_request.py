@@ -524,22 +524,33 @@ async def _run_cch(action: str, args: dict) -> str:
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
-                # 歌词通道（A3）：Songloft 跨源回搜（优先）→ 门面同源（兜底）→ 设备本地 httpd
+                # 歌词通道（A3，票 23 后按用户口径改序）：同平台精确（按音源 id，不硬指定酷我）
+                # → Songloft 跨源回搜（兜底）→ 设备本地 httpd。CCH 恒行级 LRC。
                 try:
                     lrc = ""
+                    lrc_via = ""
                     async with aiohttp.ClientSession() as http:
                         try:
-                            from core.music import songloft_api
-
-                            ly = await songloft_api.lyric(
-                                str(item.get("name") or ""),
-                                str(item.get("artist") or item.get("singer") or ""),
-                                http=http)
-                            lrc = songloft_api.pick_lrc(ly)
-                        except Exception:  # noqa: BLE001 - Songloft 不可用回落门面同源
                             lr = await _api(http, f"/{ref['source'] or 'kuwo'}/lyric",
                                             {"id": ref["id"]})
                             lrc = str((lr or {}).get("lyric") or "") if isinstance(lr, dict) else ""
+                            lrc_via = "same-platform"
+                        except Exception:  # noqa: BLE001 - 同平台失败回落跨源回搜
+                            pass
+                        if not lrc:
+                            try:
+                                from core.music import songloft_api
+
+                                ly = await songloft_api.lyric(
+                                    str(item.get("name") or ""),
+                                    str(item.get("artist") or item.get("singer") or ""),
+                                    http=http)
+                                lrc = songloft_api.pick_lrc(ly)
+                                lrc_via = "songloft-cross"
+                            except Exception:  # noqa: BLE001 - 跨源也失败则无歌词
+                                pass
+                    logger.info(f"[SongRequest] cch lyric via={lrc_via} len={len(lrc)}",
+                                module="SongRequest")
                     if lrc:
                         lok, _ = await musicctl("lyric", {"id": ref["id"], "lrc": lrc})
                         if lok:
