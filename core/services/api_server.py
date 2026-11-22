@@ -1652,11 +1652,13 @@ class APIServer:
         return resp
 
     async def handle_cch_collect(self, request: web.Request) -> web.Response:
-        """POST /api/cch/collect —— CCH 收藏幂等（票 13 服务端收尾，2026-11-20）。
+        """POST /api/cch/collect —— CCH 收藏（票 13；2026-11-22 增强 playlist_id 选歌单）。
 
-        body = {"collect": bool}；幂等判定在 cch_np.collect_favorite：
-        读 np 直报数据面的 isFavorite（worker 双写，编排关闭时也记录），
-        已一致 → noop 不发 tap；态未知 → 409（不盲发翻转）；不一致 → COMMAND 9 tap。
+        body = {"collect": bool, "playlist_id"?: int}：
+        - collect=false → 取消；playlist_id 缺省 = 内置收藏歌单（票 13 默认行为）。
+        - playlist_id 指定时校验「存在且可写」（type=normal，radio 只读拒）；
+          非法/不存在/不可写 → 400，不新建歌单（新建仅手机 App）。
+        幂等与写落点由 cch_np.collect_favorite 统一（Songloft 单落点，不回退原厂 tap）。
         写类 Bearer 由 `api_auth_middleware` 先行（proxy 转发用 BRIDGE_TOKEN 同源）。
         """
         caller = self._caller_tag(request)
@@ -1668,21 +1670,46 @@ class APIServer:
             intent = body.get("collect")
             if not isinstance(intent, bool):
                 raise ValueError("collect must be boolean")
+            playlist_id = body.get("playlist_id")
+            if playlist_id is not None:
+                playlist_id = int(playlist_id)   # bool 也被 int() 接受，下面范围校验挡掉
+                if isinstance(body.get("playlist_id"), bool) or playlist_id <= 0:
+                    raise ValueError("playlist_id must be positive int")
         except Exception:
             return web.json_response(
                 {"success": False, "code": "collect_bad_payload",
-                 "error": "载荷非法：{\"collect\": true|false}"}, status=400)
+                 "error": "载荷非法：{\"collect\": true|false, \"playlist_id\"?: int>0}"}, status=400)
+        # 校验歌单存在且可写（仅指定时）；复用 songloft_api 统一门面读歌单列表。
+        if playlist_id is not None:
+            try:
+                import aiohttp
+
+                from core.music import songloft_api
+
+                async with aiohttp.ClientSession() as http:
+                    writable = await songloft_api.writable_playlist_ids(http=http)
+                if playlist_id not in writable:
+                    return web.json_response(
+                        {"success": False, "code": "playlist_not_writable",
+                         "error": f"歌单 {playlist_id} 不存在或不可写"}, status=400)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"[APIServer] /api/cch/collect playlist 校验失败: "
+                             f"{type(exc).__name__}: {exc}")
+                return web.json_response(
+                    {"success": False, "code": "playlist_check_error",
+                     "error": type(exc).__name__}, status=502)
         try:
             from core.music import cch_np
 
-            result = await cch_np.collect_favorite(intent)
+            result = await cch_np.collect_favorite(intent, playlist_id=playlist_id)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[APIServer] /api/cch/collect 异常: {type(exc).__name__}: {exc}")
             return web.json_response(
                 {"success": False, "code": "collect_error",
                  "error": type(exc).__name__}, status=500)
         action = result.get("action")
-        logger.info(f"[APIServer] /api/cch/collect action={action} caller={caller}")
+        logger.info(f"[APIServer] /api/cch/collect action={action} "
+                    f"playlist={playlist_id} caller={caller}")
         if action == "unknown_state":
             return web.json_response(
                 {"success": False, "code": "favorite_state_unknown",
@@ -1692,7 +1719,8 @@ class APIServer:
                 {"success": False, "code": "tap_failed",
                  "detail": result.get("detail", "")}, status=502)
         return web.json_response({"success": True, "action": action,
-                                  "favorite": result.get("favorite")})
+                                  "favorite": result.get("favorite"),
+                                  "playlist_id": result.get("playlist_id")})
 
     async def handle_livez(self, request: web.Request) -> web.Response:
         """GET /livez —— 进程存活（不看设备；不走 /api/* 鉴权）。"""

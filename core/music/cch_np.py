@@ -292,11 +292,12 @@ async def speak_with_resume(text: str, *, delay_s: float | None = None) -> dict:
 # ---- 票 13：收藏（Songloft 服务端为唯一落点，2026-11-21 用户裁决） ----
 
 
-async def collect_favorite(intent: bool) -> dict:
+async def collect_favorite(intent: bool, playlist_id=None) -> dict:
     """收藏/取消收藏（票 13，2026-11-21 用户裁决：**只写 Songloft，屏蔽原厂 tap**）。
 
-    落点 = Songloft 内置收藏歌单：点播曲目先按插件引用（kwqq + source_data）入库，
-    再入单/出单；不依赖原厂账号，也不调用 COMMAND 9。
+    落点 = Songloft 收藏歌单（默认内置；票 13 增强可经 playlist_id 指定已校验的可写歌单）：
+    点播曲目先按插件引用（kwqq + source_data）入库，再入单/出单；
+    不依赖原厂账号，也不调用 COMMAND 9。
     当前曲 = `song_request._cch_state` 的队列当前项（单会话语义）。
     """
     from core.tools import song_request as sr
@@ -313,14 +314,17 @@ async def collect_favorite(intent: bool) -> dict:
 
         async with aiohttp.ClientSession() as http:
             song_id = await songloft_api.ensure_song(item, http=http)
+            # playlist_id 缺省时不传 kwargs——保持对既有调用方/mock 的签名兼容。
+            extra = {"playlist_id": playlist_id} if playlist_id is not None else {}
             if intent:
-                res = await songloft_api.add_to_favorites(song_id, http=http)
+                res = await songloft_api.add_to_favorites(song_id, http=http, **extra)
                 action = "added" if int(res.get("added") or 0) > 0 else "noop"
             else:
-                await songloft_api.remove_from_favorites(song_id, http=http)
+                await songloft_api.remove_from_favorites(song_id, http=http, **extra)
                 action = "removed"
     except Exception as exc:  # noqa: BLE001 - Songloft 不可用时明确失败，不回退原厂
         logger.warning(f"[CchNp] collect_favorite failed: {type(exc).__name__}: {exc}",
                        module="CchNp")
         return {"action": "failed", "detail": type(exc).__name__, "favorite": None}
-    return {"action": action, "favorite": bool(intent)}
+    return {"action": action, "favorite": bool(intent),
+            "playlist_id": playlist_id}

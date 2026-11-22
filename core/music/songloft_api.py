@@ -229,12 +229,36 @@ async def favorites_playlist_id(*, http) -> int:
     raise SongloftError("favorites: built-in playlist not found")
 
 
-async def add_to_favorites(song_id: int, *, http) -> dict:
-    pl = await favorites_playlist_id(http=http)
+async def writable_playlist_ids(*, http) -> dict:
+    """所有可写歌单 {id:int -> name:str}（票 13 增强：playlist_id 入参校验用）。
+
+    口径与 favorites_playlist_id 一致：只认 type=normal（radio=电台收藏，不可写）；
+    内置歌单（built_in）同样可写（票 13 已实证对 id=1 POST/DELETE 成功）。
+    复用 GET /api/v1/playlists?type=normal，不新建歌单（新建仅手机 App，CCH 不建）。
+    """
+    data = await _request(http, "GET", "/api/v1/playlists", params={"type": "normal"})
+    playlists = data.get("playlists")
+    if not isinstance(playlists, list):
+        raise SongloftError("playlists: unexpected body")
+    out = {}
+    for pl in playlists:
+        if str(pl.get("type") or "normal") != "normal":
+            continue
+        try:
+            out[int(pl["id"])] = str(pl.get("name") or "")
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not out:
+        raise SongloftError("playlists: no writable playlist")
+    return out
+
+
+async def add_to_favorites(song_id: int, *, http, playlist_id=None) -> dict:
+    pl = int(playlist_id) if playlist_id is not None else await favorites_playlist_id(http=http)
     return await _request(http, "POST", f"/api/v1/playlists/{pl}/songs",
                           json_body={"song_ids": [int(song_id)]})
 
 
-async def remove_from_favorites(song_id: int, *, http) -> dict:
-    pl = await favorites_playlist_id(http=http)
+async def remove_from_favorites(song_id: int, *, http, playlist_id=None) -> dict:
+    pl = int(playlist_id) if playlist_id is not None else await favorites_playlist_id(http=http)
     return await _request(http, "DELETE", f"/api/v1/playlists/{pl}/songs/{int(song_id)}")

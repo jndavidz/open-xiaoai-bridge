@@ -170,6 +170,56 @@ class FavoritesContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("DELETE", "/api/v1/playlists/1/songs/42", None), calls[2])
 
 
+class WritablePlaylistTest(unittest.IsolatedAsyncioTestCase):
+    """票 13 增强：playlist_id 入参的歌单可写性校验 + 指定歌单 add/remove。"""
+
+    async def test_writable_ids_exclude_radio(self):
+        async def fake_request(http, method, path, *, params=None, json_body=None):
+            return {"playlists": [
+                {"id": 1, "type": "normal", "labels": ["built_in"], "name": "收藏"},
+                {"id": 2, "type": "normal", "name": "周末"},
+                {"id": 3, "type": "radio", "name": "电台收藏"},
+            ]}
+
+        orig = songloft_api._request
+        songloft_api._request = fake_request
+        try:
+            got = await songloft_api.writable_playlist_ids(http=object())
+        finally:
+            songloft_api._request = orig
+        self.assertEqual({1: "收藏", 2: "周末"}, got)
+        self.assertNotIn(3, got, "radio 类型不可写")
+
+    async def test_writable_ids_empty_raises(self):
+        async def fake_request(http, method, path, *, params=None, json_body=None):
+            return {"playlists": [{"id": 3, "type": "radio"}]}
+
+        orig = songloft_api._request
+        songloft_api._request = fake_request
+        try:
+            with self.assertRaises(songloft_api.SongloftError):
+                await songloft_api.writable_playlist_ids(http=object())
+        finally:
+            songloft_api._request = orig
+
+    async def test_add_remove_honor_explicit_playlist_id(self):
+        calls = []
+
+        async def fake_request(http, method, path, *, params=None, json_body=None):
+            calls.append((method, path))
+            return {"added": 1, "message": "ok"}
+
+        orig = songloft_api._request
+        songloft_api._request = fake_request
+        try:
+            await songloft_api.add_to_favorites(7, http=object(), playlist_id=2)
+            await songloft_api.remove_from_favorites(7, http=object(), playlist_id=2)
+        finally:
+            songloft_api._request = orig
+        self.assertEqual(("POST", "/api/v1/playlists/2/songs"), calls[0])
+        self.assertEqual(("DELETE", "/api/v1/playlists/2/songs/7"), calls[1])
+
+
 class QueuePayloadTest(unittest.TestCase):
     """票 21：门面统一构造 UI 队列载荷（脱敏 / 门面 source 平台标识 / topN / 边界）。"""
 

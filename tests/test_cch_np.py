@@ -382,6 +382,43 @@ class CollectFavoriteTest(CchNpTestBase):
         self.assertEqual("failed", result["action"], "Songloft 不可用时不回退原厂 tap")
         self.assertEqual([], calls["add"])
 
+    async def test_playlist_id_passthrough(self):
+        """票 13 增强：指定 playlist_id 透传到 Songloft add/remove。"""
+        from unittest import mock
+
+        from core.music import songloft_api
+
+        self._queue()
+        seen = {"add": [], "remove": []}
+
+        async def ensure(item, *, http):
+            return 42
+
+        async def add(song_id, *, http, playlist_id=None):
+            seen["add"].append(playlist_id)
+            return {"added": 1}
+
+        async def remove(song_id, *, http, playlist_id=None):
+            seen["remove"].append(playlist_id)
+            return {"message": "ok"}
+
+        patches = (
+            mock.patch.object(songloft_api, "ensure_song", ensure),
+            mock.patch.object(songloft_api, "add_to_favorites", add),
+            mock.patch.object(songloft_api, "remove_from_favorites", remove),
+        )
+        for p in patches:
+            p.start()
+        try:
+            r1 = await cch_np.collect_favorite(True, playlist_id=2)
+            r2 = await cch_np.collect_favorite(False, playlist_id=2)
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(2, r1["playlist_id"])
+        self.assertEqual([2], seen["add"])
+        self.assertEqual([2], seen["remove"])
+
 
 if __name__ == "__main__":
     unittest.main()
