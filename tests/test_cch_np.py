@@ -303,7 +303,7 @@ class CollectFavoriteTest(CchNpTestBase):
 
         from core.music import songloft_api
 
-        calls = {"add": [], "remove": [], "ensure": []}
+        calls = {"add": [], "remove": [], "ensure": [], "push": 0}
 
         async def ensure(item, *, http):
             calls["ensure"].append(item.get("id"))
@@ -319,10 +319,16 @@ class CollectFavoriteTest(CchNpTestBase):
             calls["remove"].append(song_id)
             return {"message": "ok"}
 
+        async def push(playlist_id=None):
+            calls["push"] += 1
+            return True, {"n": 0, "playlist_id": 1, "ok": True}
+
         return calls, (
             mock.patch.object(songloft_api, "ensure_song", ensure),
             mock.patch.object(songloft_api, "add_to_favorites", add),
             mock.patch.object(songloft_api, "remove_from_favorites", remove),
+            # 票 25：默认拦下 favfile 同步，避免既有用例 fire 真实下行。
+            mock.patch.object(cch_cast, "push_favorites", push),
         )
 
     async def test_no_track_when_queue_empty(self):
@@ -337,12 +343,14 @@ class CollectFavoriteTest(CchNpTestBase):
             p.start()
         try:
             result = await cch_np.collect_favorite(True)
+            await asyncio.sleep(0)  # 让 ensure_future 的 favfile 同步 task 跑完一轮
         finally:
             for p in patches:
                 p.stop()
         self.assertEqual("added", result["action"])
         self.assertEqual([42], calls["add"])
         self.assertEqual(["R1"], calls["ensure"])
+        self.assertEqual(1, calls["push"], "added 后应 fire push_favorites（票 25）")
 
     async def test_duplicate_favorite_is_noop(self):
         self._queue()
@@ -351,10 +359,12 @@ class CollectFavoriteTest(CchNpTestBase):
             p.start()
         try:
             result = await cch_np.collect_favorite(True)
+            await asyncio.sleep(0)
         finally:
             for p in patches:
                 p.stop()
         self.assertEqual("noop", result["action"])
+        self.assertEqual(0, calls["push"], "noop（幂等）不触发设备文件同步")
 
     async def test_unfavorite_removes_from_playlist(self):
         self._queue()
@@ -363,11 +373,13 @@ class CollectFavoriteTest(CchNpTestBase):
             p.start()
         try:
             result = await cch_np.collect_favorite(False)
+            await asyncio.sleep(0)
         finally:
             for p in patches:
                 p.stop()
         self.assertEqual("removed", result["action"])
         self.assertEqual([42], calls["remove"])
+        self.assertEqual(1, calls["push"], "removed 后应 fire push_favorites（票 25）")
 
     async def test_songloft_failure_is_explicit(self):
         self._queue()

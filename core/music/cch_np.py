@@ -326,5 +326,11 @@ async def collect_favorite(intent: bool, playlist_id=None) -> dict:
         logger.warning(f"[CchNp] collect_favorite failed: {type(exc).__name__}: {exc}",
                        module="CchNp")
         return {"action": "failed", "detail": type(exc).__name__, "favorite": None}
+    # 票 25：收藏写成功后同步设备收藏文件（fire-and-forget，fail-open——push_favorites
+    # 内部吞错只告警；tab 数据源恒为内置收藏歌单，playlist_id 仅影响 Songloft 写入落点）。
+    if action in ("added", "removed"):
+        from core.music import cch_cast
+
+        asyncio.ensure_future(cch_cast.push_favorites())
     return {"action": action, "favorite": bool(intent),
             "playlist_id": playlist_id}
