@@ -120,11 +120,7 @@ async def _heart_collect(intent: bool) -> None:
     Songloft 不可用时 collect_favorite 明确返回 failed，此处只记日志不重试。"""
     try:
         from core.music import cch_np
-        from core.tools import song_request as sr
 
-        st = sr._cch_state
-        logger.info(f"[CchClick] HEART diag items={len(st.get('items') or [])} entry={st.get('entry')} "
-                    f"session={st.get('session')}", module="CchClick")
         result = await cch_np.collect_favorite(intent)
         logger.info(f"[CchClick] HEART collect intent={intent} action={result.get('action')}",
                     module="CchClick")
