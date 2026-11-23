@@ -245,19 +245,13 @@ async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
         return {}
 
 
-def _display_audio_name(name: str, singer: str, album: str) -> str:
-    """播控页主标题：把歌手/专辑拼进「歌名 - 歌手 - 《专辑》」（2026-11-23 用户要求）。
-    歌手/专辑缺失（空/空白/None）时降级为更短形式，不产生空壳。"""
+def _display_audio_name(name: str, singer: str, album: str = "") -> str:
+    """播控页主标题 =「歌名 - 歌手」（2026-11-23 用户定稿，专辑不显示）。
+    原厂标题控件不渲染 \n（注入被吞成空格），故单行；歌手缺失时只显示歌名。
+    album 参数保留兼容调用点，但不再拼进标题。"""
     n = str(name or "").strip()
     s = str(singer or "").strip()
-    a = str(album or "").strip()
-    if a and s:
-        return f"{n} - {s} - 《{a}》"
-    if s:
-        return f"{n} - {s}"
-    if a:
-        return f"{n} - 《{a}》"
-    return n
+    return f"{n} - {s}" if (n and s) else (n or s)
 
 
 def build_render_data(ticket_url: str, item: dict, meta: dict,
