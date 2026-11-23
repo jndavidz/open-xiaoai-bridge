@@ -114,6 +114,21 @@ async def _handle_event(ev: dict) -> None:
     await _play_event(ev)
 
 
+async def _heart_collect(intent: bool) -> None:
+    """播放页爱心点击（source=HEART）→ 写 Songloft 内置收藏歌单（票 13）。
+    曲名由 collect_favorite 从当前曲队列取；幂等（added/noop）故不额外去抖。
+    Songloft 不可用时 collect_favorite 明确返回 failed，此处只记日志不重试。"""
+    try:
+        from core.music import cch_np
+
+        result = await cch_np.collect_favorite(intent)
+        logger.info(f"[CchClick] HEART collect intent={intent} action={result.get('action')}",
+                    module="CchClick")
+    except Exception as exc:  # noqa: BLE001 - 收藏是尽力而为，不阻塞 worker
+        logger.warning(f"[CchClick] HEART collect err: {type(exc).__name__}: {exc}",
+                       module="CchClick")
+
+
 def _accept_event(ev: dict) -> None:
     """事件入口（worker 拉取循环调用，同步）：源准入 → 去重 → 去抖 last-tap-wins。
 
@@ -125,6 +140,15 @@ def _accept_event(ev: dict) -> None:
     global _pending_ev, _pending_task
     name = str(ev.get("name") or "")
     source = str(ev.get("source") or "")
+    # 票 13 动作面（2026-11-23）：播放页爱心点击由 :business tap_hook 写 source=HEART
+    # spool（name=like/unlike）。这里直接转 cch_np.collect_favorite 写 Songloft 内置歌单，
+    # 不走 HIST 的点播去抖/占窗链（那条链会改当前曲队列）。collect_favorite 自身幂等。
+    if source == "HEART":
+        intent = (name == "like")
+        logger.info(f"[CchClick] HEART recv intent={intent} -> collect_favorite",
+                    module="CchClick")
+        asyncio.create_task(_heart_collect(intent))
+        return
     if source != "HIST":
         logger.info(f"[CchClick] recv name={name} src={source} action=drop(non-hist-source)",
                     module="CchClick")
