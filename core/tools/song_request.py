@@ -583,6 +583,13 @@ async def _run_cch(action: str, args: dict) -> str:
         # 存整队供 cch_np 换代编排（STATE finish → advance 下一首）；票据按 entry 逐条 prepare
         # no_advance=False：清除点击播的单发标志（票 23），恢复语音队列的正常换代
         _cch_state.update({"entry": 0, "items": items, "no_advance": False})
+        # 播放历史 UI 接管：CCH 设备专属历史（不用 Songloft 全局），点歌成功登记当前曲
+        try:
+            from core.music import cch_history
+            cch_history.note(items[0])   # 最新一首（items[0]）→ 设备 play_history.json
+        except Exception as exc:  # noqa: BLE001 - 历史是体验增强，不阻塞起播
+            logger.warning(f"[SongRequest] cch history note failed: {type(exc).__name__}",
+                           module="SongRequest")
         # 票 21：UI 队列下发（搜索结果 topN 元数据，脱敏无票据）。失败不阻塞起播。
         try:
             await push_queue(items)
