@@ -292,21 +292,13 @@ async def speak_with_resume(text: str, *, delay_s: float | None = None) -> dict:
 # ---- 票 13：收藏（Songloft 服务端为唯一落点，2026-11-21 用户裁决） ----
 
 
-async def collect_favorite(intent: bool, playlist_id=None) -> dict:
-    """收藏/取消收藏（票 13，2026-11-21 用户裁决：**只写 Songloft，屏蔽原厂 tap**）。
+async def apply_favorite(item: dict, intent: bool, playlist_id=None) -> dict:
+    """收藏写入统一实现（票 13）：ensure_song → Songloft 入单/出单 → push_favorites。
 
-    落点 = Songloft 收藏歌单（默认内置；票 13 增强可经 playlist_id 指定已校验的可写歌单）：
-    点播曲目先按插件引用（kwqq + source_data）入库，再入单/出单；
-    不依赖原厂账号，也不调用 COMMAND 9。
-    当前曲 = `song_request._cch_state` 的队列当前项（单会话语义）。
+    **所有收藏消费者（语音 cch_collect / 屏上爱心 HEART）共用此函数**——写入层唯一。
+    当前曲来源由调用方按各自设备侧真实状态传入 item（voice=_cch_state，heart=ContentPlay log），
+    歌单恒在 Songloft 服务端（唯一真相），设备 favorites.json 只是其镜像。
     """
-    from core.tools import song_request as sr
-
-    items = sr._cch_state.get("items") or []
-    idx = int(sr._cch_state.get("entry", 0))
-    if not (0 <= idx < len(items)):
-        return {"action": "no_track", "favorite": None}
-    item = items[idx]
     try:
         import aiohttp
 
@@ -314,7 +306,6 @@ async def collect_favorite(intent: bool, playlist_id=None) -> dict:
 
         async with aiohttp.ClientSession() as http:
             song_id = await songloft_api.ensure_song(item, http=http)
-            # playlist_id 缺省时不传 kwargs——保持对既有调用方/mock 的签名兼容。
             extra = {"playlist_id": playlist_id} if playlist_id is not None else {}
             if intent:
                 res = await songloft_api.add_to_favorites(song_id, http=http, **extra)
@@ -323,14 +314,38 @@ async def collect_favorite(intent: bool, playlist_id=None) -> dict:
                 await songloft_api.remove_from_favorites(song_id, http=http, **extra)
                 action = "removed"
     except Exception as exc:  # noqa: BLE001 - Songloft 不可用时明确失败，不回退原厂
-        logger.warning(f"[CchNp] collect_favorite failed: {type(exc).__name__}: {exc}",
+        logger.warning(f"[CchNp] apply_favorite failed: {type(exc).__name__}: {exc}",
                        module="CchNp")
         return {"action": "failed", "detail": type(exc).__name__, "favorite": None}
-    # 票 25：收藏写成功后同步设备收藏文件（fire-and-forget，fail-open——push_favorites
-    # 内部吞错只告警；tab 数据源恒为内置收藏歌单，playlist_id 仅影响 Songloft 写入落点）。
+    # 票 25：收藏写成功后同步设备收藏文件（fire-and-forget，fail-open）。
     if action in ("added", "removed"):
         from core.music import cch_cast
 
         asyncio.ensure_future(cch_cast.push_favorites())
-    return {"action": action, "favorite": bool(intent),
-            "playlist_id": playlist_id}
+    return {"action": action, "favorite": bool(intent), "playlist_id": playlist_id}
+
+
+async def current_song() -> dict | None:
+    """设备侧当前曲（票 13 架构）：经 9102 currentsong 读 CCH tap_hook 写的
+    current_song.json——设备域唯一当前曲真相源。语音收藏与屏上爱心收藏共用此来源。
+    文件不存在/未就绪 → None（fail-open）。"""
+    from core.music import cch_cast
+
+    try:
+        ok, payload = await cch_cast.musicctl("currentsong")
+        if ok and isinstance(payload, dict):
+            return payload.get("song")
+    except Exception as exc:  # noqa: BLE001 - 读取失败降级为无当前曲
+        logger.warning(f"[CchNp] currentsong read err: {type(exc).__name__}: {exc}",
+                       module="CchNp")
+    return None
+
+
+async def collect_favorite(intent: bool, playlist_id=None) -> dict:
+    """收藏（票 13）：当前曲从设备侧 current_song.json 读（经 9102），写入走统一
+    apply_favorite。语音 cch_collect 与屏上爱心 cch_click 都调用本函数——同一当前曲源、
+    同一写入实现。"""
+    song = await current_song()
+    if not song or not song.get("id") or not song.get("source"):
+        return {"action": "no_track", "favorite": None}
+    return await apply_favorite(song, intent, playlist_id)

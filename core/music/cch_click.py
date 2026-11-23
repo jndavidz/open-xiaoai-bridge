@@ -114,19 +114,17 @@ async def _handle_event(ev: dict) -> None:
     await _play_event(ev)
 
 
-async def _heart_collect(intent: bool) -> None:
-    """播放页爱心点击（source=HEART）→ 写 Songloft 内置收藏歌单（票 13）。
-    曲名由 collect_favorite 从当前曲队列取；幂等（added/noop）故不额外去抖。
-    Songloft 不可用时 collect_favorite 明确返回 failed，此处只记日志不重试。"""
-    try:
-        from core.music import cch_np
+async def _heart_collect(ev: dict) -> None:
+    """屏上爱心（source=HEART_LIKE/UNLIKE）→ 语音收藏同一入口 cch_np.collect_favorite。
 
-        result = await cch_np.collect_favorite(intent)
-        logger.info(f"[CchClick] HEART collect intent={intent} action={result.get('action')}",
-                    module="CchClick")
-    except Exception as exc:  # noqa: BLE001 - 收藏是尽力而为，不阻塞 worker
-        logger.warning(f"[CchClick] HEART collect err: {type(exc).__name__}: {exc}",
-                       module="CchClick")
+    爱心事件只携带意图（tap_hook 上报）；当前曲由 collect_favorite 经 9102 从设备侧
+    current_song.json 读——语音收藏与屏上爱心收藏完全同一当前曲源、同一写入实现。"""
+    from core.music import cch_np
+
+    src = str(ev.get("source") or "")
+    intent = src == "HEART_LIKE"
+    result = await cch_np.collect_favorite(intent)
+    logger.info(f"[CchClick] HEART {result.get('action')} intent={intent}", module="CchClick")
 
 
 def _accept_event(ev: dict) -> None:
@@ -140,14 +138,12 @@ def _accept_event(ev: dict) -> None:
     global _pending_ev, _pending_task
     name = str(ev.get("name") or "")
     source = str(ev.get("source") or "")
-    # 票 13 动作面（2026-11-23）：播放页爱心点击由 :business tap_hook 写 source=HEART
-    # spool（name=like/unlike）。这里直接转 cch_np.collect_favorite 写 Songloft 内置歌单，
-    # 不走 HIST 的点播去抖/占窗链（那条链会改当前曲队列）。collect_favorite 自身幂等。
-    if source == "HEART":
-        intent = (name == "like")
-        logger.info(f"[CchClick] HEART recv intent={intent} -> collect_favorite",
-                    module="CchClick")
-        asyncio.create_task(_heart_collect(intent))
+    # 票 13 动作面：播放页爱心点击由 :business tap_hook 写 source=HEART_LIKE/HEART_UNLIKE
+    # spool（只带意图，当前曲由 collect_favorite 从设备侧 current_song.json 读）。
+    # 与语音收藏走同一入口，不走 HIST 的点播去抖链（那条链会改当前曲队列）。
+    if source.startswith("HEART"):
+        logger.info(f"[CchClick] HEART recv src={source} -> collect_favorite", module="CchClick")
+        asyncio.create_task(_heart_collect(ev))
         return
     if source != "HIST":
         logger.info(f"[CchClick] recv name={name} src={source} action=drop(non-hist-source)",

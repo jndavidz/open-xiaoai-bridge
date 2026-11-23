@@ -291,12 +291,24 @@ class SpeakResumeTest(CchNpTestBase):
 
 
 class CollectFavoriteTest(CchNpTestBase):
-    """票 13（2026-11-21 裁决）：收藏只写 Songloft，屏蔽原厂 tap。"""
+    """票 13（2026-11-21 裁决）：收藏只写 Songloft，屏蔽原厂 tap。
+    当前曲来源 = 设备侧 current_song.json（经 9102），这里 mock current_song。"""
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+
+        self._cur_song = {}
+        async def fake_current():
+            return dict(self._cur_song) if self._cur_song else None
+        self._cur_patch = mock.patch.object(cch_np, "current_song", fake_current)
+        self._cur_patch.start()
+        self.addCleanup(self._cur_patch.stop)
 
     def _queue(self, item=None):
-        sr._cch_state.update({"entry": 0, "items": [item or {
+        self._cur_song = item or {
             "name": "青花瓷", "artist": "周杰伦", "album": "我很忙", "source": "kuwo",
-            "id": "R1", "duration_s": 239}]})
+            "id": "R1", "duration_s": 239}
 
     def _patches(self, added=1, fail=None):
         from unittest import mock
@@ -332,7 +344,7 @@ class CollectFavoriteTest(CchNpTestBase):
         )
 
     async def test_no_track_when_queue_empty(self):
-        sr._cch_state.update({"entry": 0, "items": []})
+        self._cur_song = {}
         result = await cch_np.collect_favorite(True)
         self.assertEqual("no_track", result["action"])
 
