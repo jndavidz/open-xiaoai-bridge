@@ -616,7 +616,10 @@ async def _run_cch(action: str, args: dict) -> str:
                             lrc_via = "same-platform"
                         except Exception:  # noqa: BLE001 - 同平台失败回落跨源回搜
                             pass
-                        if not lrc:
+                        if not _lyric_has_content(lrc):
+                            # 同平台歌词缺失或空壳（只有「作词/作曲」元数据行）→ 跨源回搜。
+                            # 注意：即使跨源结果更短也不覆盖同平台的有效歌词。
+                            _cross = ""
                             try:
                                 from core.music import songloft_api
 
@@ -624,10 +627,14 @@ async def _run_cch(action: str, args: dict) -> str:
                                     str(item.get("name") or ""),
                                     str(item.get("artist") or item.get("singer") or ""),
                                     http=http)
-                                lrc = songloft_api.pick_lrc(ly)
-                                lrc_via = "songloft-cross"
-                            except Exception:  # noqa: BLE001 - 跨源也失败则无歌词
+                                _cross = songloft_api.pick_lrc(ly)
+                            except Exception:  # noqa: BLE001 - 跨源失败则保留原歌词
                                 pass
+                            if _lyric_has_content(_cross):
+                                lrc = _cross
+                                lrc_via = "songloft-cross"
+                            elif not lrc:
+                                lrc = _cross   # 原歌词完全空：即便跨源也非时间戳格式，聊胜于无
                     logger.info(f"[SongRequest] cch lyric via={lrc_via} len={len(lrc)}",
                                 module="SongRequest")
                     if lrc:
@@ -918,6 +925,26 @@ _SOURCE_LABEL = {
 
 
 _TICKET_MIN_BYTES = 500000
+
+
+# 同平台歌词空壳判定（2026-11-23）：netease 部分翻唱/日曲只返回 89B「作词 Unknown/
+# 作曲 X」无时间轴行——非空但无实质歌词。此类必须触发跨源回搜，否则屏幕上歌词是空的。
+_LYRIC_META_RE = re.compile(r"^\[(?:ti|ar|al|by|offset|ver|ve|length|re|aj|ks|kana|tot|id|tool|desc)\s*:", re.I)
+_LYRIC_TS_RE = re.compile(r"^\[\d{1,3}:\d{1,2}(?:[.:]\d+)?\]")
+
+
+def _lyric_has_content(lrc: str) -> bool:
+    """歌词是否有实质内容：至少一行带时间轴的歌词（排除纯元数据标签 / 作词作曲行）。"""
+    for line in str(lrc or "").splitlines():
+        s = line.strip()
+        if not s or _LYRIC_META_RE.match(s):
+            continue
+        # 有时间戳的行才算歌词正文（[00:12.34]词）；无时间戳的「作词: X」不算
+        if _LYRIC_TS_RE.match(s):
+            # 去掉时间戳后仍需有文字（排除 [00:00.000] 空行）
+            if s[_LYRIC_TS_RE.match(s).end():].strip():
+                return True
+    return False
 
 
 def _ticket_looks_playable(content_type: str, content_range: str, content_length: int) -> bool:

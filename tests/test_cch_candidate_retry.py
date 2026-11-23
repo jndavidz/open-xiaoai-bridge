@@ -146,6 +146,31 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(calls["pick"])), 8)
 
 
+class LyricContentTest(unittest.TestCase):
+    """同平台歌词空壳判定：只有元数据行不算歌词，须触发跨源回搜。"""
+
+    def test_netease_empty_shell_rejected(self):
+        shell = '{"t":-1,"c":[{"tx":"作词: "},{"tx":"Unknown"}]}\n' \
+                 '{"t":-1,"c":[{"tx":"作曲: "},{"tx":"松井五郎"}]}'
+        self.assertFalse(sr._lyric_has_content(shell))
+
+    def test_meta_only_rejected(self):
+        self.assertFalse(sr._lyric_has_content(
+            "[ti:不着痕迹]\n[ar:邓丽君]\n[al:偿还]\n[offset:0]\n[by:]\n"))
+
+    def test_timed_lyrics_accepted(self):
+        lrc = ("[ti:不着痕迹]\n[ar:邓丽君]\n"
+               "[00:09.280]词：洪光达\n[00:27.858]在感情结束的时候\n"
+               "[00:31.000]你会不会想起我")
+        self.assertTrue(sr._lyric_has_content(lrc))
+
+    def test_empty_timestamp_line_rejected(self):
+        self.assertFalse(sr._lyric_has_content("[00:00.000]\n[00:05.000]"))
+
+    def test_plain_untimed_text_rejected(self):
+        self.assertFalse(sr._lyric_has_content("作词: Unknown\n作曲: 松井五郎"))
+
+
 class PickUrlFormatTest(unittest.IsolatedAsyncioTestCase):
     """CCH Apollo 兼容：拒收 m4a/mp4 直链（error state:2 无声），收 mp3。"""
 
