@@ -28,6 +28,7 @@ import asyncio
 import json
 import re
 import time
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -851,6 +852,19 @@ async def _pick_url(session, source: str, item: dict) -> str | None:
         logger.warning(
             f"[SongRequest] {source} item {item.get('id')} preview-like "
             f"(dur={dur}s size={size}); skipped"
+        )
+        return None
+    # CCH Apollo 解码兼容（2026-11-23 VERIFIED）：QQ 源 m4a 全曲虽能被 FFmpeg 打开并
+    # open audio track，但随即进入 `MediaPlayer.cpp error state:2` → 无声；同曲酷狗 mp3
+    # 320k 正常。拒收 m4a(.m4a/.mp4)，让换候选逻辑回退到有 mp3 的版本。
+    try:
+        _path = urlparse(str(url)).path.lower()
+    except Exception:  # noqa: BLE001 - 解析失败按原 URL 放行（旧行为）
+        _path = ""
+    if _path.endswith((".m4a", ".mp4", ".aac")):
+        logger.warning(
+            f"[SongRequest] {source} item {item.get('id')} unsupported m4a/mp4 for CCH "
+            f"({_path[-24:]}); skipped for candidate fallback"
         )
         return None
     return url

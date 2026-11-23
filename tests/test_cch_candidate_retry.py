@@ -146,5 +146,24 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(calls["pick"])), 8)
 
 
+class PickUrlFormatTest(unittest.IsolatedAsyncioTestCase):
+    """CCH Apollo 兼容：拒收 m4a/mp4 直链（error state:2 无声），收 mp3。"""
+
+    async def _pick(self, url):
+        async def fake_api(session, path, params):
+            return {"url": url, "duration_s": 240, "size_bytes": 5_000_000}
+        with patch.object(sr, "_api", fake_api):
+            return await sr._pick_url(_FakeSession(), "qq", {"id": "X", "source": "kugou"})
+
+    async def test_m4a_rejected(self):
+        self.assertIsNone(await self._pick(
+            "https://isure6.stream.qqmusic.qq.com/C600002XrpfT0qvNMt.m4a?guid=1"))
+
+    async def test_mp3_accepted(self):
+        self.assertEqual(await self._pick(
+            "http://fs.kugou.com/x/yp/full/song.mp3?t=1"),
+            "http://fs.kugou.com/x/yp/full/song.mp3?t=1")
+
+
 if __name__ == "__main__":
     unittest.main()
