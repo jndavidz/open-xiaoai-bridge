@@ -245,6 +245,21 @@ async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
         return {}
 
 
+def _display_audio_name(name: str, singer: str, album: str) -> str:
+    """播控页主标题：把歌手/专辑拼进「歌名 - 歌手 - 《专辑》」（2026-11-23 用户要求）。
+    歌手/专辑缺失（空/空白/None）时降级为更短形式，不产生空壳。"""
+    n = str(name or "").strip()
+    s = str(singer or "").strip()
+    a = str(album or "").strip()
+    if a and s:
+        return f"{n} - {s} - 《{a}》"
+    if s:
+        return f"{n} - {s}"
+    if a:
+        return f"{n} - 《{a}》"
+    return n
+
+
 def build_render_data(ticket_url: str, item: dict, meta: dict,
                       background_image: str = "") -> dict:
     """构造原厂 MusicService parseIntent 的 renderData（28 字段，facts §2.34 已验字段集）。
@@ -277,7 +292,8 @@ def build_render_data(ticket_url: str, item: dict, meta: dict,
         # （用户口径 2026-11-21：背景应为虚化效果，不是清晰专辑图）。
         "backgroundImage": str(background_image or cover), "lyricbackGroundAuhor": "",
         "itemRawId": sid, "audioUid": sid, "itemId": sid,
-        "toast": "", "audioName": name, "collect": False, "template": "",
+        "toast": "", "audioName": _display_audio_name(name, singer, album),
+        "collect": False, "template": "",
         "albumName": album, "audioExt": audio_ext,
         "requestType": "create", "itemType": "music", "sourceLogoColor": "",
         "audioLength": duration,
