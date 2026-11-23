@@ -145,7 +145,9 @@ def _accept_event(ev: dict) -> None:
         logger.info(f"[CchClick] HEART recv src={source} -> collect_favorite", module="CchClick")
         asyncio.create_task(_heart_collect(ev))
         return
-    if source != "HIST":
+    # HIST = 历史 tab 点击（title+createList join）；CLICK = 当前播放 tab 点击
+    # （PlayByIndex+ContentPlay，带 rawId/source/artist）。两者都按曲名点播走同一去抖链。
+    if source != "HIST" and source != "CLICK":
         logger.info(f"[CchClick] recv name={name} src={source} action=drop(non-hist-source)",
                     module="CchClick")
         return
