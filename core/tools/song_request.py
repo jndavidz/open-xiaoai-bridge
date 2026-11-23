@@ -445,10 +445,10 @@ async def _run_cch(action: str, args: dict) -> str:
                "extra": item.get("extra") or {}}
         entry = str(item.get("id") or "cch-1")
 
-        async def _announce_only() -> None:
+        async def _announce_only(it: dict) -> None:
             """播报并等读完（与取票并行启动，隐藏 ~2s 解析耗时）。"""
             try:
-                text = _cch_announce_text(item)
+                text = _cch_announce_text(it)
                 ok_speak, _ = await speak(text)
                 if ok_speak:
                     await asyncio.sleep(_tts_wait_seconds(text))
@@ -459,7 +459,7 @@ async def _run_cch(action: str, args: dict) -> str:
         # 播报与「取元数据/票据/背景图」并行：TTS 是 5s 级，解析是 1–2s，重叠可省时间。
         ann_task = None
         if action == "play" and _cfg("cch_announce_on_play", True):
-            ann_task = asyncio.create_task(_announce_only())
+            ann_task = asyncio.create_task(_announce_only(item))
 
         try:
             meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
@@ -481,38 +481,116 @@ async def _run_cch(action: str, args: dict) -> str:
                 # 凭据隔离；poll 404 已加 re-prepare 自愈）。票据链失败/预览 ⇒
                 # kwqq 直链 fallback（走 _sources 多源策略 + 预览检测）。
                 await _ensure_host_key()
-                play_url = None
-                try:
-                    ticket_url = await resolve_ticket_url(
-                        ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
-                    async with aiohttp.ClientSession() as http:
-                        # 用 Range GET 而非 HEAD：Songloft /media 的 HEAD 未注册（SPA 兜底成
-                        # text/html），HEAD 判定会把全曲票据误杀。只取 1KB 头部即可判类型/总长。
-                        async with http.get(
-                            ticket_url, headers={"Range": "bytes=0-1023"},
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as hr:
-                            ctype = str(hr.headers.get("Content-Type") or "")
-                            crange = str(hr.headers.get("Content-Range") or "")
-                            clen = int(hr.headers.get("Content-Length") or 0)
-                            await hr.read()
-                    if _ticket_looks_playable(ctype, crange, clen):
-                        play_url = ticket_url
+                # 取链失败换候选（错版歌手/预览降级导致首选取不到 404 时）：初始选中
+                # item 优先，其后 items 其余项按 (source,id) 去重，最多前 8 个。
+                candidates: list[dict] = []
+                _seen: set[tuple[str, str]] = set()
+                for _it in [item] + list(items):
+                    _key = (str(_it.get("source") or ""), str(_it.get("id") or ""))
+                    if _key in _seen:
+                        continue
+                    _seen.add(_key)
+                    candidates.append(_it)
+                    if len(candidates) >= 8:
+                        break
+
+                async def _try_item(it: dict, _meta: dict | None = None,
+                                    _bg_url: str | None = None):
+                    """单个候选取链：票据 resolve + Range 验证 → 各源直链回退。
+
+                    返回 (play_url, ref, entry, meta, bg_url)；取不到返回 None。
+                    首个候选可传入外层已算的 meta/bg 复用；换曲候选取链成功后再按
+                    自身重算 meta/bg，保证 renderData/歌词与最终曲同源。
+                    """
+                    _ref = {"source": it.get("source") or "", "id": str(it.get("id") or ""),
+                            "extra": it.get("extra") or {}}
+                    _entry = str(it.get("id") or "cch-1")
+                    _play_url = None
+                    try:
+                        _ticket_url = await resolve_ticket_url(
+                            _ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=_entry)
+                        async with aiohttp.ClientSession() as http:
+                            # Range GET 而非 HEAD：Songloft /media 的 HEAD 未注册（SPA 兜底成
+                            # text/html），HEAD 判定会把全曲票据误杀。只取 1KB 头部即可判类型/总长。
+                            async with http.get(
+                                _ticket_url, headers={"Range": "bytes=0-1023"},
+                                timeout=aiohttp.ClientTimeout(total=10),
+                            ) as hr:
+                                ctype = str(hr.headers.get("Content-Type") or "")
+                                crange = str(hr.headers.get("Content-Range") or "")
+                                clen = int(hr.headers.get("Content-Length") or 0)
+                                await hr.read()
+                        if _ticket_looks_playable(ctype, crange, clen):
+                            _play_url = _ticket_url
+                        else:
+                            logger.warning(
+                                f"[SongRequest] ticket rejected (type={ctype} range={crange} len={clen});"
+                                " fallback direct", module="SongRequest")
+                    except Exception as exc:  # noqa: BLE001 - 票据链失败降级直链
+                        logger.warning(f"[SongRequest] ticket chain failed: {type(exc).__name__}; fallback direct",
+                                       module="SongRequest")
+                    if not _play_url:
+                        async with aiohttp.ClientSession() as http:
+                            for src in _sources(None):
+                                _play_url = await _pick_url(http, src, it)
+                                if _play_url:
+                                    break
+                    if not _play_url:
+                        return None
+                    # 取链成功：换曲候选重算元数据与虚化背景（首个候选复用外层已算值）
+                    if _meta is None:
+                        _meta = await kwqq_meta(_ref["id"], _ref.get("source") or "kuwo")
+                    if _bg_url is None:
+                        _bg_url = ""
+                        try:
+                            from core.music import bg_cache
+                            from core.music.cch_cast import bg_base
+
+                            async with aiohttp.ClientSession() as http:
+                                _bg_url = await bg_cache.ensure(
+                                    str(_meta.get("cover") or it.get("cover") or ""),
+                                    base=bg_base(), http=http)
+                        except Exception as exc:  # noqa: BLE001 - 背景失败回退封面
+                            logger.warning(f"[SongRequest] bg blur failed: {type(exc).__name__}",
+                                           module="SongRequest")
+                    return _play_url, _ref, _entry, _meta, _bg_url
+
+                picked = None
+                for _idx, _it in enumerate(candidates):
+                    # 首个候选未换曲：复用外层已算的 meta/bg；其余换曲候选由闭包重算
+                    if _idx == 0:
+                        _result = await _try_item(_it, meta, bg_url)
                     else:
+                        _result = await _try_item(_it)
+                    if _result is None:
+                        continue
+                    if _idx > 0:
+                        # 换候选留证：从初始选中项换到最终可播项，便于观测错版歌手取链失败
+                        _prev = candidates[0]
                         logger.warning(
-                            f"[SongRequest] ticket rejected (type={ctype} range={crange} len={clen});"
-                            " fallback direct", module="SongRequest")
-                except Exception as exc:  # noqa: BLE001 - 票据链失败降级直链
-                    logger.warning(f"[SongRequest] ticket chain failed: {type(exc).__name__}; fallback direct",
-                                   module="SongRequest")
-                if not play_url:
-                    async with aiohttp.ClientSession() as http:
-                        for src in _sources(None):
-                            play_url = await _pick_url(http, src, item)
-                            if play_url:
-                                break
-                if not play_url:
+                            f"[SongRequest] cch candidate switch: "
+                            f"({_prev.get('name')},{_prev.get('id')},{_prev.get('source')},{_prev.get('artist')}) "
+                            f"-> ({_it.get('name')},{_it.get('id')},{_it.get('source')},{_it.get('artist')})",
+                            module="SongRequest")
+                    picked = (_it, _result)
+                    break
+                if picked is None:
                     return "CCH 音源暂不可用（kwqq 解析冷却/预览降级），请稍后再试或换音源"
+                item, (play_url, ref, entry, meta, bg_url) = picked
+                if item is not candidates[0]:
+                    # 换曲：播报按最终 item 重建（取消旧任务，避免播错歌名）；并把选中曲
+                    # 挪到队首，使 cch_history.note(items[0]) / push_queue / _cch_state(entry=0)
+                    # 全部指向真正起播的曲。
+                    if ann_task is not None:
+                        ann_task.cancel()
+                        try:
+                            await ann_task
+                        except asyncio.CancelledError:
+                            pass
+                        ann_task = None
+                    if action == "play" and _cfg("cch_announce_on_play", True):
+                        ann_task = asyncio.create_task(_announce_only(item))
+                    items = [item] + [it for it in items if it is not item]
                 if ann_task is not None:
                     await ann_task
                 # TTS 的 suspend/resume 可能把旧会话唤醒 ⇒ 起播前再补一发 stop（幂等、几十 ms）
