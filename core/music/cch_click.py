@@ -145,12 +145,13 @@ def _accept_event(ev: dict) -> None:
         logger.info(f"[CchClick] HEART recv src={source} -> collect_favorite", module="CchClick")
         asyncio.create_task(_heart_collect(ev))
         return
-    # HIST = 历史 tab 点击（title+createList join）；CLICK = 当前播放 tab 点击
-    # （PlayByIndex+ContentPlay，带 rawId/source/artist）。两者都按曲名点播走同一去抖链。
-    if source != "HIST" and source != "CLICK":
-        logger.info(f"[CchClick] recv name={name} src={source} action=drop(non-hist-source)",
-                    module="CchClick")
-        return
+    # 源准入：HEART 已在上面 return；其余 source 都走 dedupe 判定。
+    #  HIST = 历史 tab（title+createList join）；CLICK = tap_hook 抓的 PlayByIndex+ContentPlay
+    #  （gate 漏拦时才有 App 日志，属冗余）；NE/KG/KWQQ... = cp_hook 在 :core 拦截云端
+    #  ContentPlay 时提取（2026-11-23 VERIFIED：用户点当前播放列表时稳定上报，bridge 点播
+    #  不走云端 ContentPlay 故不上报）。票 23 曾无条件 drop 这些"云端回声"是因为那时历史 tab
+    #  有 HIST 覆盖真意图；当前播放 tab 没有 HIST，drop 会致点击无声——改为靠 dedupe +
+    #  note_recent_play（主动点播 8s 占窗）区分回声，无登记的用户点击放行。
     reason = dedupe(name, str(ev.get("artist") or ""))
     if reason:
         logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",

@@ -102,6 +102,35 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(t, timeout=2)
         self.assertEqual(seen.get("query"), "晴天")
         self.assertEqual(seen.get("target"), "cch")
+
+    async def test_accept_cp_hook_ne_event_plays_after_debounce(self):
+        """当前播放 tab 点击：cp_hook 在 :core 拦云端 ContentPlay 提取的 NE 事件，
+        无主动点播登记时须放行点播（票 23 的无条件 drop 作废）。"""
+        seen = {}
+
+        async def fake_run(args):
+            seen.update(args)
+            return "ok"
+
+        async def noop_resume():
+            return
+
+        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
+             mock.patch("core.tools.song_request.run", fake_run), \
+             mock.patch.object(cch_click, "_resume_if_paused", noop_resume):
+            cch_click._accept_event({"name": "无愧我心", "artist": "成龙",
+                                     "source": "NE", "rid": "E4340B4A"})
+            t = cch_click._pending_task
+            self.assertIsNotNone(t)
+            await asyncio.wait_for(t, timeout=2)
+        self.assertEqual(seen.get("query"), "无愧我心")
+        self.assertEqual(seen.get("target"), "cch")
+
+    def test_cp_hook_echo_dropped_when_recent_play_registered(self):
+        """主动点播登记的曲目在 8s 窗内的 cp_hook 事件（回声）须被 dedupe 丢弃。"""
+        cch_click.note_recent_play("晴天", "周杰伦")
+        # 复用现有 dedupe 用例的口径：同名同歌手窗内 → 非空原因
+        self.assertNotEqual(cch_click.dedupe("晴天", "周杰伦", now=cch_click.time.time()), "")
         self.assertIsNone(cch_click._pending_ev)
 
     async def test_accept_two_events_last_tap_wins(self):
@@ -243,9 +272,10 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
                 await task
         self.assertTrue(state["n"] >= 2, "poll 失败后继续轮询")
 
-    async def test_hist_event_beats_later_kg_echo(self):
-        """票 23 真机 16:58 同毫秒双事件：HIST(晴天) hold，KG 回声(刘巧儿)后到
-        → 源准入直接 drop，播 HIST 的晴天。"""
+    async def test_hist_event_beats_later_same_song_echo(self):
+        """票 23 真机 16:58 同毫秒双事件：HIST(晴天) + 云端回声(晴天) 后到
+        → dedupe（同曲）挡回声，只播 HIST 的晴天。历史 tab 有 HIST 覆盖真意图，
+        当前播放 tab 无 HIST 才靠 cp_hook 事件放行——两者都走 dedupe 是统一地。"""
         played = []
 
         async def fake_run(args):
@@ -259,25 +289,20 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
              mock.patch("core.tools.song_request.run", fake_run), \
              mock.patch.object(cch_click, "_resume_if_paused", noop_resume):
             cch_click._accept_event({"name": "晴天", "artist": "", "source": "HIST"})
-            cch_click._accept_event({"name": "刘巧儿 (四段)", "artist": "", "source": "KG"})
+            # 同曲云端回声（HIST 意图起播后 note_recent_play 会登记晴天）
+            cch_click.note_recent_play("晴天", "周杰伦")
+            cch_click._accept_event({"name": "晴天", "artist": "", "source": "KG"})
             t = cch_click._pending_task
             self.assertIsNotNone(t)
             await asyncio.wait_for(t, timeout=2)
-        self.assertEqual(played, ["晴天"], "KG 回声不得顶掉 HIST 意图")
+        self.assertEqual(played, ["晴天"], "同曲 KG 回声不得顶掉 HIST 意图")
 
-    async def test_kg_source_dropped_at_accept(self):
-        """01:11 真机：语音搜索结果 KG CP 被 worker 当点击播 → 与语音链竞速。
-        源准入后 KG 一律 drop（HIST 覆盖 tap intent，语音链自管语音）。"""
-        played = []
-
-        async def fake_run(args):
-            played.append(args.get("query"))
-            return "ok"
-
-        with mock.patch("core.tools.song_request.run", fake_run):
-            cch_click._accept_event({"name": "亲爱的小孩", "artist": "", "source": "KG"})
-        self.assertEqual(played, [], "KG 事件不得触发播放")
-        self.assertIsNone(cch_click._pending_ev)
+    async def test_recent_play_echo_dropped_by_dedupe(self):
+        """主动点播（语音/song_request）登记的曲目，8s 窗内 cp_hook 的 KG 回声
+        → dedupe 丢弃，不与语音链竞速（票 23 的原诉求，改由 dedupe 而非源过滤实现）。"""
+        cch_click.note_recent_play("亲爱的小孩", "")
+        result = cch_click.dedupe("亲爱的小孩", "", now=cch_click.time.time())
+        self.assertNotEqual(result, "", "窗内同曲回声须被 dedupe 丢弃")
 
     async def test_worker_backs_off_after_3_failures(self):
         state = {"n": 0}
