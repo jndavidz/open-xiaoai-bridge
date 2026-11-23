@@ -34,6 +34,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         cch_click._recent.clear()
+        cch_click._recent_voice_ts = 0.0
         cch_click._pending_ev = None
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
@@ -44,6 +45,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         cch_click._recent.clear()
+        cch_click._recent_voice_ts = 0.0
         cch_click._pending_ev = None
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
@@ -358,6 +360,41 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(asyncio, "sleep", quick_sleep):
             await cch_click._resume_if_paused()
         self.assertEqual(resumes, [], "playing 不动")
+
+    async def test_voice_guard_drops_cp_event_when_voice_recent(self):
+        """2026-11-23：近期有 external text（语音应答）时，cp_hook 的 NE 事件被忽略。"""
+        played = []
+
+        async def fake_run(args):
+            played.append(args.get("query"))
+            return "ok"
+
+        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
+             mock.patch("core.tools.song_request.run", fake_run):
+            cch_click.note_voice_input()
+            cch_click._accept_event({"name": "发如雪", "artist": "周杰伦", "source": "NE"})
+            self.assertIsNone(cch_click._pending_task)
+        self.assertEqual(played, [], "近期语音时 cp_hook 事件须被 voice-guard 丢弃")
+
+    async def test_voice_guard_allows_cp_event_without_voice(self):
+        """无近期语音（触屏点击）时，cp_hook 的 NE 事件照常放行。"""
+        played = []
+
+        async def fake_run(args):
+            played.append(args.get("query"))
+            return "ok"
+
+        async def noop_resume():
+            return
+
+        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
+             mock.patch("core.tools.song_request.run", fake_run), \
+             mock.patch.object(cch_click, "_resume_if_paused", noop_resume):
+            cch_click._accept_event({"name": "发如雪", "artist": "周杰伦", "source": "NE"})
+            t = cch_click._pending_task
+            self.assertIsNotNone(t)
+            await asyncio.wait_for(t, timeout=2)
+        self.assertEqual(played, ["发如雪"], "无近期语音时 cp_hook 事件须放行")
 
 
 if __name__ == "__main__":

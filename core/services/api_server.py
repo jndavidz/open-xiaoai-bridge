@@ -1557,6 +1557,14 @@ class APIServer:
             f"backend={backend} source={payload.source or 'unknown'} "
             f"len={len(payload.text)} silent={payload.silent}"
         )
+        # 标记近期语音输入供 cch_click 的 voice-guard 用：cp_hook 在 WS 层无法区分
+        # 触屏点击 vs 云端语音应答，语音应答必有 external text ⇒ 近期语音时忽略 cp_hook
+        # 点击上报，避免与 LLM 点歌双链竞速（反复切歌）。
+        try:
+            from core.music import cch_click
+            cch_click.note_voice_input()
+        except Exception:  # noqa: BLE001 - 观测增强不阻塞会话
+            pass
 
         if payload.silent:
             # 等待本轮完成、随响应返回回复文本（CCH 屏显场景）；无服务端

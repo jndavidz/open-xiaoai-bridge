@@ -35,6 +35,21 @@ _RESUME_AFTER_S = 1.5    # design §2.7：起播后 1.5s 读 state，paused 补�
 # (ts, norm_name, norm_artist) 环形窗——每次主动点播（语音 + worker 自身）前登记
 _recent: deque = deque(maxlen=_DEDUPE_CAP)
 
+# 最近一次语音输入（external text / ASR）时间戳（2026-11-23）：cp_hook 在 WS 原始字节层
+# 无法区分「用户触屏点列表」与「云端对语音的 ContentPlay 应答」（两者 CP 结构相同）。
+# 判据：语音应答必有 external text，故 12s 内有语音输入时忽略 cp_hook 的 NE/KG 点击事件，
+# 让语音点歌走 LLM→song_request 单链；触屏点击（无近期语音）照常放行。
+_recent_voice_ts: float = 0.0
+_VOICE_GUARD_S = 12.0
+_CP_SOURCES = frozenset({"NE", "KG", "KWQQ", "KUGOU", "NETEASE", "QQ", "MIGU", "QIANQIAN"})
+
+
+def note_voice_input() -> None:
+    """由 /api/external/text 在收到 ASR 文本时调用，标记"近期有语音输入"。"""
+    global _recent_voice_ts
+    _recent_voice_ts = time.time()
+
+
 # 去抖状态：未决事件 + 其计时任务；播放链串行锁（song_request.run ~35s）
 _pending_ev: dict | None = None
 _pending_task: asyncio.Task | None = None
@@ -152,6 +167,14 @@ def _accept_event(ev: dict) -> None:
     #  不走云端 ContentPlay 故不上报）。票 23 曾无条件 drop 这些"云端回声"是因为那时历史 tab
     #  有 HIST 覆盖真意图；当前播放 tab 没有 HIST，drop 会致点击无声——改为靠 dedupe +
     #  note_recent_play（主动点播 8s 占窗）区分回声，无登记的用户点击放行。
+    # 【2026-11-23 语音应答误报循环修复】：cp_hook 无法在 WS 层区分触屏点击 vs 云端语音应答，
+    #  但语音应答必有 external text。近期有语音输入时 drop cp_hook 事件，避免与 LLM 点歌
+    #  双链竞速（"反复切歌"根因）；触屏点击（无近期语音）放行。
+    if source in _CP_SOURCES and (_recent_voice_ts > 0 and
+                                  time.time() - _recent_voice_ts < _VOICE_GUARD_S):
+        logger.info(f"[CchClick] recv name={name} src={source} action=drop(voice-guard)",
+                    module="CchClick")
+        return
     reason = dedupe(name, str(ev.get("artist") or ""))
     if reason:
         logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",
