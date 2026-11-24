@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""守门测试：播控页主标题 audioName =「歌名 - 歌手」（2026-11-23 用户定稿）。
+"""守门测试：播控页主标题 audioName =「歌手 - 歌名」（2026-11-24 用户更正，
+与全屏歌词页左下角格式一致）。
 
 被测 seam: _display_audio_name(name, singer, album) -> str （纯函数）
 规约（最终）：
-  - 歌名 + 歌手都在 → "歌名 - 歌手"（专辑参数忽略，用户要求不显示）
-  - 只有歌名 → "歌名"
+  - 歌手 + 歌名都在 → "歌手 - 歌名"（专辑参数忽略，用户要求不显示）
+  - 只有其一 → 该项本身
   - 空白项视为缺失
 真机背景：原厂标题控件不渲染 \n（注入 \n 被吞成空格，两行方案不可行），
-故单行；用户最终选「歌名 - 歌手」，不带专辑。meta 常为 None，靠 item 回退。
+故单行。meta 常为 None，靠 item 回退。
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ def load_fn(path):
 
 
 def test_full_ignores_album():
-    assert fn("晴天", "周杰伦", "叶惠美") == "晴天 - 周杰伦"
+    assert fn("晴天", "周杰伦", "叶惠美") == "周杰伦 - 晴天"
 
 
 def test_no_singer():
@@ -44,15 +45,15 @@ def test_none_values():
     assert fn("晴天", None, None) == "晴天"
 
 
-def test_singer_only_no_album_variants():
-    assert fn("稻香", "周杰伦", None) == "稻香 - 周杰伦"
+def test_both_present_no_album():
+    assert fn("稻香", "周杰伦", None) == "周杰伦 - 稻香"
 
 
 if __name__ == "__main__":
     p = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT)
     fn = load_fn(p)
     tests = [test_full_ignores_album, test_no_singer, test_whitespace,
-             test_none_values, test_singer_only_no_album_variants]
+             test_none_values, test_both_present_no_album]
     failures = 0
     for t in tests:
         try:

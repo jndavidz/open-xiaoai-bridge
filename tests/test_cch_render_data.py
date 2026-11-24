@@ -26,6 +26,27 @@ class RenderDataTest(unittest.TestCase):
         )
         self.assertEqual("http://meta.jpg", rd["backgroundImage"])
 
+    def test_source_logo_filled_by_platform(self):
+        """§2.77-53：播控页平台图标由 sourceLogo/sourceLogoColor 驱动，真机原厂曲
+        按平台下发 alicdn logo URL；注入曲写死空串导致左上角无平台标。按 item 真实
+        平台填入有实证的 logo URL（酷狗蓝K/网易云方标），让播控页显示平台角标。"""
+        rd = cch_cast.build_render_data(
+            "http://ticket/1.mp3",
+            {"name": "晴天", "artist": "周杰伦", "source": "kugou"},
+            {},
+        )
+        self.assertTrue(rd["sourceLogo"].startswith("https://img.alicdn.com/"),
+                        "酷狗应填 sourceLogo URL")
+        self.assertTrue(rd["sourceLogoColor"].startswith("https://img.alicdn.com/"),
+                        "酷狗应填 sourceLogoColor URL")
+        # 未知平台/无 source → 保持空串（fail-open，不显示图标）
+        rd2 = cch_cast.build_render_data(
+            "http://ticket/1.mp3",
+            {"name": "晴天", "artist": "周杰伦", "source": "unknown_src"}, {},
+        )
+        self.assertEqual("", rd2["sourceLogo"])
+        self.assertEqual("", rd2["sourceLogoColor"])
+
     def test_audio_length_uses_duration_s_from_kwqq_meta(self):
         """§2.77-49：kwqq-api /song/info 返回 duration_s（秒），不是 duration——
         build_render_data 必须读 duration_s 兜底，否则 audioLength 写死 0、屏上不显示时长。"""

@@ -109,10 +109,14 @@ def queue_payload(items: list) -> str:
             duration = int(float(item.get("duration_s") or 0))
         except (TypeError, ValueError):
             duration = 0
+        artist = str(item.get("artist") or item.get("singer") or "")
+        album = str(item.get("album") or "")
         out.append({
             "name": name,
-            "artist": str(item.get("artist") or item.get("singer") or ""),
-            "album": str(item.get("album") or ""),
+            # §2.77-53：当前播放 tab 歌手位（QueueWriter artist）同样显示「歌手-《专辑》-平台」，
+            # 与收藏/历史 tab 一致。name/id/source 保持原值（点播链关键字段，不能污染）。
+            "artist": artist_label(artist, str(item.get("source") or ""), album),
+            "album": album,
             "cover": str(item.get("cover") or ""),
             "source": str(item.get("source") or ""),
             "id": sid,
@@ -308,12 +312,43 @@ def _fav_cover(img: str) -> dict:
             "displayRatio": None, "verticalLarge": None, "horizontalLarge": None}
 
 
-def _fav_authors(artist: str, source: str) -> list:
-    """原厂 authors[] 壳——UI 的**歌手列取这里**（song.singer 恒 null）。"""
+# 门面/插件 source → 平台显示名（§2.77-53，与 Songloft 后端 platform_name、Flutter kSongPlatformNames 对齐）
+_PLATFORM_LABEL = {
+    "kugou": "酷狗", "netease": "网易云", "qq": "QQ", "kuwo": "酷我",
+    "migu": "咪咕", "qianqian": "千千", "bilibili": "哔哩哔哩",
+}
+
+
+def _platform_label(source: str) -> str:
+    """平台标识 → 中文名；未知/聚合伪源（kwqq）返回空串。"""
+    return _PLATFORM_LABEL.get(str(source or "").strip().lower(), "")
+
+
+def artist_label(artist: str, source: str, album: str = "") -> str:
+    """歌手显示名 =「歌手-《专辑》-平台」（§2.77-53）。空专辑省略《》段，
+    未知/聚合伪源省略平台段。收藏/历史列表（authors[]）与当前播放队列（QueueWriter
+    artist 位）三处共用，保证三个 tab 显示一致。"""
     a = str(artist or "").strip()
     if not a:
+        return ""
+    parts = [a]
+    al = str(album or "").strip()
+    if al:
+        parts.append("《%s》" % al)
+    plat = _platform_label(source)
+    if plat:
+        parts.append(plat)
+    return "-".join(parts)
+
+
+def _fav_authors(artist: str, source: str, album: str = "") -> list:
+    """原厂 authors[] 壳——UI 的**歌手列取这里**（song.singer 恒 null）。
+    标题走 artist_label（歌手-《专辑》-平台）。
+    """
+    title = artist_label(artist, source, album)
+    if not title:
         return []
-    return [{"rawId": "", "source": source, "order": 0, "id": 0, "title": a,
+    return [{"rawId": "", "source": source, "order": 0, "id": 0, "title": title,
              "alias": None, "cleanTitle": None, "description": None,
              "isOnline": True, "type": "program", "isAudition": None,
              "gender": {"name": "DEFAULT"},
@@ -401,7 +436,7 @@ def favorite_item_schema(songs: list) -> list:
             "itemType": {"name": "CONTENT"},
             "valid": {"name": "VALID"},
             "cover": _fav_cover(cover),
-            "authors": _fav_authors(artist, src),
+            "authors": _fav_authors(artist, src, album),
             "albumItem": ({"id": 0, "rawId": "0", "source": src, "title": album,
                            "category": "audio", "type": "music", "isCharge": False,
                            "isAudition": False, "copyright": 0, "boughtStatus": False,

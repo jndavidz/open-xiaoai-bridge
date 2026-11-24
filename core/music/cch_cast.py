@@ -26,6 +26,21 @@ from core.utils.logger import logger
 _PREPARE_TIMEOUT_S = 120
 _PREPARE_POLL_S = 2
 
+# 平台角标 logo（§2.77-53）：真机原厂曲按平台下发 alicdn logo URL，播控页专辑图左上角
+# 显示平台标（如酷狗蓝 K）。我方注入曲原写死空 sourceLogoColor → 无图标。这里按门面
+# source 填入有实证的 URL（取自 2026-11-19 真机 logcat 原厂 KG/NE 曲）。仅酷狗/网易云
+# 有实证，其它平台留空（fail-open，不显示图标）。阿里若更换 CDN 资源需更新此表。
+_SOURCE_LOGO = {
+    "kugou": (
+        "https://img.alicdn.com/imgextra/i4/O1CN01aOVy5V1p04l4B3uLI_!!6000000005297-2-tps-129-126.png",
+        "https://img.alicdn.com/imgextra/i3/O1CN01IWsS701QHbW4710Ls_!!6000000001951-2-tps-228-60.png",
+    ),
+    "netease": (
+        "https://img.alicdn.com/imgextra/i2/O1CN01gaAk3N1t290QkFYHf_!!6000000005843-2-tps-231-234.png",
+        "https://img.alicdn.com/imgextra/i3/O1CN01tAJ0I51kkGWEgfemo_!!6000000004721-2-tps-41-41.png",
+    ),
+}
+
 
 def _cfg(key: str, default=None):
     """读 song_request 配置段（与 song_bridge 同源）。"""
@@ -246,12 +261,12 @@ async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
 
 
 def _display_audio_name(name: str, singer: str, album: str = "") -> str:
-    """播控页主标题 =「歌名 - 歌手」（2026-11-23 用户定稿，专辑不显示）。
-    原厂标题控件不渲染 \n（注入被吞成空格），故单行；歌手缺失时只显示歌名。
-    album 参数保留兼容调用点，但不再拼进标题。"""
+    """播控页主标题 =「歌手 - 歌名」（2026-11-24 用户更正，与全屏歌词页左下角一致）。
+    原厂标题控件不渲染 \n（注入被吞成空格），故单行；缺失其一则只显示另一项。
+    album 参数保留兼容调用点，但不拼进标题。"""
     n = str(name or "").strip()
     s = str(singer or "").strip()
-    return f"{n} - {s}" if (n and s) else (n or s)
+    return f"{s} - {n}" if (n and s) else (n or s)
 
 
 def build_render_data(ticket_url: str, item: dict, meta: dict,
@@ -278,6 +293,10 @@ def build_render_data(ticket_url: str, item: dict, meta: dict,
     except (TypeError, ValueError):
         duration = 0
     sid = str(meta.get("id") or item.get("id") or "")
+    # 平台角标（§2.77-53）：按 item 真实平台（门面 source_data.s）填 logo；
+    # renderData 的 source/audioSource 仍写 KWQQ（内核标识，无白名单校验，不能动）。
+    source_logo, source_logo_color = _SOURCE_LOGO.get(
+        str(item.get("source") or "").strip().lower(), ("", ""))
     audio_ext = json.dumps({
         "audioAnchor": singer, "audioType": "music", "audioSource": "KWQQ",
         "EnableNetDX": "true", "identifyStatus": 0, "playSpeedStatus": 0,
@@ -299,7 +318,9 @@ def build_render_data(ticket_url: str, item: dict, meta: dict,
         "toast": "", "audioName": _display_audio_name(name, singer, album),
         "collect": False, "template": "",
         "albumName": album, "audioExt": audio_ext,
-        "requestType": "create", "itemType": "music", "sourceLogoColor": "",
+        "requestType": "create", "itemType": "music",
+        # 平台角标：真机原厂曲按平台下发这两个字段，播控页封面左上角显示平台标。
+        "sourceLogo": source_logo, "sourceLogoColor": source_logo_color,
         "audioLength": duration,
     }
 

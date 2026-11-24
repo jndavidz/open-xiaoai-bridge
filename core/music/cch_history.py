@@ -75,7 +75,7 @@ def history_item_schema(items: list) -> list:
             "sourceIcon": None, "playUrls": [], "bindingSourceList": None,
             "extendInfo": None, "itemType": {"name": "CONTENT"},
             "valid": {"name": "VALID"}, "cover": _fav_cover(cover),
-            "authors": _fav_authors(artist, src),
+            "authors": _fav_authors(artist, src, album),
             "firstType": "content-audio", "secondType": "music",
             "timeStamp": None, "currentPlay": None, "offline": False,
             "url": None, "revealLabel": None,

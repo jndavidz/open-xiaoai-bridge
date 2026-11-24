@@ -683,7 +683,9 @@ async def _run_cch(action: str, args: dict) -> str:
             logger.warning(f"[SongRequest] cch queue push failed: {type(exc).__name__}",
                            module="SongRequest")
         suppress_reply()   # kwqq 源已起播：本轮收尾 TTS 不得顶掉它
-        name = str(render_data.get("audioName") or "歌曲")
+        # §2.77-53：audioName 已改为「歌手 - 歌名」（屏显用），播报不能用它（会念成
+        # 《周杰伦 - 晴天》）；用门面 item 的原曲名播报。
+        name = str(item.get("name") or render_data.get("audioName") or "歌曲")
         return f"已在 CCH 上为你播放《{name}》（队列 {len(items)} 首）"
 
     # CCH 主动投送默认关闭（票 16/17 的 D 方向裁决）：原厂 = 唯一播放器，bridge = 控制/状态端。
