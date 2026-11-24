@@ -28,7 +28,6 @@ import asyncio
 import json
 import re
 import time
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -863,19 +862,10 @@ async def _pick_url(session, source: str, item: dict) -> str | None:
             f"(dur={dur}s size={size}); skipped"
         )
         return None
-    # CCH Apollo 解码兼容（2026-11-23 VERIFIED）：QQ 源 m4a 全曲虽能被 FFmpeg 打开并
-    # open audio track，但随即进入 `MediaPlayer.cpp error state:2` → 无声；同曲酷狗 mp3
-    # 320k 正常。拒收 m4a(.m4a/.mp4)，让换候选逻辑回退到有 mp3 的版本。
-    try:
-        _path = urlparse(str(url)).path.lower()
-    except Exception:  # noqa: BLE001 - 解析失败按原 URL 放行（旧行为）
-        _path = ""
-    if _path.endswith((".m4a", ".mp4", ".aac")):
-        logger.warning(
-            f"[SongRequest] {source} item {item.get('id')} unsupported m4a/mp4 for CCH "
-            f"({_path[-24:]}); skipped for candidate fallback"
-        )
-        return None
+    # 2026-11-24 勘误：撤销此前对 m4a/mp4 的拒收——真机对照证实 Apollo 原生支持该 QQ
+    # m4a（gate 关闭时 openInput rv=0 + first render size:3768），此前无声的真凶是本方
+    # CCHApolloGate 白名单拦截白名单外直链（facts §2.77-40 勘误注记）。gate 已放行
+    # isure6.stream.qqmusic.qq.com，m4a 直链可直接播；_try_item 仍票据链优先。
     return url
 
 

@@ -172,7 +172,8 @@ class LyricContentTest(unittest.TestCase):
 
 
 class PickUrlFormatTest(unittest.IsolatedAsyncioTestCase):
-    """CCH Apollo 兼容：拒收 m4a/mp4 直链（error state:2 无声），收 mp3。"""
+    """取链格式：2026-11-24 勘误后 m4a 不再拒收（Apollo 支持，gate 已放行 QQ 域名）；
+    预览/ekey 仍按既有判据拒收。"""
 
     async def _pick(self, url):
         async def fake_api(session, path, params):
@@ -180,9 +181,9 @@ class PickUrlFormatTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(sr, "_api", fake_api):
             return await sr._pick_url(_FakeSession(), "qq", {"id": "X", "source": "kugou"})
 
-    async def test_m4a_rejected(self):
-        self.assertIsNone(await self._pick(
-            "https://isure6.stream.qqmusic.qq.com/C600002XrpfT0qvNMt.m4a?guid=1"))
+    async def test_m4a_accepted(self):
+        url = "https://isure6.stream.qqmusic.qq.com/C600002XrpfT0qvNMt.m4a?guid=1"
+        self.assertEqual(await self._pick(url), url)
 
     async def test_mp3_accepted(self):
         self.assertEqual(await self._pick(
