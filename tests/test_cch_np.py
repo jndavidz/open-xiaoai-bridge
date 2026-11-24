@@ -292,7 +292,8 @@ class SpeakResumeTest(CchNpTestBase):
 
 class CollectFavoriteTest(CchNpTestBase):
     """票 13（2026-11-21 裁决）：收藏只写 Songloft，屏蔽原厂 tap。
-    当前曲来源 = 设备侧 current_song.json（经 9102），这里 mock current_song。"""
+    当前曲真相源 = 内存队列 _cch_state.items[entry]（§2.77-51，点播即时），设备侧
+    current_song.json 仅兜底；测试里 mock current_song 模拟兜底路径。"""
 
     def setUp(self):
         super().setUp()
@@ -365,9 +366,40 @@ class CollectFavoriteTest(CchNpTestBase):
         self.assertEqual(["R1"], calls["ensure"])
         self.assertEqual(1, calls["push"], "added 后应 fire push_favorites（票 25）")
 
+    async def test_queue_item_is_authoritative_over_stale_current_song(self):
+        """§2.77-51 时序修复：current_song.json 由 worker 15s 轮询写，点播后立即收藏
+        时它停在旧歌；内存队列 _cch_state.items[entry] 点播即时更新，必须以队列为权威，
+        否则收藏写错歌（真机已复现：播风吹麦浪收藏成晴天）。"""
+        # 滞后的设备侧数据：旧歌《晴天》
+        self._cur_song = {"name": "晴天 - 周杰伦", "id": "B3A52OLD",
+                          "source": "KWQQ", "artist": "周杰伦"}
+        # 准确的内存队列：当前播放《风吹麦浪》
+        sr._cch_state.update({"entry": 0, "items": [{
+            "id": "24A3E862", "source": "kugou", "name": "风吹麦浪",
+            "artist": "李健", "album": "想念你",
+            "cover": "http://imge.kugou.com/stdmusic/400/feng.jpg",
+            "duration_s": 247,
+        }]})
+        calls, patches = self._patches(added=1)
+        for p in patches:
+            p.start()
+        try:
+            result = await cch_np.collect_favorite(True)
+            await asyncio.sleep(0)  # 让 ensure_future 的 favfile 同步 task 跑完一轮
+        finally:
+            for p in patches:
+                p.stop()
+            sr._cch_state.update({"entry": 0, "items": []})
+        self.assertEqual("added", result["action"])
+        written = calls["ensure_items"][0]
+        self.assertEqual(["24A3E862"], calls["ensure"], "必须收藏队列里的当前曲，不是滞后的晴天")
+        self.assertEqual("风吹麦浪", written.get("name"))
+        self.assertEqual("http://imge.kugou.com/stdmusic/400/feng.jpg", written.get("cover"))
+        self.assertEqual("kugou", written.get("source"))
+
     async def test_cover_from_cch_queue_item(self):
-        """§2.77-51：CCH 收藏必须把门面搜索结果里的原图 cover + 真实 source
-        补进写入项（与手机 App toRemotePayload 同格式），否则 Songloft 存空
+        """§2.77-51：CCH 收藏以内存队列门面 item 为写入项，其原图 cover + 真实
+        source 直接落库（与手机 App toRemotePayload 同格式），否则 Songloft 存空
         cover_url → 无封面。current_song.json 只有虚化图/伪源，不能作为封面源。"""
         # current_song() 返回的设备侧数据：无 cover、伪源（模拟现状）
         self._cur_song = {"name": "晴天 - 周杰伦", "id": "B3A52A7A958B",
@@ -384,6 +416,7 @@ class CollectFavoriteTest(CchNpTestBase):
             p.start()
         try:
             result = await cch_np.collect_favorite(True)
+            await asyncio.sleep(0)  # 让 ensure_future 的 favfile 同步 task 跑完一轮
         finally:
             for p in patches:
                 p.stop()

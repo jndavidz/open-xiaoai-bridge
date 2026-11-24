@@ -326,8 +326,9 @@ async def apply_favorite(item: dict, intent: bool, playlist_id=None) -> dict:
 
 
 async def current_song() -> dict | None:
-    """设备侧当前曲（票 13 架构）：经 9102 currentsong 读 CCH tap_hook 写的
-    current_song.json——设备域唯一当前曲真相源。语音收藏与屏上爱心收藏共用此来源。
+    """设备侧当前曲（票 13 架构）：经 9102 currentsong 读 capture worker 写的
+    current_song.json——15s 轮询、滞后，仅作收藏的设备侧兜底源（§2.77-51）：
+    常态真相源是内存队列 _cch_state.items[entry]（见 _current_from_cch_queue）。
     文件不存在/未就绪 → None（fail-open）。"""
     from core.music import cch_cast
 
@@ -341,53 +342,58 @@ async def current_song() -> dict | None:
     return None
 
 
-def _enrich_from_cch_queue(song: dict) -> dict:
-    """从 bridge 内存队列 _cch_state.items 里按 id 找当前曲的门面 item，补回
-    current_song.json 丢失的两个字段：原图 cover + 真实平台 source（§2.77-51）。
+def _current_from_cch_queue() -> dict | None:
+    """收藏的当前曲真相源 = bridge 内存队列 entry 位置的门面 item（§2.77-51）。
 
-    current_song.json 由设备侧 capture worker 从 ContentPlay log 提取，cover 是虚化
-    背景图（/api/cch/bg/）、source 是伪源 KWQQ——直接写进 Songloft 会导致收藏曲无
-    封面。门面搜索结果的完整 item（cover=原图、source=真实平台）在点播时已存入
-    _cch_state.items，收藏时按 id 取回，与手机 App toRemotePayload 写入格式一致。
-    失败/不匹配时原样返回 song（fail-open，不阻塞收藏）。"""
+    current_song.json 由 worker 15s 轮询写，点播后立即收藏会停在旧歌（真机已复现
+    「播风吹麦浪收藏成晴天」）；而 _cch_state.items 在点播时即时更新，item 携带门面
+    完整字段（id/name/artist/album/cover 原图/source 真实平台/duration_s）——与手机
+    App toRemotePayload 写入格式一致。故收藏以队列 item 为权威，current_song 仅兜底。
+    队列空/异常 → None，由调用方回退设备侧 current_song。"""
     try:
         from core.tools import song_request as sr
 
-        rid = str(song.get("id") or "").strip()
         items = sr._cch_state.get("items") or []
-        if not rid or not items:
-            return song
+        if not items:
+            return None
         entry = int(sr._cch_state.get("entry", 0))
-        # 优先当前 entry，再全队列按 id 找（容忍队列重排/换代）
-        candidates = ([items[entry]] if 0 <= entry < len(items) else []) + list(items)
-        hit = next((it for it in candidates
-                    if str(it.get("id") or "").strip() == rid), None)
-        if not hit:
-            logger.debug(f"[CchNp] enrich cover: no queue item for id={rid}, keep device data",
-                         module="CchNp")
-            return song
-        enriched = dict(song)
-        cover = str(hit.get("cover") or "").strip()
-        # 只当门面 cover 是真原图（http(s) 外部 URL，非虚化图）时才覆盖
-        if cover.startswith("http://") or cover.startswith("https://"):
-            enriched["cover"] = cover
-        source = str(hit.get("source") or "").strip()
-        if source:
-            enriched["source"] = source
-        logger.debug(f"[CchNp] enrich cover: id={rid} cover={bool(enriched.get('cover'))} "
-                     f"source={enriched.get('source')}", module="CchNp")
-        return enriched
-    except Exception as exc:  # noqa: BLE001 - 队列增强是体验优化，失败不阻塞收藏
-        logger.debug(f"[CchNp] enrich cover failed: {type(exc).__name__}", module="CchNp")
+        if not (0 <= entry < len(items)):
+            entry = 0
+        item = items[entry]
+        if not isinstance(item, dict) or not str(item.get("id") or "").strip():
+            return None
+        # ensure_song 消费的字段集：name/artist/singer/album/cover/source/id/duration_s
+        cover = str(item.get("cover") or "").strip()
+        # scheme 守卫（纵深防御）：只接受门面原图 http(s) URL，拒绝相对路径/虚化图
+        # （/api/cch/bg/）——后者写进 Songloft 会变成无效封面。
+        if not (cover.startswith("http://") or cover.startswith("https://")):
+            cover = ""
+        song = {
+            "id": str(item.get("id") or "").strip(),
+            "name": str(item.get("name") or "").strip(),
+            "source": str(item.get("source") or "").strip(),
+            "artist": str(item.get("artist") or item.get("singer") or "").strip(),
+            "album": str(item.get("album") or "").strip(),
+            "cover": cover,
+            "duration_s": float(item.get("duration_s") or 0),
+        }
+        if not song["name"] or not song["source"]:
+            return None
+        logger.debug(f"[CchNp] collect current from queue: id={song['id']} "
+                     f"source={song['source']} cover={bool(song['cover'])}", module="CchNp")
         return song
+    except Exception as exc:  # noqa: BLE001 - 队列读取失败回退设备侧 current_song
+        logger.debug(f"[CchNp] queue current read failed: {type(exc).__name__}", module="CchNp")
+        return None
 
 
 async def collect_favorite(intent: bool, playlist_id=None) -> dict:
-    """收藏（票 13）：当前曲从设备侧 current_song.json 读（经 9102），写入走统一
-    apply_favorite。语音 cch_collect 与屏上爱心 cch_click 都调用本函数——同一当前曲源、
-    同一写入实现。§2.77-51：从内存队列补门面原图 cover + 真实 source（与手机 App 同格式）。"""
-    song = await current_song()
+    """收藏（票 13）：以内存队列 entry item 为当前曲真相源（§2.77-51，点播即时准确），
+    设备侧 current_song.json（worker 15s 轮询，滞后）仅在队列空时兜底。写入走统一
+    apply_favorite——语音 cch_collect 与屏上爱心 cch_click 同一入口同一实现。"""
+    song = _current_from_cch_queue()
+    if song is None:
+        song = await current_song()
     if not song or not song.get("id") or not song.get("source"):
         return {"action": "no_track", "favorite": None}
-    song = _enrich_from_cch_queue(song)
     return await apply_favorite(song, intent, playlist_id)
