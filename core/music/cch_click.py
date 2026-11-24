@@ -49,6 +49,11 @@ _CP_SOURCES = frozenset({"NE", "KG", "KWQQ", "KUGOU", "NETEASE", "QQ", "MIGU", "
 _recent_favclick_ts: float = 0.0
 _FAVCLICK_GUARD_S = 3.0
 
+# 屏上播放键去抖（§2.77 四问题①）：同一次点击两种 tag 各打一条 playOrPause error →
+# 两条 PLAYTOGGLE spool；1s 内重复直接丢弃，防并发 toggle 两次翻转回原状。
+_recent_playtoggle_ts: float = 0.0
+_PLAYTOGGLE_DEBOUNCE_S = 1.0
+
 
 def note_voice_input() -> None:
     """由 /api/external/text 在收到 ASR 文本时调用，标记"近期有语音输入"。"""
@@ -148,6 +153,31 @@ async def _heart_collect(ev: dict) -> None:
     logger.info(f"[CchClick] HEART {result.get('action')} intent={intent}", module="CchClick")
 
 
+async def _playtoggle(ev: dict) -> None:
+    """屏上播放/暂停键（source=PLAYTOGGLE）：读实时播放态后反向切换。
+
+    原厂 playOrPause 因内核无我方数据源失败（tap_hook 抓 error 上报），控制走 CCH 的
+    M5 in-process 通道（cch_cast.host_cmd），播放态取 cch_np.snapshot() 的 statusStr
+    ——与 _resume_if_paused 同通道。**绝不用 speaker（那是 LX06 设备能力层）**。
+    toggle：statusStr=play → pause；pause/paused → resume；读不出 → fail-open（不动）。
+    """
+    from core.music import cch_cast, cch_np
+
+    st = (cch_np.snapshot().get("state") or {})
+    status = str((st.get("extras") or {}).get("statusStr") or "").lower()
+    if status == "play":
+        cmd = "pause"
+    elif status in ("pause", "paused"):
+        cmd = "resume"
+    else:
+        logger.warning(f"[CchClick] playtoggle state unreadable ({status!r}), skip",
+                       module="CchClick")
+        return
+    ok, detail = await cch_cast.host_cmd(cmd)
+    logger.info(f"[CchClick] playtoggle {status} -> {cmd} ok={ok} detail={detail}",
+                module="CchClick")
+
+
 def _accept_event(ev: dict) -> None:
     """事件入口（worker 拉取循环调用，同步）：源准入 → 去重 → 去抖 last-tap-wins。
 
@@ -156,7 +186,7 @@ def _accept_event(ev: dict) -> None:
     （HIST 已覆盖真意图），要么是语音搜索结果（语音链自己会播，worker 再播 =
     双链竞速「先后两个页面只播后一个」）。
     """
-    global _pending_ev, _pending_task, _recent_favclick_ts
+    global _pending_ev, _pending_task, _recent_favclick_ts, _recent_playtoggle_ts
     name = str(ev.get("name") or "")
     source = str(ev.get("source") or "")
     # 票 13 动作面：播放页爱心点击由 :business tap_hook 写 source=HEART_LIKE/HEART_UNLIKE
@@ -166,7 +196,18 @@ def _accept_event(ev: dict) -> None:
         logger.info(f"[CchClick] HEART recv src={source} -> collect_favorite", module="CchClick")
         asyncio.create_task(_heart_collect(ev))
         return
-    # 源准入：HEART 已在上面 return；其余 source 都走 dedupe 判定。
+    # 屏上播放/暂停键（§2.77 四问题①）：tap_hook 抓 playOrPause error → PLAYTOGGLE spool。
+    # 读实时播放态反向切（speaker 控制通道），不走点播去抖链。
+    if source == "PLAYTOGGLE":
+        now = time.time()
+        if now - _recent_playtoggle_ts < _PLAYTOGGLE_DEBOUNCE_S:
+            logger.info("[CchClick] PLAYTOGGLE drop(debounce)", module="CchClick")
+            return
+        _recent_playtoggle_ts = now
+        logger.info("[CchClick] PLAYTOGGLE recv -> playtoggle", module="CchClick")
+        asyncio.create_task(_playtoggle(ev))
+        return
+    # 源准入：HEART / PLAYTOGGLE 已在上面 return；其余 source 都走 dedupe 判定。
     #  HIST = 历史 tab（title+createList join）；CLICK = tap_hook 抓的 PlayByIndex+ContentPlay
     #  （gate 漏拦时才有 App 日志，属冗余）；NE/KG/KWQQ... = cp_hook 在 :core 拦截云端
     #  ContentPlay 时提取（2026-11-23 VERIFIED：用户点当前播放列表时稳定上报，bridge 点播
