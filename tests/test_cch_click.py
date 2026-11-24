@@ -450,50 +450,18 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(played, ["爱你一万年"], "FAVCLICK 正确点播")
 
 
-    async def test_playtoggle_pauses_when_playing(self):
-        """§2.77 四问题①：CCH 当前播放中点播放键 → host_cmd("pause")。"""
+    async def test_playtoggle_sends_toggle_cmd(self):
+        """§2.77 四问题①：播放键 → host_cmd("toggle")（设备侧原子翻转，桥侧零状态读取）。"""
         calls = []
 
         async def fake_host_cmd(cmd):
             calls.append(cmd)
             return True, "OK"
 
-        snap = {"state": {"extras": {"statusStr": "play"}}}
-        with mock.patch("core.music.cch_np.snapshot", return_value=snap), \
-             mock.patch("core.music.cch_cast.host_cmd", fake_host_cmd), \
+        with mock.patch("core.music.cch_cast.host_cmd", fake_host_cmd), \
              mock.patch("core.music.cch_click.logger"):
             await cch_click._playtoggle({"source": "PLAYTOGGLE"})
-        self.assertEqual(calls, ["pause"], "CCH play → pause")
-
-    async def test_playtoggle_resumes_when_paused(self):
-        """CCH 当前暂停中点播放键 → host_cmd("resume")。"""
-        calls = []
-
-        async def fake_host_cmd(cmd):
-            calls.append(cmd)
-            return True, "OK"
-
-        snap = {"state": {"extras": {"statusStr": "pause"}}}
-        with mock.patch("core.music.cch_np.snapshot", return_value=snap), \
-             mock.patch("core.music.cch_cast.host_cmd", fake_host_cmd), \
-             mock.patch("core.music.cch_click.logger"):
-            await cch_click._playtoggle({"source": "PLAYTOGGLE"})
-        self.assertEqual(calls, ["resume"], "CCH pause → resume")
-
-    async def test_playtoggle_failopen_when_unreadable(self):
-        """读不出 CCH 播放态 → 不动作（fail-open）。"""
-        calls = []
-
-        async def fake_host_cmd(cmd):
-            calls.append(cmd)
-            return True, "OK"
-
-        snap = {"state": {"extras": {"statusStr": ""}}}
-        with mock.patch("core.music.cch_np.snapshot", return_value=snap), \
-             mock.patch("core.music.cch_cast.host_cmd", fake_host_cmd), \
-             mock.patch("core.music.cch_click.logger"):
-            await cch_click._playtoggle({"source": "PLAYTOGGLE"})
-        self.assertEqual(calls, [], "读不出态 → 不动作")
+        self.assertEqual(calls, ["toggle"], "必须下发设备侧 toggle 命令")
 
     async def test_playtoggle_debounce_drops_duplicate(self):
         """同一次点击两条 PLAYTOGGLE spool（两种 tag）→ 1s 内第二条丢弃，只调一次 _playtoggle。"""
@@ -502,17 +470,17 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
              mock.patch("core.music.cch_click.logger"):
             cch_click._accept_event({"source": "PLAYTOGGLE"})
             cch_click._accept_event({"source": "PLAYTOGGLE"})  # 立即第二条 → 去抖 drop
-            await asyncio.sleep(0)  # 让 create_task 的 coroutine 跑起来
+            await asyncio.sleep(0)
         self.assertEqual(pt.await_count, 1, "两条 spool 只触发一次 _playtoggle")
 
-    def test_playtoggle_uses_cch_channel_not_speaker(self):
-        """守门：_playtoggle 走 CCH 通道（cch_cast.host_cmd），不碰 LX06 speaker。"""
+    def test_playtoggle_uses_host_cmd_toggle(self):
+        """守门：_playtoggle 只发 host_cmd("toggle")，不读状态、不碰 speaker/cch_np。"""
         import inspect
-        import core.music.cch_click as cc
-        src = inspect.getsource(cc._playtoggle)
-        self.assertIn("host_cmd", src, "必须用 cch_cast.host_cmd（CCH M5 通道）")
-        self.assertNotIn("get_speaker", src, "禁止调 get_speaker（LX06 设备能力层）")
-        self.assertNotIn("set_playing", src, "禁止调 set_playing（LX06 设备能力层）")
+        src = inspect.getsource(cch_click._playtoggle)
+        self.assertIn('host_cmd("toggle")', src, "必须调 cch_cast.host_cmd('toggle')")
+        self.assertNotIn("get_speaker", src, "禁止 LX06 speaker")
+        self.assertNotIn("cch_np.", src, "禁止桥侧读状态")
+        self.assertNotIn("current_song", src, "禁止桥侧读状态")
 
 
 if __name__ == "__main__":

@@ -154,27 +154,18 @@ async def _heart_collect(ev: dict) -> None:
 
 
 async def _playtoggle(ev: dict) -> None:
-    """屏上播放/暂停键（source=PLAYTOGGLE）：读实时播放态后反向切换。
+    """屏上播放/暂停键（source=PLAYTOGGLE）：设备侧原子 toggle，桥侧零状态读取。
 
-    原厂 playOrPause 因内核无我方数据源失败（tap_hook 抓 error 上报），控制走 CCH 的
-    M5 in-process 通道（cch_cast.host_cmd），播放态取 cch_np.snapshot() 的 statusStr
-    ——与 _resume_if_paused 同通道。**绝不用 speaker（那是 LX06 设备能力层）**。
-    toggle：statusStr=play → pause；pause/paused → resume；读不出 → fail-open（不动）。
+    原厂 playOrPause 因内核无我方数据源失败（tap_hook 抓 error 上报）。控制走 CCH 的
+    M5 in-process 通道（cch_cast.host_cmd("toggle")）——设备侧 HostBootstrap 用
+    isPlaying ? pause : resume 原子翻转，桥侧只读命令结果、不接触播放态存储。
     """
-    from core.music import cch_cast, cch_np
+    from core.music import cch_cast
 
-    st = (cch_np.snapshot().get("state") or {})
-    status = str((st.get("extras") or {}).get("statusStr") or "").lower()
-    if status == "play":
-        cmd = "pause"
-    elif status in ("pause", "paused"):
-        cmd = "resume"
-    else:
-        logger.warning(f"[CchClick] playtoggle state unreadable ({status!r}), skip",
-                       module="CchClick")
-        return
-    ok, detail = await cch_cast.host_cmd(cmd)
-    logger.info(f"[CchClick] playtoggle {status} -> {cmd} ok={ok} detail={detail}",
+    # 设备侧 M5 原子 toggle（HostBootstrap.dispatch "toggle" = isPlaying ? pause : resume），
+    # 桥侧零状态读取。
+    ok, detail = await cch_cast.host_cmd("toggle")
+    logger.info(f"[CchClick] playtoggle -> host_cmd(toggle) ok={ok} detail={detail}",
                 module="CchClick")
 
 
