@@ -416,11 +416,22 @@ async def _run_cch(action: str, args: dict) -> str:
             except Exception as exc:  # noqa: BLE001 - 早停失败不阻塞后续
                 logger.warning(f"[SongRequest] cch early stop failed: {type(exc).__name__}",
                                module="SongRequest")
-        items = await _managed_collect(
-            query, args.get("source"),
-            artist=str(args.get("artist") or "").strip(),
-            album=(action == "album"),
-        )
+        raw_id = str(args.get("raw_id") or "").strip()
+        if raw_id and action == "play":
+            # FAVCLICK 源头真相源（§2.77-57）：native 从点击日志带 rawID+平台，
+            # 直接构造 item 跳过按标题/_managed_collect 重搜——精确命中收藏曲版本
+            # （同名曲靠 rawID 区分）+ 平台角标正确（source 来自真实平台）。
+            src = str(args.get("source") or "").strip().lower()
+            items = [{"id": raw_id, "source": src, "name": query,
+                      "artist": str(args.get("artist") or ""), "extra": {}}]
+            logger.info(f"[SongRequest] cch rawID direct: id={raw_id} src={src} name={query!r}",
+                        module="SongRequest")
+        else:
+            items = await _managed_collect(
+                query, args.get("source"),
+                artist=str(args.get("artist") or "").strip(),
+                album=(action == "album"),
+            )
         if not items:
             return f"没有找到能播放的曲目《{query}》"
         item = items[0]

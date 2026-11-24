@@ -261,11 +261,40 @@ def _debounce_s() -> float:
         return _DEBOUNCE_DEFAULT_S
 
 
+# 收藏栏标题「歌名-《专辑》-平台」仅作展示清洗（剥出纯歌名用于播报/兜底/占窗）——
+# 不再从标题解析平台：平台/rawID 由 native tap_hook 从点击日志源头带进 spool（§2.77-57），
+# 用真相源点播，避免「用 UI 显示格式传数据」的脆弱耦合。
+_FAV_TITLE_RE = re.compile(r"^(.+)-《[^》]*》-(.+)$")
+
+
+def clean_fav_name(name: str) -> str:
+    """「歌名-《专辑》-平台」→ 纯歌名；非该格式原样返回。仅展示清洗，不承担平台传递。"""
+    n = str(name or "").strip()
+    m = _FAV_TITLE_RE.match(n)
+    return m.group(1).strip() if m else n
+
+
 async def _play_event(ev: dict) -> None:
     """实际播放：二次去重防线 → 占窗 → 复用语音点歌链（target=cch）→ 单发收尾。"""
     name = str(ev.get("name") or "")
     artist = str(ev.get("artist") or "")
     source = str(ev.get("source") or "")
+    raw_id = ""
+    platform = ""
+    if source == "FAVCLICK":
+        # 真相源：native 从 playFavorite 日志带的 item_id(=rawID) + source(=平台)，
+        # 写进 spool 的 rid/album 字段。跳过按标题重搜，直接按 rawID+平台点播
+        # （平台角标正确、命中收藏原始版本、同名曲靠 rawID 区分）。
+        raw_id = str(ev.get("rid") or "").strip()
+        platform = str(ev.get("album") or "").strip().lower()
+        name = clean_fav_name(name)
+        if raw_id and platform:
+            logger.info(f"[CchClick] FAVCLICK rawID={raw_id} src={platform} "
+                        f"name={name!r}", module="CchClick")
+        else:
+            # 旧 so / 解析异常：无真相源字段，回退按歌名重搜（fail-open，不比修复前差）
+            logger.warning("[CchClick] FAVCLICK missing rawID/source, fallback search",
+                           module="CchClick")
     # FAVCLICK 是用户最新点击意图（无 artist，dedupe 退化会误杀同名语音点播）——跳过
     # 二次 dedupe，与入口一致；云端回声由 favclick-guard 挡。
     reason = "" if source == "FAVCLICK" else dedupe(name, artist)
@@ -278,8 +307,12 @@ async def _play_event(ev: dict) -> None:
     logger.info(f"[CchClick] recv name={name} src={source} action=play", module="CchClick")
     from core.tools import song_request
 
-    result = await song_request.run({"action": "play", "query": name,
-                                     "artist": artist, "target": "cch"})
+    run_args = {"action": "play", "query": name, "artist": artist, "target": "cch"}
+    if raw_id and platform:
+        # 源头真相源直传：skip 搜索，song_request 据 rawID+平台直接构造 item 取票据
+        run_args["raw_id"] = raw_id
+        run_args["source"] = platform
+    result = await song_request.run(run_args)
     logger.info(f"[CchClick] play done name={name} result={str(result)[:80]}",
                 module="CchClick")
     # 单发收尾（票 23 实测病灶）：点击播 = 单曲意图；置 no_advance 标志防

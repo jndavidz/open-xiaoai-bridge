@@ -68,6 +68,38 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         stack.enter_context(patch("core.tools.registry.suppress_reply", MagicMock()))
         stack.enter_context(patch("aiohttp.ClientSession", _FakeSession))
 
+    async def test_raw_id_skips_search_uses_truth_source(self):
+        """FAVCLICK 源头 rawID+平台 → 跳过按标题搜索，ref 用 rawID/source（§2.77-57）。
+        票据链 mock 走 fallback（_FakeSession 无 get），断言点：ref/item 构造正确、搜索被跳过。"""
+        calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
+
+        async def fake_pick(http, source, it):
+            calls["pick"].append(it["id"])
+            return "http://good"
+
+        async def fake_resolve(ref, *a, **kw):
+            calls["resolve"].append(ref)
+            return "http://ticket"
+
+        host_cmd = AsyncMock(return_value=(True, "OK"))
+        with ExitStack() as stack:
+            self._setup(stack, items=[], pick=fake_pick,
+                        resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
+            # 覆盖 setUp 的 _managed_collect：一旦被调用即失败 → 证明 raw_id 分支跳过搜索
+            managed = stack.enter_context(patch.object(
+                sr, "_managed_collect",
+                AsyncMock(side_effect=AssertionError("search must be skipped"))))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            out = await sr._run_cch("play", {
+                "query": "夜来香", "raw_id": "600919000005273800", "source": "MIGU"})
+
+        self.assertIn("已在 CCH 上为你播放", out)
+        managed.assert_not_awaited()
+        self.assertEqual(calls["resolve"][0]["id"], "600919000005273800")
+        self.assertEqual(calls["resolve"][0]["source"], "migu")
+        self.assertEqual(calls["build_item"]["id"], "600919000005273800")
+        self.assertEqual(calls["build_item"]["source"], "migu", "平台角标取真实平台")
+
     async def test_switch_candidate_when_first_fails(self):
         """首选取链失败 → 换到可播候选：renderData/播报/队列都跟随最终曲。"""
         wrong = {"id": "WRONG", "name": "不著痕跡", "artist": "方继平", "source": "kugou"}

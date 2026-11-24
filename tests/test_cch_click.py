@@ -220,6 +220,50 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         # worker 自身起播也占窗：同一事件重复投递（CP+createlist 双发）被去重
         self.assertNotEqual(cch_click.dedupe("晴天", "周杰伦"), "")
 
+    def test_clean_fav_name(self):
+        """收藏栏标题仅做展示清洗（剥纯歌名），不承担平台传递（§2.77-57）。"""
+        cases = [
+            ("夜来香-《熱唱！東京夜景》-咪咕", "夜来香"),
+            ("恰似你的温柔-《华语经典好歌珍藏》-酷我", "恰似你的温柔"),
+            ("晴天-《叶惠美》-酷狗", "晴天"),
+            ("晴天", "晴天"),                     # 无后缀原样
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(expected, cch_click.clean_fav_name(raw))
+
+    async def test_favclick_passes_rawid_source_to_song_request(self):
+        """FAVCLICK spool 带 rid(rawID)+album(平台) → 直传 song_request，跳过搜索（§2.77-57）。"""
+        seen = {}
+
+        async def fake_run(args):
+            seen.update(args)
+            return "ok"
+
+        with mock.patch("core.tools.song_request.run", fake_run):
+            await cch_click._play_event({
+                "name": "夜来香-《熱唱！東京夜景》-咪咕", "artist": "",
+                "source": "FAVCLICK", "rid": "600919000005273800", "album": "MIGU"})
+
+        self.assertEqual("600919000005273800", seen.get("raw_id"), "rawID 透传")
+        self.assertEqual("migu", seen.get("source"), "平台 lower 后透传")
+        self.assertEqual("夜来香", seen.get("query"), "纯歌名仅用于播报/兜底")
+
+    async def test_favclick_without_rawid_falls_back(self):
+        """旧 so / 解析异常无真相源字段 → 回退按歌名重搜（fail-open，不比修复前差）。"""
+        seen = {}
+
+        async def fake_run(args):
+            seen.update(args)
+            return "ok"
+
+        with mock.patch("core.tools.song_request.run", fake_run):
+            await cch_click._play_event({
+                "name": "晴天", "artist": "", "source": "FAVCLICK"})
+
+        self.assertNotIn("raw_id", seen)
+        self.assertEqual("晴天", seen.get("query"))
+
     # ---- worker 循环 ----
 
     async def test_worker_polls_clickpoll_and_plays(self):
