@@ -21,6 +21,8 @@ import aiohttp
 
 _PLUGIN_PATH = "/api/v1/jsplugin/kwqq"
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
+# 收藏变更长轮询端点最多挂起 25s（Songloft services/favorite_changes.go），留足余量。
+_LONG_POLL_TIMEOUT = aiohttp.ClientTimeout(total=40)
 
 
 class SongloftError(RuntimeError):
@@ -40,12 +42,13 @@ def base_url() -> str:
     return base
 
 
-async def _request(http, method: str, path: str, *, params=None, json_body=None) -> dict:
+async def _request(http, method: str, path: str, *, params=None, json_body=None,
+                   timeout: aiohttp.ClientTimeout | None = None) -> dict:
     base = base_url()
     token = await _song_bridge()._songloft_token(base, http)
     headers = {"Authorization": f"Bearer {token}"}
     async with http.request(method, f"{base}{path}", params=params, json=json_body,
-                            headers=headers, timeout=_HTTP_TIMEOUT) as resp:
+                            headers=headers, timeout=timeout or _HTTP_TIMEOUT) as resp:
         if not 200 <= resp.status < 300:
             raise SongloftError(f"{method} {path}: http {resp.status}")
         data = await resp.json(content_type=None)
@@ -280,6 +283,19 @@ async def playlist_songs(playlist_id: int, *, http, limit=200) -> list:
     if not isinstance(songs, list):
         raise SongloftError("playlist_songs: unexpected body")
     return songs
+
+
+async def favorites_changes(cursor: str | None, *, http) -> dict:
+    """收藏变更长轮询（CCH 即时同步；Songloft upstream `favorites/changes`）。
+
+    GET /api/v1/playlists/favorites/changes?cursor=... → {cursor, changed}：
+    - 首次不传 cursor / 服务端重启 → 立即 changed=true；
+    - 带 cursor 最多挂起 25s，成员提交后唤醒；超时 changed=false。
+    cursor 不透明，仅作缓存失效，不做事件重放。返回原始 dict 供纯函数 seam 处理。
+    """
+    params = {} if not cursor else {"cursor": cursor}
+    return await _request(http, "GET", "/api/v1/playlists/favorites/changes",
+                          params=params, timeout=_LONG_POLL_TIMEOUT)
 
 
 def _fav_cover(img: str) -> dict:

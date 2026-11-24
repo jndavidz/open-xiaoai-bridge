@@ -370,6 +370,14 @@ async def _songloft_token(base: str, http) -> str:
     return token
 
 
+def invalidate_songloft_token() -> None:
+    """清空 JWT 缓存（token 被撤销/401 时调用，下一轮 _request 重新登录）。
+
+    幂等；不清会导致 401 持续到 6.5 天缓存自然过期（CCH fav-sync 等长轮询 worker 需自愈）。
+    """
+    _songloft_token_cache.clear()
+
+
 async def _songloft_resolver(entry):
     """经 Songloft 托管准备链解析当前曲，返回票据化媒体绝对 URL。"""
     import asyncio

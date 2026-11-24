@@ -477,6 +477,8 @@ class APIServer:
         self._inject_expire_task: asyncio.Task | None = None
         # 票 23：历史点击 worker 任务（cch_click_enabled=False 时不创建）
         self._cch_click_task: asyncio.Task | None = None
+        # 收藏即时同步 worker 任务（cch_fav_sync_enabled=False 时不创建）
+        self._cch_fav_sync_task: asyncio.Task | None = None
         # 外部文本轮 per-caller 限流器（B-37）：键 = token label + TCP peer
         self._external_text_throttle = ExternalTextThrottle()
         global _relay_singleton
@@ -696,6 +698,18 @@ class APIServer:
                 logger.info("[APIServer] cch_click worker 未启用（cch_click_enabled=false）")
         except Exception as exc:  # noqa: BLE001 - worker 启动失败不影响 HTTP 服务
             logger.error(f"[APIServer] cch_click worker start failed: {type(exc).__name__}")
+        # 收藏即时同步 worker（长轮询 Songloft favorites/changes → push_favorites 写设备 favorites.json）。
+        # 生产 Songloft 未部署该端点时 404 会降频续跑，不阻塞 HTTP 服务。
+        try:
+            from core.music import cch_fav_sync
+
+            if cch_fav_sync.enabled():
+                self._cch_fav_sync_task = asyncio.create_task(cch_fav_sync.run_worker())
+                logger.info("[APIServer] cch_fav_sync worker started（cch_fav_sync_enabled=true）")
+            else:
+                logger.info("[APIServer] cch_fav_sync worker 未启用（cch_fav_sync_enabled=false）")
+        except Exception as exc:  # noqa: BLE001 - worker 启动失败不影响 HTTP 服务
+            logger.error(f"[APIServer] cch_fav_sync worker start failed: {type(exc).__name__}")
 
     async def stop(self):
         """Stop the HTTP server"""
@@ -705,6 +719,13 @@ class APIServer:
             task.cancel()
             try:
                 await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        fav_task, self._cch_fav_sync_task = self._cch_fav_sync_task, None
+        if fav_task is not None:
+            fav_task.cancel()
+            try:
+                await fav_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         await self.inject_relay.stop()

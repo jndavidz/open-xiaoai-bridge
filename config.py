@@ -259,6 +259,9 @@ APP_CONFIG = {
         "cch_click_enabled": False,
         "cch_click_dedupe_s": 8.0,
         "cch_click_debounce_s": 3.0,
+        # 收藏即时同步 worker：长轮询 Songloft favorites/changes → push_favorites 写设备文件。
+        # 纯 bridge 侧（不依赖设备刷机），默认开；生产 Songloft 未部署端点时 404 降频续跑。
+        "cch_fav_sync_enabled": True,
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）

@@ -297,6 +297,10 @@ APP_CONFIG = {
         # 去抖 last-tap-wins（秒）：云端对一次点击先发队列头回声、再发被点歌（真机实测
         # 双发两播）——静默本窗后只播最后一条。0 = 关去抖（不推荐）。
         "cch_click_debounce_s": 3.0,
+        # 收藏即时同步：长轮询 Songloft favorites/changes（25s 事件驱动）→ 变化即
+        # push_favorites 全量写设备 favorites.json，gadget 下次 V2 HIT 显示最新收藏。
+        # 默认开（纯 bridge 侧，不依赖设备刷机）；前置 = Songloft 部署含该端点的镜像。
+        "cch_fav_sync_enabled": True,
     },
     "wakeup": {
         # KWS 总词表 = AI 唤醒词 + 全部免唤醒短语（动态编译为拼音，中文即可）
