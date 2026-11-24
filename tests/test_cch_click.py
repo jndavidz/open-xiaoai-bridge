@@ -8,6 +8,8 @@
   worker 起播后自身占窗（spool 重复事件不二次起播）；
 - worker 循环：clickpoll 拉取 → 逐事件处理；单事件异常不影响 worker；3 连败降频 5s；
 - 云端 Pause 抢断（§2.71-3）：观察到 paused 才补一次 resume，非 paused 不动。
+- 收藏点击错歌修复（§2.77-45）：FAVCLICK 后 3s 内 cp_hook 云端错歌 spool 抑制，
+  窗口过期后 NE 事件正常放行。
 
 纯离线：cch_cast.musicctl / song_request.run / cch_np.snapshot 模块属性替换，
 不联网、不连设备。
@@ -35,6 +37,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         cch_click._recent.clear()
         cch_click._recent_voice_ts = 0.0
+        cch_click._recent_favclick_ts = 0.0
         cch_click._pending_ev = None
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
@@ -46,6 +49,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         cch_click._recent.clear()
         cch_click._recent_voice_ts = 0.0
+        cch_click._recent_favclick_ts = 0.0
         cch_click._pending_ev = None
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
@@ -395,6 +399,53 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(t)
             await asyncio.wait_for(t, timeout=2)
         self.assertEqual(played, ["发如雪"], "无近期语音时 cp_hook 事件须放行")
+
+
+    async def test_favclick_guard_drops_cloud_echo(self):
+        """2026-11-24 §2.77-45：FAVCLICK 后短时间内的 cp_hook NE 云端错歌 spool 被丢弃。"""
+        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
+             mock.patch("core.tools.song_request.run", mock.AsyncMock(return_value="ok")):
+            cch_click._accept_event({"name": "爱你一万年", "artist": "邓丽君", "source": "FAVCLICK"})
+            self.assertIsNotNone(cch_click._recent_favclick_ts)
+            # 随后 cp_hook 云端错歌 spool（同一次点击）→ favclick-guard drop
+            cch_click._accept_event({"name": "金刚经", "artist": "王菲", "source": "NE"})
+            self.assertIsNotNone(cch_click._pending_ev)
+            self.assertEqual(cch_click._pending_ev.get("name"), "爱你一万年",
+                             "错歌须被 drop，pending 仍是 FAVCLICK 的正确曲")
+            if cch_click._pending_task is not None:
+                cch_click._pending_task.cancel()
+
+    async def test_favclick_guard_expired_no_suppression(self):
+        """FAVCLICK 时间戳过期后，NE 事件不再被抑制（经 dedupe 正常判定）。"""
+        import time
+        cch_click._recent_favclick_ts = time.time() - 10  # 远超 3s guard
+        # 直接调 _accept_event：NE 事件不被 favclick-guard drop（会进 dedupe/debounce）
+        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
+             mock.patch("core.tools.song_request.run", mock.AsyncMock(return_value="ok")):
+            cch_click._accept_event({"name": "金刚经", "artist": "王菲", "source": "NE"})
+            self.assertIsNotNone(cch_click._pending_ev)
+            self.assertEqual(cch_click._pending_ev.get("name"), "金刚经",
+                             "窗口外 NE 不被 favclick-guard 抑制")
+            if cch_click._pending_task is not None:
+                cch_click._pending_task.cancel()
+
+
+    async def test_favclick_skips_dedupe_after_same_song_voice(self):
+        """§2.77-45：语音点歌后 8s 内点同名收藏曲，FAVCLICK 不被 dedupe 误杀。"""
+        played = []
+
+        async def fake_run(args):
+            played.append(args.get("query"))
+            return "ok"
+
+        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
+             mock.patch("core.tools.song_request.run", fake_run):
+            cch_click.note_recent_play("爱你一万年", "邓丽君")  # 模拟近期语音点播
+            cch_click._accept_event({"name": "爱你一万年", "artist": "", "source": "FAVCLICK"})
+            task = cch_click._pending_task
+            self.assertIsNotNone(task, "FAVCLICK 不应被同名语音点播 dedupe 误杀")
+            await asyncio.wait_for(task, timeout=2)
+        self.assertEqual(played, ["爱你一万年"], "FAVCLICK 正确点播")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,12 @@ _recent_voice_ts: float = 0.0
 _VOICE_GUARD_S = 12.0
 _CP_SOURCES = frozenset({"NE", "KG", "KWQQ", "KUGOU", "NETEASE", "QQ", "MIGU", "QIANQIAN"})
 
+# 收藏 tab 点击（§2.77-45）：tap_hook 写 source=FAVCLICK（用户实际点的收藏曲），
+# 随后 cp_hook 会写云端错歌 spool（NE/KG，如"金刚经"）。收到 FAVCLICK 后短时间内
+# drop 云端源 spool，避免双链竞速让错歌覆盖正确曲。
+_recent_favclick_ts: float = 0.0
+_FAVCLICK_GUARD_S = 3.0
+
 
 def note_voice_input() -> None:
     """由 /api/external/text 在收到 ASR 文本时调用，标记"近期有语音输入"。"""
@@ -150,7 +156,7 @@ def _accept_event(ev: dict) -> None:
     （HIST 已覆盖真意图），要么是语音搜索结果（语音链自己会播，worker 再播 =
     双链竞速「先后两个页面只播后一个」）。
     """
-    global _pending_ev, _pending_task
+    global _pending_ev, _pending_task, _recent_favclick_ts
     name = str(ev.get("name") or "")
     source = str(ev.get("source") or "")
     # 票 13 动作面：播放页爱心点击由 :business tap_hook 写 source=HEART_LIKE/HEART_UNLIKE
@@ -167,6 +173,17 @@ def _accept_event(ev: dict) -> None:
     #  不走云端 ContentPlay 故不上报）。票 23 曾无条件 drop 这些"云端回声"是因为那时历史 tab
     #  有 HIST 覆盖真意图；当前播放 tab 没有 HIST，drop 会致点击无声——改为靠 dedupe +
     #  note_recent_play（主动点播 8s 占窗）区分回声，无登记的用户点击放行。
+    # 收藏 tab 点击（§2.77-45）：FAVCLICK = tap_hook 从 playFavorite 点击 pos join ring 得到
+    # 的用户实际点的收藏曲（正确数据源）；记时间戳用于抑制随后 cp_hook 的云端错歌 spool。
+    if source == "FAVCLICK":
+        _recent_favclick_ts = time.time()
+    # cp_hook 云端源 spool（NE/KG...）若在 FAVCLICK 后短时间内到达 → 是同一点击的云端回声
+    # （错歌），drop，避免双链竞速覆盖正确曲。FAVCLICK 自身走正常 dedupe/debounce 点播。
+    elif source in _CP_SOURCES and (_recent_favclick_ts > 0 and
+                                    time.time() - _recent_favclick_ts < _FAVCLICK_GUARD_S):
+        logger.info(f"[CchClick] recv name={name} src={source} action=drop(favclick-guard)",
+                    module="CchClick")
+        return
     # 【2026-11-23 语音应答误报循环修复】：cp_hook 无法在 WS 层区分触屏点击 vs 云端语音应答，
     #  但语音应答必有 external text。近期有语音输入时 drop cp_hook 事件，避免与 LLM 点歌
     #  双链竞速（"反复切歌"根因）；触屏点击（无近期语音）放行。
@@ -175,7 +192,12 @@ def _accept_event(ev: dict) -> None:
         logger.info(f"[CchClick] recv name={name} src={source} action=drop(voice-guard)",
                     module="CchClick")
         return
-    reason = dedupe(name, str(ev.get("artist") or ""))
+    # FAVCLICK 是用户最新点击意图（spool 无 artist，dedupe 退化 name 单键会误杀同名语音
+    # 点歌），跳过 dedupe；云端回声由上方 favclick-guard 挡，不会双链竞速。
+    if source == "FAVCLICK":
+        reason = ""
+    else:
+        reason = dedupe(name, str(ev.get("artist") or ""))
     if reason:
         logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",
                     module="CchClick")
@@ -212,7 +234,9 @@ async def _play_event(ev: dict) -> None:
     name = str(ev.get("name") or "")
     artist = str(ev.get("artist") or "")
     source = str(ev.get("source") or "")
-    reason = dedupe(name, artist)
+    # FAVCLICK 是用户最新点击意图（无 artist，dedupe 退化会误杀同名语音点播）——跳过
+    # 二次 dedupe，与入口一致；云端回声由 favclick-guard 挡。
+    reason = "" if source == "FAVCLICK" else dedupe(name, artist)
     if reason:
         # 去抖窗口内状态变化（如更早的播放刚占窗）——二次防线，宁少播不重播
         logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",
