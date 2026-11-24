@@ -109,14 +109,10 @@ def queue_payload(items: list) -> str:
             duration = int(float(item.get("duration_s") or 0))
         except (TypeError, ValueError):
             duration = 0
-        artist = str(item.get("artist") or item.get("singer") or "")
-        album = str(item.get("album") or "")
         out.append({
             "name": name,
-            # §2.77-53：当前播放 tab 歌手位（QueueWriter artist）同样显示「歌手-《专辑》-平台」，
-            # 与收藏/历史 tab 一致。name/id/source 保持原值（点播链关键字段，不能污染）。
-            "artist": artist_label(artist, str(item.get("source") or ""), album),
-            "album": album,
+            "artist": str(item.get("artist") or item.get("singer") or ""),
+            "album": str(item.get("album") or ""),
             "cover": str(item.get("cover") or ""),
             "source": str(item.get("source") or ""),
             "id": sid,
@@ -324,14 +320,14 @@ def _platform_label(source: str) -> str:
     return _PLATFORM_LABEL.get(str(source or "").strip().lower(), "")
 
 
-def artist_label(artist: str, source: str, album: str = "") -> str:
-    """歌手显示名 =「歌手-《专辑》-平台」（§2.77-53）。空专辑省略《》段，
-    未知/聚合伪源省略平台段。收藏/历史列表（authors[]）与当前播放队列（QueueWriter
-    artist 位）三处共用，保证三个 tab 显示一致。"""
-    a = str(artist or "").strip()
-    if not a:
+def _fav_title_label(title: str, album: str = "", source: str = "") -> str:
+    """收藏 tab 歌名栏 =「歌名-《专辑》-平台」（2026-11-24 用户本轮裁决，取代 §2.77-53
+    的「歌手列放组合串」版——真机证实右侧歌手列窄会截断）。组合串放宽栏（歌名列）；
+    空专辑省略《》段，未知/伪源省略平台段。"""
+    t = str(title or "").strip()
+    if not t:
         return ""
-    parts = [a]
+    parts = [t]
     al = str(album or "").strip()
     if al:
         parts.append("《%s》" % al)
@@ -341,14 +337,14 @@ def artist_label(artist: str, source: str, album: str = "") -> str:
     return "-".join(parts)
 
 
-def _fav_authors(artist: str, source: str, album: str = "") -> list:
+def _fav_authors(artist: str, source: str) -> list:
     """原厂 authors[] 壳——UI 的**歌手列取这里**（song.singer 恒 null）。
-    标题走 artist_label（歌手-《专辑》-平台）。
+    本轮裁决：歌手列保持纯歌手（组合串已移到歌名栏 _fav_title_label）。
     """
-    title = artist_label(artist, source, album)
-    if not title:
+    a = str(artist or "").strip()
+    if not a:
         return []
-    return [{"rawId": "", "source": source, "order": 0, "id": 0, "title": title,
+    return [{"rawId": "", "source": source, "order": 0, "id": 0, "title": a,
              "alias": None, "cleanTitle": None, "description": None,
              "isOnline": True, "type": "program", "isAudition": None,
              "gender": {"name": "DEFAULT"},
@@ -402,6 +398,8 @@ def favorite_item_schema(songs: list) -> list:
         artist = str(song.get("artist") or sd_artist or "").strip()
         album = str(song.get("album") or sd_album or "").strip()
         cover = str(song.get("cover_url") or "").strip()
+        # 本轮裁决：歌名栏显示「歌名-《专辑》-平台」（宽栏）；歌手列保持纯歌手。
+        display_title = _fav_title_label(title, album, source)
         out.append({
             "duration": duration,
             "albumRawId": "0",
@@ -416,7 +414,7 @@ def favorite_item_schema(songs: list) -> list:
             "isCharge": False,
             "isAudition": None,
             "copyright": 0,
-            "title": title,
+            "title": display_title,
             "rawId": raw_id,
             "pos": pos,
             "packageType": None,
@@ -436,7 +434,7 @@ def favorite_item_schema(songs: list) -> list:
             "itemType": {"name": "CONTENT"},
             "valid": {"name": "VALID"},
             "cover": _fav_cover(cover),
-            "authors": _fav_authors(artist, src, album),
+            "authors": _fav_authors(artist, src),
             "albumItem": ({"id": 0, "rawId": "0", "source": src, "title": album,
                            "category": "audio", "type": "music", "isCharge": False,
                            "isAudition": False, "copyright": 0, "boughtStatus": False,

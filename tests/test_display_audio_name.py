@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""守门测试：播控页主标题 audioName =「歌手 - 歌名」（2026-11-24 用户更正，
-与全屏歌词页左下角格式一致）。
+"""守门测试：播控页主标题 audioName =「歌名 - 歌手」（2026-11-24 用户本轮裁决，
+取代当日早先的「歌手 - 歌名」版；同一 audioName 也渲染在全屏歌词页左下角）。
 
 被测 seam: _display_audio_name(name, singer, album) -> str （纯函数）
 规约（最终）：
-  - 歌手 + 歌名都在 → "歌手 - 歌名"（专辑参数忽略，用户要求不显示）
+  - 歌名 + 歌手都在 → "歌名 - 歌手"（专辑参数忽略，用户要求不显示）
   - 只有其一 → 该项本身
   - 空白项视为缺失
 真机背景：原厂标题控件不渲染 \n（注入 \n 被吞成空格，两行方案不可行），
@@ -30,7 +30,7 @@ def load_fn(path):
 
 
 def test_full_ignores_album():
-    assert fn("晴天", "周杰伦", "叶惠美") == "周杰伦 - 晴天"
+    assert fn("晴天", "周杰伦", "叶惠美") == "晴天 - 周杰伦"
 
 
 def test_no_singer():
@@ -46,7 +46,7 @@ def test_none_values():
 
 
 def test_both_present_no_album():
-    assert fn("稻香", "周杰伦", None) == "周杰伦 - 稻香"
+    assert fn("稻香", "周杰伦", None) == "稻香 - 周杰伦"
 
 
 if __name__ == "__main__":

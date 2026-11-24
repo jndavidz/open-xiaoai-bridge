@@ -89,10 +89,6 @@ class SearchLyricContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], stub.calls)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PickLrcTest(unittest.TestCase):
     def test_prefers_line_level_lyric(self):
         self.assertEqual("[00:01]a", songloft_api.pick_lrc(
@@ -256,8 +252,7 @@ class QueuePayloadTest(unittest.TestCase):
         self.assertEqual("晴天", row["name"])
         self.assertEqual("94237", row["id"])
         self.assertEqual("kugou", row["source"])  # 门面 source_data.s 原样，不加工
-        self.assertEqual("歌手-《专辑》-酷狗", row["artist"],  # §2.77-53 当前播放 tab 歌手格式
-                         "当前播放队列歌手位同样显示 歌手-《专辑》-平台")
+        self.assertEqual("歌手", row["artist"], "队列歌手位保持纯歌手（组合串只在收藏歌名栏）")
         self.assertEqual("专辑", row["album"])
         self.assertEqual(200, row["duration_s"])
         self.assertIn("cover", row)
@@ -271,8 +266,8 @@ class QueuePayloadTest(unittest.TestCase):
             {"name": "B", "id": "3", "artist": "李健", "source": "netease"},
         ]))
         self.assertEqual(["A", "B"], [r["name"] for r in arr])
-        self.assertEqual("王力宏-酷我", arr[0]["artist"])   # 无专辑 → 省略《》段
-        self.assertEqual("李健-网易云", arr[1]["artist"])
+        self.assertEqual("王力宏", arr[0]["artist"])
+        self.assertEqual("李健", arr[1]["artist"])
         self.assertEqual("netease", arr[1]["source"])
 
     def test_invalid_duration_and_empty(self):
@@ -316,7 +311,8 @@ class FavoriteSchemaTest(unittest.IsolatedAsyncioTestCase):
     def test_maps_core_fields(self):
         item = songloft_api.favorite_item_schema([self._song()])[0]
         self.assertEqual(4076, item["id"])
-        self.assertEqual("晴天", item["title"])
+        self.assertEqual("晴天-《叶惠美》", item["title"],  # 本轮裁决 歌名栏带专辑，伪源省略平台
+                         "歌名栏显示 歌名-《专辑》-平台，kwqq 伪源省略平台段")
         self.assertEqual("KWQQ", item["source"])
         self.assertEqual("HASH1", item["rawId"])
         self.assertEqual("playFavorite", item["playFrom"])
@@ -329,26 +325,32 @@ class FavoriteSchemaTest(unittest.IsolatedAsyncioTestCase):
 
     def test_artist_goes_to_authors_not_singer(self):
         """UI 歌手列取 authors[].title；singer 恒 null（真机实测）。
-        §2.77-53：歌手列格式为「歌手-《专辑》-平台」（中文平台名）。"""
+        本轮裁决：歌手列保持纯歌手；组合串「歌名-《专辑》-平台」放歌名栏（宽栏不被截断）。"""
         song = self._song(source="kugou")  # 真实平台，映射为酷狗
         item = songloft_api.favorite_item_schema([song])[0]
         self.assertIsNone(item["singer"])
         self.assertEqual(1, len(item["authors"]))
-        self.assertEqual("周杰伦-《叶惠美》-酷狗", item["authors"][0]["title"])
+        self.assertEqual("周杰伦", item["authors"][0]["title"], "歌手列恢复纯歌手")
         self.assertEqual("KUGOU", item["authors"][0]["source"])
         self.assertEqual([{"name": "SINGER"}], item["authors"][0]["authorTypes"])
 
-    def test_authors_label_omits_empty_album(self):
-        """专辑为空时省略《》部分，避免空壳：'歌手-平台'。"""
+    def test_title_has_album_and_platform(self):
+        """本轮裁决：收藏歌名栏 =「歌名-《专辑》-平台」（宽栏显示）。"""
+        song = self._song(source="kugou")
+        item = songloft_api.favorite_item_schema([song])[0]
+        self.assertEqual("晴天-《叶惠美》-酷狗", item["title"])
+
+    def test_title_omits_empty_album(self):
+        """专辑为空时省略《》段：'歌名-平台'。"""
         song = self._song(source="netease", album="")
         item = songloft_api.favorite_item_schema([song])[0]
-        self.assertEqual("周杰伦-网易云", item["authors"][0]["title"])
+        self.assertEqual("晴天-网易云", item["title"])
 
-    def test_authors_label_unknown_source_omits_platform(self):
-        """未知/聚合伪源（kwqq）无中文映射时省略平台段，不显示 KWQQ。"""
+    def test_title_unknown_source_omits_platform(self):
+        """未知/聚合伪源（kwqq）省略平台段。"""
         song = self._song(source="kwqq")
         item = songloft_api.favorite_item_schema([song])[0]
-        self.assertEqual("周杰伦-《叶惠美》", item["authors"][0]["title"])
+        self.assertEqual("晴天-《叶惠美》", item["title"])
 
     def test_cover_shell_matches_device_shape(self):
         item = songloft_api.favorite_item_schema([self._song()])[0]
@@ -393,3 +395,7 @@ class FavoriteSchemaTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(songs))
         self.assertEqual("GET", calls[0][0])
         self.assertEqual("/api/v1/playlists/1/songs", calls[0][1])
+
+
+if __name__ == "__main__":
+    unittest.main()

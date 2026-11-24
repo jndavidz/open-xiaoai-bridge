@@ -261,12 +261,13 @@ async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
 
 
 def _display_audio_name(name: str, singer: str, album: str = "") -> str:
-    """播控页主标题 =「歌手 - 歌名」（2026-11-24 用户更正，与全屏歌词页左下角一致）。
+    """播控页主标题 =「歌名 - 歌手」（2026-11-24 用户本轮裁决，取代当日早先的
+    「歌手 - 歌名」版；audioName 同字段也渲染在全屏歌词页左下角，两处随之同步）。
     原厂标题控件不渲染 \n（注入被吞成空格），故单行；缺失其一则只显示另一项。
     album 参数保留兼容调用点，但不拼进标题。"""
     n = str(name or "").strip()
     s = str(singer or "").strip()
-    return f"{s} - {n}" if (n and s) else (n or s)
+    return f"{n} - {s}" if (n and s) else (n or s)
 
 
 def build_render_data(ticket_url: str, item: dict, meta: dict,
