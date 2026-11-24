@@ -266,7 +266,17 @@ def build_render_data(ticket_url: str, item: dict, meta: dict,
     singer = str(meta.get("singer") or item.get("artist") or "")
     album = str(meta.get("album") or item.get("album") or "")
     cover = str(meta.get("cover") or item.get("cover") or "")
-    duration = int(meta.get("duration") or item.get("duration") or 0) or 0
+    # kwqq-api /{source}/song/info 返回的是 duration_s（秒），没有 duration 字段
+    # （真机实测 2026-11-24：kugou 源 duration_s=299、duration 缺失）；只认 duration
+    # 会让 audioLength 写死 0、屏上不显示时长（§2.77-49）。按
+    # meta.duration > meta.duration_s > item.duration > item.duration_s 优先级兜底，
+    # 原厂 audioLength 单位 = 秒（facts L486：319=5:19）。
+    raw_duration = (meta.get("duration") or meta.get("duration_s")
+                    or item.get("duration") or item.get("duration_s") or 0)
+    try:
+        duration = max(0, int(float(raw_duration)))  # 字符串浮点兼容 + 负数钳零
+    except (TypeError, ValueError):
+        duration = 0
     sid = str(meta.get("id") or item.get("id") or "")
     audio_ext = json.dumps({
         "audioAnchor": singer, "audioType": "music", "audioSource": "KWQQ",

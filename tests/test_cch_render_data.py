@@ -26,6 +26,43 @@ class RenderDataTest(unittest.TestCase):
         )
         self.assertEqual("http://meta.jpg", rd["backgroundImage"])
 
+    def test_audio_length_uses_duration_s_from_kwqq_meta(self):
+        """§2.77-49：kwqq-api /song/info 返回 duration_s（秒），不是 duration——
+        build_render_data 必须读 duration_s 兜底，否则 audioLength 写死 0、屏上不显示时长。"""
+        rd = cch_cast.build_render_data(
+            "http://ticket/1.mp3", {"name": "发如雪"},
+            {"duration_s": 299},
+        )
+        self.assertEqual(299, rd["audioLength"])
+
+    def test_audio_length_duration_field_still_wins(self):
+        """旧调用方若仍带 duration 字段（同样按秒处理），优先级不变。"""
+        rd = cch_cast.build_render_data(
+            "http://ticket/1.mp3", {"name": "发如雪"},
+            {"duration": 269, "duration_s": 299},
+        )
+        self.assertEqual(269, rd["audioLength"])
+
+    def test_audio_length_item_duration_s_fallback(self):
+        """meta 空时从 item.duration_s 兜底（点播队列项发票的时长）。"""
+        rd = cch_cast.build_render_data(
+            "http://ticket/1.mp3", {"name": "发如雪", "duration_s": 240}, {},
+        )
+        self.assertEqual(240, rd["audioLength"])
+
+    def test_audio_length_edge_values(self):
+        """§2.77-49 防御：字符串浮点/负数/非法值不抛异常、不写出负 audioLength。"""
+        cases = [
+            ({"duration_s": "299.5"}, 299),   # 字符串浮点 → 截断
+            ({"duration_s": -5}, 0),           # 负数 → 钳到 0
+            ({"duration_s": "bad"}, 0),        # 非法 → 0
+            ({"duration_s": None}, 0),         # None → 0
+        ]
+        for meta, expect in cases:
+            with self.subTest(meta=meta):
+                rd = cch_cast.build_render_data("http://t/1.mp3", {"name": "x"}, meta)
+                self.assertEqual(expect, rd["audioLength"])
+
 
 if __name__ == "__main__":
     unittest.main()
