@@ -194,6 +194,12 @@ async def ensure_song(item: dict, *, http) -> int:
     album = str(item.get("album") or "")
     duration = float(item.get("duration_s") or 0)
     source_data = {"s": source, "i": rid, "n": title, "a": artist, "al": album, "d": duration}
+    # §2.77-58：保留咪咕 by-id 取链必需的 copyrightId（搜索项 extra）。手机插件写入的
+    # 收藏本就带同字段；bridge ensure_song 入库也带上，两条路径形态统一——FAVCLICK
+    # rawID 直构才能从 source_data.c 补齐（否则 migu /song/url 404）。
+    copyright_id = str((item.get("extra") or {}).get("copyrightId") or "").strip()
+    if copyright_id:
+        source_data["c"] = copyright_id
     body = [{
         "title": title,
         "artist": artist,

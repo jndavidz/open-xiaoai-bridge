@@ -5,6 +5,7 @@
 播报/renderData/队列/歌词 id 全部跟随最终选中的曲，全部失败才返回错误串。
 """
 
+import json
 import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -99,6 +100,61 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["resolve"][0]["source"], "migu")
         self.assertEqual(calls["build_item"]["id"], "600919000005273800")
         self.assertEqual(calls["build_item"]["source"], "migu", "平台角标取真实平台")
+
+    async def test_raw_id_enriches_copyright_for_migu(self):
+        """rawID 直构时从 Songloft 收藏 source_data.c 补 extra.copyrightId（§2.77-58）——
+        咪咕 /song/url 需要 copyright，直构丢了搜索项的 extra 会 404（本轮真机回归）。"""
+        calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
+        songs = [{"id": 99, "title": "夜来香", "source_data": json.dumps({
+            "s": "migu", "i": "600919000005273800", "c": "6005663JF5A"})}]
+
+        async def fake_pick(http, source, it):
+            calls["pick"].append(it["id"])
+            return "http://good"
+
+        async def fake_resolve(ref, *a, **kw):
+            calls["resolve"].append(ref)
+            return "http://ticket"
+
+        host_cmd = AsyncMock(return_value=(True, "OK"))
+        with ExitStack() as stack:
+            self._setup(stack, items=[], pick=fake_pick,
+                        resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
+            stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
+            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
+                                      AsyncMock(return_value=1)))
+            stack.enter_context(patch("core.music.songloft_api.playlist_songs",
+                                      AsyncMock(return_value=songs)))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            await sr._run_cch("play", {
+                "query": "夜来香", "raw_id": "600919000005273800", "source": "migu"})
+
+        self.assertEqual(calls["build_item"]["extra"].get("copyrightId"), "6005663JF5A")
+        self.assertEqual(calls["build_item"]["source"], "migu")
+
+    async def test_raw_id_copyright_fail_open(self):
+        """Songloft 收藏读取失败 → copyright 空但不崩、点播照常（fail-open，不退化）。"""
+        calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
+
+        async def fake_pick(http, source, it):
+            return "http://good"
+
+        async def fake_resolve(ref, *a, **kw):
+            return "http://ticket"
+
+        host_cmd = AsyncMock(return_value=(True, "OK"))
+        with ExitStack() as stack:
+            self._setup(stack, items=[], pick=fake_pick,
+                        resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
+            stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
+            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
+                                      AsyncMock(side_effect=RuntimeError("songloft down"))))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            out = await sr._run_cch("play", {
+                "query": "夜来香", "raw_id": "600919000005273800", "source": "migu"})
+
+        self.assertIn("已在 CCH 上为你播放", out)
+        self.assertFalse(calls["build_item"]["extra"].get("copyrightId"))
 
     async def test_switch_candidate_when_first_fails(self):
         """首选取链失败 → 换到可播候选：renderData/播报/队列都跟随最终曲。"""

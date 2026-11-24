@@ -422,9 +422,35 @@ async def _run_cch(action: str, args: dict) -> str:
             # 直接构造 item 跳过按标题/_managed_collect 重搜——精确命中收藏曲版本
             # （同名曲靠 rawID 区分）+ 平台角标正确（source 来自真实平台）。
             src = str(args.get("source") or "").strip().lower()
-            items = [{"id": raw_id, "source": src, "name": query,
-                      "artist": str(args.get("artist") or ""), "extra": {}}]
-            logger.info(f"[SongRequest] cch rawID direct: id={raw_id} src={src} name={query!r}",
+            item = {"id": raw_id, "source": src, "name": query,
+                    "artist": str(args.get("artist") or ""), "extra": {}}
+            # §2.77-58：真相源补齐 source_data.c（咪咕 /song/url 必需 copyrightId）。
+            # rawID 直构丢掉搜索项的 extra → migu 404（本轮真机回归）；收藏记录自带 c，
+            # 按 rawID 从 Songloft 收藏歌单取回，不依赖搜索、对任何需 extra 的源通用。
+            try:
+                from core.music import songloft_api
+                async with aiohttp.ClientSession() as http:
+                    pl_id = await songloft_api.favorites_playlist_id(http=http)
+                    songs = await songloft_api.playlist_songs(pl_id, http=http)
+                for s in songs:
+                    sd_raw = s.get("source_data")
+                    if not isinstance(sd_raw, str) or not sd_raw:
+                        continue
+                    try:
+                        sd = json.loads(sd_raw)
+                    except (ValueError, TypeError):
+                        continue
+                    if str(sd.get("i") or "") != raw_id:
+                        continue
+                    if sd.get("c"):
+                        item["extra"]["copyrightId"] = str(sd["c"])
+                    break
+            except Exception as exc:  # noqa: BLE001 - 补齐失败不阻塞点播（fail-open）
+                logger.warning(f"[SongRequest] cch rawID extra lookup failed: {type(exc).__name__}",
+                               module="SongRequest")
+            items = [item]
+            logger.info(f"[SongRequest] cch rawID direct: id={raw_id} src={src} name={query!r} "
+                        f"copyright={item['extra'].get('copyrightId') or ''}",
                         module="SongRequest")
         else:
             items = await _managed_collect(

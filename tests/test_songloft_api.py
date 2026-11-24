@@ -133,6 +133,23 @@ class FavoritesContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(rec.get("url"), (None, ""))
         self.assertIn('"s":"kugou"', rec["source_data"])
 
+    async def test_ensure_song_preserves_copyright_id(self):
+        """§2.77-58：搜索项 extra.copyrightId 写入 source_data.c——咪咕 by-id 取链
+        必需，FAVCLICK rawID 直构靠它补齐（否则 migu /song/url 404）。"""
+        stub = _AsyncStub({"songs": [{"id": 43}]})
+        orig = songloft_api._request
+        songloft_api._request = stub
+        try:
+            await songloft_api.ensure_song(
+                {"name": "夜来香", "artist": "邓丽君", "source": "migu",
+                 "id": "600919000005273800",
+                 "extra": {"copyrightId": "6005663JF5A"}},
+                http=object())
+        finally:
+            songloft_api._request = orig
+        sd = json.loads(stub.calls[0][3][0]["source_data"])
+        self.assertEqual("6005663JF5A", sd.get("c"))
+
     async def test_ensure_song_dedup_key_ignores_source(self):
         """回归（§2.77-48）：同一 rawID、不同 source（kugou/kwqq）必须产出同一个
         dedup_key——直接锁住"带 source 会把同一首歌拆成两条"的原缺陷。"""
