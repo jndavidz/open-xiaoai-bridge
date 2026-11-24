@@ -315,10 +315,11 @@ class CollectFavoriteTest(CchNpTestBase):
 
         from core.music import songloft_api
 
-        calls = {"add": [], "remove": [], "ensure": [], "push": 0}
+        calls = {"add": [], "remove": [], "ensure": [], "ensure_items": [], "push": 0}
 
         async def ensure(item, *, http):
             calls["ensure"].append(item.get("id"))
+            calls["ensure_items"].append(dict(item))
             if fail == "ensure":
                 raise songloft_api.SongloftError("down")
             return 42
@@ -363,6 +364,35 @@ class CollectFavoriteTest(CchNpTestBase):
         self.assertEqual([42], calls["add"])
         self.assertEqual(["R1"], calls["ensure"])
         self.assertEqual(1, calls["push"], "added 后应 fire push_favorites（票 25）")
+
+    async def test_cover_from_cch_queue_item(self):
+        """§2.77-51：CCH 收藏必须把门面搜索结果里的原图 cover + 真实 source
+        补进写入项（与手机 App toRemotePayload 同格式），否则 Songloft 存空
+        cover_url → 无封面。current_song.json 只有虚化图/伪源，不能作为封面源。"""
+        # current_song() 返回的设备侧数据：无 cover、伪源（模拟现状）
+        self._cur_song = {"name": "晴天 - 周杰伦", "id": "B3A52A7A958B",
+                          "source": "KWQQ", "artist": "周杰伦"}
+        # 内存队列里的门面 item：原图 cover + 真实 source
+        sr._cch_state.update({"entry": 0, "items": [{
+            "id": "B3A52A7A958B", "source": "kugou",
+            "name": "晴天", "artist": "周杰伦", "album": "叶惠美",
+            "cover": "http://imge.kugou.com/stdmusic/400/original.jpg",
+            "duration_s": 269,
+        }]})
+        calls, patches = self._patches(added=1)
+        for p in patches:
+            p.start()
+        try:
+            result = await cch_np.collect_favorite(True)
+        finally:
+            for p in patches:
+                p.stop()
+            sr._cch_state.update({"entry": 0, "items": []})
+        self.assertEqual("added", result["action"])
+        written = calls["ensure_items"][0]
+        self.assertEqual("http://imge.kugou.com/stdmusic/400/original.jpg",
+                         written.get("cover"), "必须用门面原图 cover，不是虚化图")
+        self.assertEqual("kugou", written.get("source"), "必须用真实平台，不是 KWQQ 伪源")
 
     async def test_duplicate_favorite_is_noop(self):
         self._queue()
