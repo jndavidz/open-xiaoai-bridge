@@ -202,7 +202,9 @@ async def ensure_song(item: dict, *, http) -> int:
         "duration": duration,
         "plugin_entry_path": "kwqq",
         "source_data": json.dumps(source_data, ensure_ascii=False, separators=(",", ":")),
-        "dedup_key": f"kwqq_{source}_{rid}",
+        # 去重键以 rawID 为唯一基准（§2.77-48）：source 在手机插件（真实平台名）与
+        # CCH 设备上报（KWQQ）间摇摆，带 source 会把同一首歌拆成两条 → 收藏重复。
+        "dedup_key": f"kwqq_{rid}",
         "is_video": False,
     }]
     data = await _request(http, "POST", "/api/v1/songs/remote", json_body=body)

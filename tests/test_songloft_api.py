@@ -130,9 +130,30 @@ class FavoritesContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(path.endswith("/api/v1/songs/remote"))
         rec = body[0]
         self.assertEqual("kwqq", rec["plugin_entry_path"])
-        self.assertEqual("kwqq_kugou_H1", rec["dedup_key"])
+        # 去重键以 rawID 为唯一基准，不带 source（§2.77-48）：
+        # 同一首歌 source 在 kugou/kwqq 间摇摆（手机插件 vs CCH 设备上报）过去会拆成
+        # kwqq_kugou_H1 + kwqq_kwqq_H1 两条 → Songloft 收藏重复。统一为 kwqq_{rawID}。
+        self.assertEqual("kwqq_H1", rec["dedup_key"])
         self.assertIn(rec.get("url"), (None, ""))
         self.assertIn('"s":"kugou"', rec["source_data"])
+
+    async def test_ensure_song_dedup_key_ignores_source(self):
+        """回归（§2.77-48）：同一 rawID、不同 source（kugou/kwqq）必须产出同一个
+        dedup_key——直接锁住"带 source 会把同一首歌拆成两条"的原缺陷。"""
+        seen = []
+        orig = songloft_api._request
+        async def capture(_http, method, path, *, json_body=None, **kw):
+            seen.append(json_body[0]["dedup_key"])
+            return {"songs": [{"id": 1}]}
+        songloft_api._request = capture
+        try:
+            for source in ("kugou", "kwqq"):
+                await songloft_api.ensure_song(
+                    {"name": "青花瓷", "id": "H1", "source": source}, http=object())
+        finally:
+            songloft_api._request = orig
+        self.assertEqual(seen, ["kwqq_H1", "kwqq_H1"],
+                         "同一 rawID 不论 source 都必须得到同一 key，否则收藏重复")
 
     async def test_favorites_playlist_picks_built_in_normal(self):
         stub = _AsyncStub({"playlists": [
