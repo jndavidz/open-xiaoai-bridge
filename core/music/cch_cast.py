@@ -26,19 +26,19 @@ from core.utils.logger import logger
 _PREPARE_TIMEOUT_S = 120
 _PREPARE_POLL_S = 2
 
-# 平台角标 logo（§2.77-53）：真机原厂曲按平台下发 alicdn logo URL，播控页专辑图左上角
-# 显示平台标（如酷狗蓝 K）。我方注入曲原写死空 sourceLogoColor → 无图标。这里按门面
-# source 填入有实证的 URL（取自 2026-11-19 真机 logcat 原厂 KG/NE 曲）。仅酷狗/网易云
-# 有实证，其它平台留空（fail-open，不显示图标）。阿里若更换 CDN 资源需更新此表。
+# 平台角标 logo（§2.77-53/54，2026-11-24 方标本地化）：播控页专辑图左上角显示平台方标（如酷狗蓝 K）。
+# 2026-11-24 本地化：6 平台方标下载到 NAS cch-bg 目录，经 9092 免鉴权静态路由访问，
+# 避免 alicdn URL 过期。文件名 16 位 hex（bg 路由的格式要求）：
+#   0001=QQ 0002=咪咕 0003=酷我 0004=千千 0005=酷狗 0006=网易云
+# sourceLogo/sourceLogoColor 同填方标（真机证实左上角渲染方标）。
+_BG_LOGO_BASE = "http://10.10.10.2:9092/api/cch/bg/"
 _SOURCE_LOGO = {
-    "kugou": (
-        "https://img.alicdn.com/imgextra/i4/O1CN01aOVy5V1p04l4B3uLI_!!6000000005297-2-tps-129-126.png",
-        "https://img.alicdn.com/imgextra/i3/O1CN01IWsS701QHbW4710Ls_!!6000000001951-2-tps-228-60.png",
-    ),
-    "netease": (
-        "https://img.alicdn.com/imgextra/i2/O1CN01gaAk3N1t290QkFYHf_!!6000000005843-2-tps-231-234.png",
-        "https://img.alicdn.com/imgextra/i3/O1CN01tAJ0I51kkGWEgfemo_!!6000000004721-2-tps-41-41.png",
-    ),
+    "kugou":   (_BG_LOGO_BASE + "0000000000000005.jpg", _BG_LOGO_BASE + "0000000000000005.jpg"),
+    "netease": (_BG_LOGO_BASE + "0000000000000006.jpg", _BG_LOGO_BASE + "0000000000000006.jpg"),
+    "qq":      (_BG_LOGO_BASE + "0000000000000001.jpg", _BG_LOGO_BASE + "0000000000000001.jpg"),
+    "migu":    (_BG_LOGO_BASE + "0000000000000002.jpg", _BG_LOGO_BASE + "0000000000000002.jpg"),
+    "kuwo":    (_BG_LOGO_BASE + "0000000000000003.jpg", _BG_LOGO_BASE + "0000000000000003.jpg"),
+    "qianqian": (_BG_LOGO_BASE + "0000000000000004.jpg", _BG_LOGO_BASE + "0000000000000004.jpg"),
 }
 
 

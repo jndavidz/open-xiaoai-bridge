@@ -27,18 +27,21 @@ class RenderDataTest(unittest.TestCase):
         self.assertEqual("http://meta.jpg", rd["backgroundImage"])
 
     def test_source_logo_filled_by_platform(self):
-        """§2.77-53：播控页平台图标由 sourceLogo/sourceLogoColor 驱动，真机原厂曲
-        按平台下发 alicdn logo URL；注入曲写死空串导致左上角无平台标。按 item 真实
-        平台填入有实证的 logo URL（酷狗蓝K/网易云方标），让播控页显示平台角标。"""
-        rd = cch_cast.build_render_data(
-            "http://ticket/1.mp3",
-            {"name": "晴天", "artist": "周杰伦", "source": "kugou"},
-            {},
-        )
-        self.assertTrue(rd["sourceLogo"].startswith("https://img.alicdn.com/"),
-                        "酷狗应填 sourceLogo URL")
-        self.assertTrue(rd["sourceLogoColor"].startswith("https://img.alicdn.com/"),
-                        "酷狗应填 sourceLogoColor URL")
+        """§2.77-53/54 后续（方标本地化）：6 平台方标下载到 NAS cch-bg，经 9092 静态路由
+        访问，播控页左上角显示平台标、避免 alicdn 过期；注入曲按 item 真实平台填本地 logo URL。"""
+        expected = {
+            "kugou": "0000000000000005", "netease": "0000000000000006",
+            "qq": "0000000000000001", "migu": "0000000000000002",
+            "kuwo": "0000000000000003", "qianqian": "0000000000000004",
+        }
+        for source, hexname in expected.items():
+            rd = cch_cast.build_render_data(
+                "http://ticket/1.mp3",
+                {"name": "晴天", "artist": "周杰伦", "source": source}, {},
+            )
+            self.assertIn(hexname + ".jpg", rd["sourceLogo"], f"{source} 应填本地方标 URL")
+            self.assertEqual(rd["sourceLogo"], rd["sourceLogoColor"],
+                             f"{source} 两字段同填方标")
         # 未知平台/无 source → 保持空串（fail-open，不显示图标）
         rd2 = cch_cast.build_render_data(
             "http://ticket/1.mp3",
