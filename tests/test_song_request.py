@@ -377,12 +377,14 @@ class CollectForPlayTest(unittest.TestCase):
         async def fake_browse(keywords, stype, *, http=None):
             return [
                 {"id": "ID1", "name": "青花瓷", "artist": "周杰伦", "source": "kugou"},
-                {"id": "ID2", "name": "青花瓷", "artist": "其他歌手", "source": "kugou"},
+                {"id": "ID2", "name": "晴天", "artist": "周杰伦", "source": "qq"},
+                {"id": "ID3", "name": "说好的幸福呢+青花瓷(Live)", "artist": "周杰伦", "source": "qq"},
             ]
         with mock.patch("core.music.songloft_api.browse_search", fake_browse):
             items = asyncio.run(song_request._collect_for_play("青花瓷", "周杰伦", {}))
+        # 双字段须按歌名精确匹配：晴天/拼接组曲即使同为周杰伦也排除
         self.assertEqual(["青花瓷"], [i["name"] for i in items])
-        self.assertEqual("周杰伦", items[0]["artist"], "双字段须按歌手过滤版本")
+        self.assertEqual("周杰伦", items[0]["artist"])
 
     def test_dedup_variants_from_browse(self):
         import asyncio

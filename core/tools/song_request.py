@@ -328,11 +328,21 @@ async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
                 # 票 03：分类搜索结果同样去变体+同名去重（与回退路径口径一致）
                 items = _dedupe_items(_drop_query_variants(items, keywords))
                 if stype == "music" and artist:
-                    # 双字段：按歌手过滤版本（只认主歌手命中的项）
-                    items = [it for it in items
-                             if artist in str(it.get("artist") or it.get("singer") or "")]
-                    if not items:  # 艺名表述不一致 → 回退普通搜索，不直接失败
-                        logger.debug("cch browse_search artist filter empty, fallback",
+                    # 双字段（如「周杰伦的青花瓷」）：按 **歌名精确匹配** 过滤，
+                    # 不是按歌手——否则搜索"青花瓷"时各源混进的晴天/组曲（同为周杰伦）会保留。
+                    # artist 仅作辅助（歌名匹配但歌手不符时排除，防同名不同歌手）。
+                    song_key = _norm_title(song or keywords)
+                    matched = []
+                    for it in items:
+                        title_key = _norm_title(it.get("name") or it.get("title") or "")
+                        name_ok = bool(song_key) and title_key == song_key
+                        singer_ok = not artist or artist in str(
+                            it.get("artist") or it.get("singer") or "")
+                        if name_ok and singer_ok:
+                            matched.append(it)
+                    items = matched
+                    if not items:  # 精确匹配无果 → 回退普通搜索（fail-open）
+                        logger.debug("cch browse_search exact-title filter empty, fallback",
                                      module="SongRequest")
                         return await _managed_collect(song or keywords, args.get("source"), artist=artist)
                 logger.info(f"cch classified search type={stype} keywords={keywords!r} n={len(items)}",
@@ -1162,9 +1172,11 @@ def _primary_singer(singer) -> str:
 
 
 def _item_key(item: dict) -> tuple[str, str]:
-    # 队列位按「归一化歌名」去重：同一首的不同版本/翻唱都算一首
-    # （真机 2026-10-27：按歌名+歌手去重后「下一首」仍在放同一首歌的别的版本）
-    return (_norm_title(item.get("name")), "")
+    # 队列位按 (歌手, 歌名) 去重（用户 2026-11-26 裁决）：
+    # 同一歌手+同一歌名的不同版本/变体算一首；不同歌手的同名曲各自保留。
+    # 合唱歌手取主歌手（_primary_singer），避免「甲,乙」与「甲」被当成两首。
+    return (_norm_title(item.get("name")),
+            _primary_singer(item.get("artist") or item.get("singer") or ""))
 
 
 def _dedupe_items(items: list[dict]) -> list[dict]:
