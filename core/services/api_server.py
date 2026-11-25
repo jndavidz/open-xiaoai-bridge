@@ -1637,9 +1637,9 @@ class APIServer:
             return web.json_response(
                 {"success": False, "code": "np_bad_payload", "error": "载荷非法"}, status=400)
         kind = str(body.get("kind") or "")
-        if kind not in ("META", "STATE"):
+        if kind not in ("META", "STATE", "PLAYMODE"):
             return web.json_response(
-                {"success": False, "code": "np_bad_kind", "error": "kind must be META|STATE"},
+                {"success": False, "code": "np_bad_kind", "error": "kind must be META|STATE|PLAYMODE"},
                 status=400,
             )
         extras = body.get("extras") or {}
@@ -1648,6 +1648,13 @@ class APIServer:
             from core.music.cch_np import np_enabled as np_gate
             from core.music import cch_np
 
+            if kind == "PLAYMODE":
+                # 播控页顺序按钮状态（worker 抓原厂 cmdVal playMode 上报）——
+                # 不受 np_enabled 闸门（即使换代关，模式状态也要实时同步）
+                pm = str(extras.get("playMode") or "").strip()
+                cch_np.set_play_mode(pm)
+                logger.info(f"[APIServer] /api/external/np playMode={pm!r} caller={caller}")
+                return web.json_response({"success": True, "action": "play_mode_set"})
             if not np_gate():
                 # 双关：只记录不编排（META/isFavorite 仍进内存——票 13 收藏幂等的读态源）
                 cch_np.record_event(kind, extras, device_ts)
