@@ -251,14 +251,23 @@ async def _histpos_to_ev(ev: dict) -> dict | None:
 
 
 async def _playtoggle(ev: dict) -> None:
-    """屏上播放/暂停键（source=PLAYTOGGLE）：设备侧原子 toggle，桥侧零状态读取。
+    """屏上播放/暂停键（source=PLAYTOGGLE）：播放态原子 toggle，曲终停止态重播当前曲。
 
-    原厂 playOrPause 因内核无我方数据源失败（tap_hook 抓 error 上报）。控制走 CCH 的
-    M5 in-process 通道（cch_cast.host_cmd("toggle")）——设备侧 HostBootstrap 用
-    isPlaying ? pause : resume 原子翻转，桥侧只读命令结果、不接触播放态存储。
+    原厂 playOrPause 因内核无我方数据源失败（tap_hook 抓 error 上报）。播放/暂停态走
+    M5 in-process 通道（cch_cast.host_cmd("toggle") = isPlaying ? pause : resume）。
+
+    票 06：曲终停止态（np STATE finish/stop，native 实例已死）toggle→resume 无效 ——
+    改为按内存队列当前 entry 重新取票 + cast（cch_np.replay_current，与换代共用
+    _cast_entry seam），不推进队列、不改 entry。
     """
-    from core.music import cch_cast
+    from core.music import cch_cast, cch_np
 
+    st = (cch_np.snapshot().get("state") or {}).get("extras") or {}
+    if str(st.get("statusStr") or "").lower() in ("finish", "stop"):
+        result = await cch_np.replay_current()
+        logger.info(f"[CchClick] playtoggle stopped -> replay_current {result}",
+                    module="CchClick")
+        return
     # 设备侧 M5 原子 toggle（HostBootstrap.dispatch "toggle" = isPlaying ? pause : resume），
     # 桥侧零状态读取。
     ok, detail = await cch_cast.host_cmd("toggle")

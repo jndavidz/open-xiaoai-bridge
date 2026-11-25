@@ -528,6 +528,50 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
                 cch_click._pending_task.cancel()
 
 
+    async def test_playtoggle_in_stopped_state_replays_current(self):
+        """票 06：曲终停止态（STATE finish/stop）点播放键 → 重播当前曲，不做原子 toggle
+        （native 实例已死，toggle→resume 无效）。"""
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+
+        replay_calls = []
+        toggle_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed", "ok": True}
+
+        async def fake_toggle(cmd):
+            toggle_calls.append(cmd)
+            return True, "OK"
+
+        with mock.patch.object(cch_np_mod, "snapshot",
+                               lambda: {"state": {"extras": {"statusStr": "finish"}}}), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay), \
+             mock.patch("core.music.cch_cast.host_cmd", fake_toggle):
+            await cch_click._playtoggle({"source": "PLAYTOGGLE"})
+
+        self.assertEqual(1, len(replay_calls), "stopped 态应重播当前曲")
+        self.assertEqual([], toggle_calls, "stopped 态不应走 toggle（对死实例无效）")
+
+    async def test_playtoggle_in_playing_state_still_toggles(self):
+        """非 stopped 态保持原语义（M5 原子 toggle）。"""
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+
+        toggle_calls = []
+
+        async def fake_toggle(cmd):
+            toggle_calls.append(cmd)
+            return True, "OK"
+
+        with mock.patch.object(cch_np_mod, "snapshot",
+                               lambda: {"state": {"extras": {"statusStr": "play"}}}), \
+             mock.patch("core.music.cch_cast.host_cmd", fake_toggle):
+            await cch_click._playtoggle({"source": "PLAYTOGGLE"})
+
+        self.assertEqual(["toggle"], toggle_calls)
+
     async def test_curplay_click_skips_dedupe_after_same_song_voice(self):
         """票 12：语音点播占窗后点当前播放 tab 同名曲，CLICK 不被 dedupe 误杀
         （review 抓的入口/_play_event 矛盾守门）。"""
@@ -589,13 +633,17 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pt.await_count, 1, "两条 spool 只触发一次 _playtoggle")
 
     def test_playtoggle_uses_host_cmd_toggle(self):
-        """守门：_playtoggle 只发 host_cmd("toggle")，不读状态、不碰 speaker/cch_np。"""
+        """守门：playing 态只发 host_cmd("toggle")；禁读设备实时态（get_speaker /
+        current_song，防双链竞速）。票 06 起允许读 bridge 自己的编排内存态
+        cch_np.snapshot()（worker 上报的 np 事件记录，非设备探测）判 stopped 态，
+        并走 replay_current 重播——这是与换代共用的唯一重播 seam。"""
         import inspect
         src = inspect.getsource(cch_click._playtoggle)
-        self.assertIn('host_cmd("toggle")', src, "必须调 cch_cast.host_cmd('toggle')")
-        self.assertNotIn("get_speaker", src, "禁止 LX06 speaker")
-        self.assertNotIn("cch_np.", src, "禁止桥侧读状态")
-        self.assertNotIn("current_song", src, "禁止桥侧读状态")
+        self.assertIn('host_cmd("toggle")', src, "playing 态必须调 host_cmd('toggle')")
+        self.assertNotIn("get_speaker", src, "禁止 LX06 speaker（设备实时态）")
+        self.assertNotIn("current_song", src, "禁止桥侧读设备当前曲文件")
+        self.assertIn("cch_np.snapshot()", src, "stopped 判据来自 bridge 编排态")
+        self.assertIn("cch_np.replay_current()", src, "stopped 态走唯一重播 seam")
 
     # ---- 收藏 tab 红心点击（2026-11-25 FAVADD/FAVREMOVE）----
 

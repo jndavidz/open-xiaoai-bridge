@@ -132,6 +132,63 @@ async def on_np_event(kind: str, extras: dict, device_ts: str = "") -> dict:
     return {"action": "recorded", "state": state_str or code}
 
 
+async def _cast_entry(idx: int, item: dict) -> dict:
+    """按 (source,id) 重新取票 + cast 单曲（advance 与 stopped replay 共用的唯一下行 seam）。
+
+    返回 {ok, detail}；不改 _cch_state.entry（由调用方决定推进还是重播），不撤票。
+    """
+    from core.music.cch_cast import (
+        build_render_data,
+        cast_native,
+        host_cmd,
+        host_token_deploy,
+        kwqq_meta,
+        m5_enabled,
+        resolve_ticket_url,
+        wait_np_play,
+    )
+    from core.tools import song_request as sr
+
+    ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
+           "extra": item.get("extra") or {}}
+    ticket_url = await resolve_ticket_url(
+        ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
+        entry=str(item.get("id") or f"cch-{idx}"))
+    meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
+    render_data = build_render_data(ticket_url, item, meta)
+    if m5_enabled():
+        await host_token_deploy()
+        ok, status = await host_cmd("play", url=ticket_url)
+        detail = status
+    else:
+        # 活实例轨：曲末实例死 ⇒ cast 大概率无声；事后验证 NEED_M5 感知
+        ok, detail = await cast_native(render_data)
+        if ok and not await wait_np_play(5.0):
+            ok, detail = False, "NEED_M5"
+    return {"ok": ok, "detail": detail}
+
+
+async def replay_current() -> dict:
+    """票 06：曲终停止态点播放键 → 重新 cast 当前 entry（不推进队列、不换 entry）。
+
+    单曲点播曲终后 native 实例死，host_cmd("toggle") 的 isPlaying?pause:resume 对死实例
+    无效；重播必须重新取票 + cast（与 advance 共用 _cast_entry seam）。
+    """
+    from core.tools import song_request as sr
+
+    items = sr._cch_state.get("items") or []
+    idx = int(sr._cch_state.get("entry", 0))
+    if not items or idx >= len(items):
+        return {"action": "replay_no_item"}
+    try:
+        res = await _cast_entry(idx, items[idx])
+        logger.info(f"[CchNp] replay {idx} ok={res['ok']} detail={res['detail']}", module="CchNp")
+        return {"action": "replayed", "index": idx, "ok": res["ok"]}
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[CchNp] replay err: {type(exc).__name__}: {exc}", module="CchNp")
+        return {"action": "replay_failed", "error": type(exc).__name__}
+
+
 async def _advance_if_finished() -> dict:
     """kwqq 曲目播完 → 逐条撤旧票 + cast 队列下一首。队列耗尽 → 回退原厂链（记录，不动作）。"""
     global _last_advance_at
@@ -173,40 +230,14 @@ async def _advance_if_finished() -> dict:
         item = items[nxt]
         sr._cch_state["entry"] = nxt
         try:
-            from core.music.cch_cast import (
-                build_render_data,
-                cast_native,
-                host_cmd,
-                host_token_deploy,
-                kwqq_meta,
-                m5_enabled,
-                prepare_playback,
-                resolve_ticket_url,
-                wait_np_play,
-            )
-
-            ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
-                   "extra": item.get("extra") or {}}
-            ticket_url = await resolve_ticket_url(
-                ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
-                entry=str(item.get("id") or f"cch-{nxt}"))
-            meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
-            render_data = build_render_data(ticket_url, item, meta)
-            if m5_enabled():
-                await host_token_deploy()
-                ok, status = await host_cmd("play", url=ticket_url)
-                detail = status
-            else:
-                # 活实例轨：曲末实例死 ⇒ cast 大概率无声；事后验证 NEED_M5 感知
-                ok, detail = await cast_native(render_data)
-                if ok and not await wait_np_play(5.0):
-                    ok, detail = False, "NEED_M5"
+            res = await _cast_entry(nxt, item)
             # 票 21：UI 队列在点歌时整批下发一次（保持搜索原序）。曲末 advance 不重写队列——
             # 宿主 QueueWriter 只有 replace 无"设置选中项"op，重排会破坏 spec「顺序一致」；
             # 原厂列表高亮是否自动跟随播放曲待真机验证（票 21 Comments 挂账）。
             _last_advance_at = loop.time()
-            logger.info(f"[CchNp] advance {idx}->{nxt} ok={ok} detail={detail}", module="CchNp")
-            return {"action": "advanced", "index": nxt, "ok": ok}
+            logger.info(f"[CchNp] advance {idx}->{nxt} ok={res['ok']} detail={res['detail']}",
+                        module="CchNp")
+            return {"action": "advanced", "index": nxt, "ok": res["ok"]}
         except Exception as exc:  # noqa: BLE001
             _last_advance_at = loop.time()
             logger.error(f"[CchNp] advance err: {type(exc).__name__}: {exc}", module="CchNp")

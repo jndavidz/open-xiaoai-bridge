@@ -1637,9 +1637,10 @@ class APIServer:
             return web.json_response(
                 {"success": False, "code": "np_bad_payload", "error": "载荷非法"}, status=400)
         kind = str(body.get("kind") or "")
-        if kind not in ("META", "STATE", "PLAYMODE"):
+        if kind not in ("META", "STATE", "PLAYMODE", "PLAYTOGGLE"):
             return web.json_response(
-                {"success": False, "code": "np_bad_kind", "error": "kind must be META|STATE|PLAYMODE"},
+                {"success": False, "code": "np_bad_kind",
+                 "error": "kind must be META|STATE|PLAYMODE|PLAYTOGGLE"},
                 status=400,
             )
         extras = body.get("extras") or {}
@@ -1655,6 +1656,16 @@ class APIServer:
                 cch_np.set_play_mode(pm)
                 logger.info(f"[APIServer] /api/external/np playMode={pm!r} caller={caller}")
                 return web.json_response({"success": True, "action": "play_mode_set"})
+            if kind == "PLAYTOGGLE":
+                # 票 06：曲终停止态点播放键——设备 AgisSvr pushNotify（native tap_hook
+                # 的 tag 过滤抓不到），由 worker 全采 logcat 上报。转 cch_click 的
+                # PLAYTOGGLE 入口（含 debounce；stopped 态走 replay_current）。
+                # 不受 np_enabled 闸门（按键控制与换代编排独立）。
+                from core.music import cch_click
+
+                cch_click._accept_event({"source": "PLAYTOGGLE", "name": "playtoggle"})
+                logger.info(f"[APIServer] /api/external/np PLAYTOGGLE caller={caller}")
+                return web.json_response({"success": True, "action": "playtoggle_dispatched"})
             if not np_gate():
                 # 双关：只记录不编排（META/isFavorite 仍进内存——票 13 收藏幂等的读态源）
                 cch_np.record_event(kind, extras, device_ts)

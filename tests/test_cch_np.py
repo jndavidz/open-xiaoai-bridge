@@ -90,6 +90,35 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
         return rec
 
 
+class ReplayCurrentTest(CchNpTestBase):
+    """票 06：曲终停止态点播放键 → 重新 cast 当前 entry（不推进队列、不换 entry）。"""
+
+    async def test_replay_current_recasts_entry(self):
+        from unittest import mock
+        rec = self.fake_downlink()
+        sr._cch_state.update({"entry": 1, "items": [
+            {"source": "kwqq", "id": "s1", "name": "一"},
+            {"source": "kwqq", "id": "s2", "name": "二"},
+        ]})
+        async def fake_wait(seconds):
+            return True
+
+        with mock.patch.object(cch_cast, "m5_enabled", lambda: False), \
+             mock.patch.object(cch_cast, "wait_np_play", fake_wait):
+            result = await cch_np.replay_current()
+        self.assertEqual("replayed", result["action"])
+        self.assertEqual(1, result["index"])
+        self.assertTrue(result["ok"], "起播确认通过")
+        self.assertEqual(1, len(rec["cast"]), "重新 cast 当前曲一次")
+        self.assertEqual(1, sr._cch_state.get("entry"), "entry 不推进（与 advance 区别）")
+
+    async def test_replay_current_no_items(self):
+        rec = self.fake_downlink()
+        result = await cch_np.replay_current()
+        self.assertEqual("replay_no_item", result["action"])
+        self.assertEqual([], rec["cast"])
+
+
 class AdvanceTest(CchNpTestBase):
     """票 03：STATE finish → 撤旧票 + cast 下一首。"""
 
