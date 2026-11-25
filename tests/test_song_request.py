@@ -161,6 +161,15 @@ class RegistryContractTest(unittest.TestCase):
         # 「播放任素汐的歌」仅 artist → batch
         self.assertEqual("batch", song_request.play_intent_for("", "任素汐"))
 
+    def test_artist_from_utterance_fallback(self):
+        # LLM 漏填 artist 时从 ASR 原话兜底（真机「周杰伦的青花瓷」）
+        self.assertEqual("周杰伦",
+                         song_request.artist_from_utterance("播放周杰伦的青花瓷", "青花瓷"))
+        self.assertEqual("任素汐",
+                         song_request.artist_from_utterance("播放任素汐的歌", ""))
+        self.assertEqual("", song_request.artist_from_utterance("播放青花瓷", "青花瓷"))
+        self.assertEqual("", song_request.artist_from_utterance("", "青花瓷"))
+
     def test_validate_accepts_song_without_query(self):
         self.assertIsNone(song_request.validate({"action": "play", "song": "青花瓷"}))
 
@@ -348,6 +357,43 @@ class FetchLayerTest(unittest.TestCase):
     def test_ok_body_passthrough(self):
         body = _envelope(200, [])
         self.assertEqual(body, self._fetch(_FakeSession(_FakeResp(body=body))))
+
+
+class SearchResultFilterTest(unittest.TestCase):
+    """统一搜索结果过滤（用户 2026-11-26 三场景规则，纯函数 seam）。"""
+
+    def test_artist_only_drops_other_singers_and_dedupes_title(self):
+        items = [
+            {"name": "思念", "artist": "任素汐"},
+            {"name": "思念 (Live)", "artist": "任素汐"},
+            {"name": "传奇", "artist": "任素汐"},
+            {"name": "思念", "artist": "王菲"},  # 其他歌手 → 去掉
+        ]
+        out = song_request.filter_search_results(items, "", "任素汐")
+        self.assertEqual([("思念", "任素汐"), ("传奇", "任素汐")],
+                         [(i["name"], i["artist"]) for i in out])
+
+    def test_song_only_exact_title_and_dedupe(self):
+        items = [
+            {"name": "青花瓷", "artist": "周杰伦"},
+            {"name": "青花瓷", "artist": "刘芳"},       # 同名不同手 → 保留（供换候选）
+            {"name": "晴天", "artist": "周杰伦"},       # 歌名不匹配 → 去掉
+            {"name": "青花瓷 (Live)", "artist": "周杰伦"},  # 变体 → 归一后同歌手去重
+        ]
+        out = song_request.filter_search_results(items, "青花瓷", "")
+        self.assertEqual([("青花瓷", "周杰伦"), ("青花瓷", "刘芳")],
+                         [(i["name"], i["artist"]) for i in out])
+
+    def test_song_plus_artist_both_filters(self):
+        items = [
+            {"name": "青花瓷", "artist": "周杰伦"},
+            {"name": "青花瓷", "artist": "刘芳"},       # 歌手不符 → 去掉
+            {"name": "晴天", "artist": "周杰伦"},       # 歌名不符 → 去掉
+            {"name": "青花瓷 (伴奏)", "artist": "周杰伦"},  # 变体归一后同名 → 去重
+        ]
+        out = song_request.filter_search_results(items, "青花瓷", "周杰伦")
+        self.assertEqual(["青花瓷"], [i["name"] for i in out])
+        self.assertEqual("周杰伦", out[0]["artist"])
 
 
 class CollectForPlayTest(unittest.TestCase):

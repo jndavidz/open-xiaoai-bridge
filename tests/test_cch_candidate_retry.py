@@ -272,7 +272,8 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_candidate_cap_eight(self):
         """候选遍历上限前 8 个（13 个候选时不得全量串行尝试）。"""
-        items = [{"id": f"ID-{i}", "name": "不著痕跡", "artist": "方继平",
+        # 不同歌手版本（换候选场景）：去重键 (歌手,歌名) 保留全部 13 首
+        items = [{"id": f"ID-{i}", "name": "不著痕跡", "artist": f"歌手{i}",
                   "source": "kugou"} for i in range(13)]
         calls = {"build_item": None, "speak": [], "pick": []}
         resolve_calls = {"n": 0}

@@ -189,6 +189,23 @@ def play_intent_for(song: str, artist: str) -> str:
     return "single" if str(song or "").strip() else "batch"
 
 
+def artist_from_utterance(utterance: str, song: str = "") -> str:
+    """从 ASR 原话兜底提取歌手名（纯函数，可单测）——LLM 漏填 artist 时用。
+
+    「播放周杰伦的青花瓷」→ 周杰伦；「播放任素汐的歌」→ 任素汐。
+    只认「播放<歌手>的<歌名/歌>」形态：取"播放"后、"的"前的片段；
+    若提取结果恰等于 song（如「播放青花瓷的歌」误读）则不返回（避免把歌名当歌手）。
+    """
+    import re
+
+    u = str(utterance or "").strip()
+    m = re.search(r"(?:播放|来一首|放一首|唱一首|来首|放首)\s*([^\s的，,。]+?)的(?:歌|歌曲)?", u)
+    if not m:
+        return ""
+    name = m.group(1).strip()
+    return name if name and name != str(song or "").strip() else ""
+
+
 def validate(args: dict) -> str | None:
     """参数校验：action 白名单 + play/album 必带 song/query/artist 之一。"""
     action = str((args or {}).get("action") or "").strip().lower()
@@ -325,27 +342,12 @@ async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
                 else:
                     items = await songloft_api.browse_search(keywords, "music", http=http)
             if items:
-                # 票 03：分类搜索结果同样去变体+同名去重（与回退路径口径一致）
-                items = _dedupe_items(_drop_query_variants(items, keywords))
-                if stype == "music" and song:
-                    # 有歌名（如「周杰伦的青花瓷」或 LLM 漏填 artist 的「青花瓷」）：
-                    # 按 **歌名精确匹配** 过滤，不是按歌手——否则搜索"青花瓷"时各源混进的
-                    # 晴天/组曲会保留。artist 仅作辅助（填了且不符则排除，防同名不同歌手）。
-                    # 不依赖 artist 是因为 LLM 可能漏填（真机 17:03 第一次 n=68 未过滤）。
-                    song_key = _norm_title(song or keywords)
-                    matched = []
-                    for it in items:
-                        title_key = _norm_title(it.get("name") or it.get("title") or "")
-                        name_ok = bool(song_key) and title_key == song_key
-                        singer_ok = not artist or artist in str(
-                            it.get("artist") or it.get("singer") or "")
-                        if name_ok and singer_ok:
-                            matched.append(it)
-                    items = matched
-                    if not items:  # 精确匹配无果 → 回退普通搜索（fail-open）
-                        logger.debug("cch browse_search exact-title filter empty, fallback",
-                                     module="SongRequest")
-                        return await _managed_collect(song or keywords, args.get("source"), artist=artist)
+                # 统一过滤（用户 2026-11-26 三场景规则）：去变体 + 按歌曲/歌手过滤 + 去重
+                items = filter_search_results(items, song, artist)
+                if not items:  # 过滤无果 → 回退普通搜索（fail-open）
+                    logger.debug("cch classified search filter empty, fallback",
+                                 module="SongRequest")
+                    return await _managed_collect(song or keywords, args.get("source"), artist=artist)
                 logger.info(f"cch classified search type={stype} keywords={keywords!r} n={len(items)}",
                             module="SongRequest")
                 return items
@@ -353,14 +355,9 @@ async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
             logger.warning(f"cch classified search failed: {type(exc).__name__}, fallback",
                            module="SongRequest")
     fallback = await _managed_collect(keywords or song, args.get("source"), artist=artist)
-    if fallback and artist:
-        # 回退路径 artist 不参与搜索，按歌手再过滤（与分类搜索口径一致）；
-        # 过滤后全空则保留原结果（fail-open，不臆断用户要 0 首）。
-        by_artist = [it for it in fallback
-                     if artist in str(it.get("artist") or it.get("singer") or "")]
-        if by_artist:
-            fallback = by_artist
-    return fallback
+    # 统一过滤（与分类搜索同口径）；过滤全空则保留原结果（fail-open）
+    filtered = filter_search_results(fallback, song, artist)
+    return filtered or fallback
 
 
 async def _managed_collect(query: str, requested_source, *, artist: str = "",
@@ -495,6 +492,13 @@ async def _run_cch(action: str, args: dict) -> str:
         # play / album：搜歌 → songloft prepare → renderData → 9102 /cmd
         query = str(args.get("query") or "").strip()
         song, artist = intent_fields(args)  # 票 01 双字段；query 是 song 兼容别名
+        if song and not artist:
+            # 用户裁决：LLM 漏填 artist 时从 ASR 原话兜底（真机「周杰伦的青花瓷」
+            # LLM 只填 song → 各歌手翻唱全进队列）。原话由会话层 set_playback_target 写入。
+            artist = artist_from_utterance(_playback_target_text, song)
+            if artist:
+                logger.info(f"[SongRequest] artist from utterance fallback: {artist!r}",
+                            module="SongRequest")
         if action == "play":
             # 立即暂停（用户 2026-11-21）：派生 key 有 10 分钟缓存；stop 走「连发+回执」，
             # 广播有间歇丢失，单发一次不够（否则旧曲会在播报前继续响）。
@@ -1190,6 +1194,42 @@ def _dedupe_items(items: list[dict]) -> list[dict]:
             continue
         seen.add(key)
         kept.append(item)
+    return kept
+
+
+def filter_search_results(items: list[dict], song: str = "", artist: str = "") -> list[dict]:
+    """搜索结果统一过滤（纯函数，可单测；用户 2026-11-26 裁决的三场景规则）。
+
+    第一步 过滤变体：`_norm_title` 剥掉 (Live)/(伴奏)/remix 等标记后归一。
+    第二步 按场景过滤 + 去重：
+      - 仅歌手（「任素汐的歌」）：去掉其他歌手的歌曲，按 (歌手, 歌名) 去重；
+      - 仅歌曲（「青花瓷」）：去掉歌名不匹配的，同名只留首现（单曲一次）；
+      - 歌手+歌曲（「周杰伦的青花瓷」）：歌名不匹配 + 歌手不匹配都去掉，同名只留首现。
+    都不填 → 仅去变体 + 按 (歌手, 歌名) 去重（兜底）。
+    """
+    song_key = _norm_title(song)
+    artist_key = _primary_singer(artist)
+    seen: set[tuple[str, str]] = set()
+    kept: list[dict] = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        name = _norm_title(it.get("name") or it.get("title") or "")
+        if not name:
+            continue
+        singer = _primary_singer(it.get("artist") or it.get("singer") or "")
+        # 场景过滤：有歌名 → 必须精确匹配；有歌手 → 必须匹配（含子串）
+        if song_key and name != song_key:
+            continue
+        if artist_key and artist_key not in singer:
+            continue
+        # 去重：统一按 (歌手, 歌名)——同名不同歌手版本保留供换候选重试
+        # （真机「错版歌手→换正确版本」场景）；单曲只播一首由 play_intent=single 保证。
+        key = (name, singer)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(it)
     return kept
 
 
