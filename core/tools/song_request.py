@@ -753,55 +753,9 @@ async def _run_cch(action: str, args: dict) -> str:
         suppress_reply()
         return ""
 
-    if action in ("pause", "resume", "next", "prev", "stop"):
-        # CCH 播控经 DLNA RenderingControl/AVTransport（patched dlnaserver）；
-        # 本阶段先给出确定性响应，真机接线在 deploy 层做（见 ticket 08 依赖）。
-        if action == "stop":
-            cur = _cch_state.get("items") or []
-            entry = cur[_cch_state["entry"]].get("id", "") if cur else ""
-            try:
-                await revoke(_CCH_SESSION, _CCH_EPOCH, entry)
-            except Exception as exc:  # noqa: BLE001 - 撤票失败不阻塞响应
-                logger.warning(f"[SongRequest] cch revoke err: {type(exc).__name__}")
-            _cch_state.update({"entry": 0, "items": []})
-            return "已停止 CCH 播放"
-        if action in ("next", "prev"):
-            items = _cch_state.get("items") or []
-            if items:
-                _cch_state["entry"] = max(0, min(len(items) - 1,
-                                                 _cch_state["entry"] + (1 if action == "next" else -1)))
-                suppress_reply()
-                return "已切换 CCH 曲目"
-            return "CCH 无播放队列"
-        suppress_reply()
-        return "已暂停 CCH 播放" if action == "pause" else "已恢复 CCH 播放"
-
-    # play / album：搜歌 → Songloft prepare → /cch/cast
-    query = str(args.get("query") or "").strip()
-    items = await _managed_collect(
-        query, args.get("source"),
-        artist=str(args.get("artist") or "").strip(),
-        album=(action == "album"),
-    )
-    if not items:
-        return f"没有找到能播放的曲目《{query}》"
-    item = items[0]
-    ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
-           "extra": item.get("extra") or {}}
-    entry = str(item.get("id") or "cch-1")
-    try:
-        ticket_url = await resolve_ticket_url(
-            ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
-        ok = await cast(ticket_url)
-    except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
-        logger.error(f"[SongRequest] cch cast failed: {type(exc).__name__}: {exc}")
-        return f"CCH 投屏失败：{type(exc).__name__}"
-    if not ok:
-        return "CCH 投屏失败（/cch/cast 拒绝，检查 CAST_ALLOW 与 PANEL_TOKEN）"
-    _cch_state.update({"entry": 0, "items": items[:1]})
-    suppress_reply()
-    name = str(item.get("name") or "歌曲")
-    return f"已在 CCH 上为你播放《{name}》"
+    # 旧 cast 投送链已删除（2026-11-25 架构优化 #2）：cast_enabled 默认 False，
+    # 该分支判死多年；D 方向 = 原厂唯一播放器，bridge 只做控制/状态。
+    # 打开 cast_enabled 的历史回滚路径已随本轮清理移除。
 
 
 # ---- HTTP 两跳（kw-qq-api envelope 契约，事实源 musicdl API-REFERENCE §3/§4） ----

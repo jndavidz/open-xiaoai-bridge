@@ -79,10 +79,9 @@ def _cfg(key, default=None):
 
 def enabled() -> bool:
     """worker 总开关（cch_click_enabled，默认 False——模块 v0.4.9 刷机后由用户打开）。"""
-    val = _cfg("cch_click_enabled", False)
-    if isinstance(val, str):
-        return val.strip().lower() in ("1", "true", "yes", "on")
-    return bool(val)
+    from core.music.cch_config import cfg_bool
+
+    return cfg_bool(_cfg("cch_click_enabled", False), False)
 
 
 def _norm(text) -> str:

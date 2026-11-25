@@ -184,12 +184,8 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
             self._setup(stack, items=[], pick=fake_pick,
                         resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
             stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
-            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
-                                      AsyncMock(return_value=1)))
-            stack.enter_context(patch("core.music.songloft_api.playlist_songs",
-                                      AsyncMock(return_value=[])))
-            stack.enter_context(patch("core.music.songloft_api.search",
-                                      AsyncMock(side_effect=RuntimeError("facade down"))))
+            stack.enter_context(patch("core.music.songloft_api.lookup_favorite_by_rawid",
+                                      AsyncMock(return_value=None)))
             sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
             out = await sr._run_cch("play", {
                 "query": "恰似你的温柔", "raw_id": "671381931", "source": "kuwo"})
@@ -212,7 +208,7 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
             self._setup(stack, items=[], pick=fake_pick,
                         resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
             stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
-            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
+            stack.enter_context(patch("core.music.songloft_api.lookup_favorite_by_rawid",
                                       AsyncMock(side_effect=RuntimeError("songloft down"))))
             sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
             out = await sr._run_cch("play", {

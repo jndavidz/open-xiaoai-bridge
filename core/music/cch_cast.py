@@ -67,10 +67,9 @@ def cast_enabled() -> bool:
     ⇒ D 方向 = 原厂负责出声，bridge 只做控制/状态；投送仅保留代码与日志，默认不执行。
     打开此开关即回滚到 v0.2.0 行为（也须同时回装播放版桥 APK，见 `deploy/cch-music-bridge/README.md`）。
     """
-    val = _cfg("cch_cast_enabled", False)
-    if isinstance(val, str):
-        return val.strip().lower() in ("1", "true", "yes", "on")
-    return bool(val)
+    from core.music.cch_config import cfg_bool
+
+    return cfg_bool(_cfg("cch_cast_enabled", False), False)
 
 
 def panel_token() -> str:
@@ -199,10 +198,9 @@ def np_enabled() -> bool:
     True 时 song_request target=cch 走「票据 URL + kwqq 元数据 → renderData →
     9102 /cmd COMMAND 7」生产链；False 时维持票 16/17 的关闭语义（原厂云链自行处理）。
     """
-    val = _cfg("cch_np_enabled", False)
-    if isinstance(val, str):
-        return val.strip().lower() in ("1", "true", "yes", "on")
-    return bool(val)
+    from core.music.cch_config import cfg_bool
+
+    return cfg_bool(_cfg("cch_np_enabled", False), False)
 
 
 def tts_base() -> str:
@@ -413,10 +411,9 @@ _last_core_pid: int = 0
 
 def m5_enabled() -> bool:
     """M5 Zygisk 宿主控制通道开关（默认 False；刷机 6 项验收通过后由用户打开）。"""
-    val = _cfg("cch_m5_enabled", False)
-    if isinstance(val, str):
-        return val.strip().lower() in ("1", "true", "yes", "on")
-    return bool(val)
+    from core.music.cch_config import cfg_bool
+
+    return cfg_bool(_cfg("cch_m5_enabled", False), False)
 
 
 def host_derived_key() -> str:

@@ -25,7 +25,8 @@ def native_item_schema(*, sid: int, raw_id: str, source: str, title: str,
                        pos: int, collect: bool, play_from: str,
                        display_title: str | None = None,
                        include_album_item: bool = False,
-                       history_extras: bool = False) -> dict:
+                       history_extras: bool = False,
+                       is_audition: bool | None = None) -> dict:
     """构造原厂列表 item（收藏/历史共用）。
 
     Args:
@@ -40,7 +41,7 @@ def native_item_schema(*, sid: int, raw_id: str, source: str, title: str,
         "duration": int(duration or 0), "albumRawId": "0", "text": None,
         "otherTypeIds": None, "lyric": None, "lastPage": None,
         "id": int(sid or 0), "source": src, "category": "audio", "type": "music",
-        "isCharge": False, "isAudition": None, "copyright": 0,
+        "isCharge": False, "isAudition": is_audition, "copyright": 0,
         "title": display_title or title, "rawId": raw_id, "pos": pos,
         "packageType": None, "audioType": None, "singer": None,
         "collect": bool(collect), "playFrom": play_from,

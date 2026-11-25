@@ -293,7 +293,7 @@ async def playlist_songs(playlist_id: int, *, http, limit=200) -> list:
     return songs
 
 
-async def lookup_favorite_by_rawid(raw_id: str, *, http=None, playlist_id=None) -> dict | None:
+async def lookup_favorite_by_rawid(raw_id: str, *, http=None) -> dict | None:
     """按歌曲唯一身份 rawID 从 Songloft 收藏歌单查回完整元数据（架构统一：
     收藏/历史点击、rawID 直构点播、红心反查、收藏写入都复用这一处，消除 4 份重复循环）。
 
@@ -307,7 +307,7 @@ async def lookup_favorite_by_rawid(raw_id: str, *, http=None, playlist_id=None) 
         import aiohttp
         http = aiohttp.ClientSession()
     try:
-        pl = int(playlist_id) if playlist_id is not None else await favorites_playlist_id(http=http)
+        pl = await favorites_playlist_id(http=http)
         songs = await playlist_songs(pl, http=http)
         for s in songs:
             sd_raw = s.get("source_data")

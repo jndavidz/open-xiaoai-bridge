@@ -58,6 +58,8 @@ class NativeItemSchemaTest(unittest.TestCase):
         # 历史 tab 专属扩展字段
         self.assertEqual("content-audio", item["firstType"])
         self.assertEqual("music", item["secondType"])
+        # isAudition 由调用方按 tab 传入（history_item_schema 传 False 守门在 test_cch_history）
+        self.assertIsNone(item["isAudition"])  # 公共函数默认 None；不传即 None
         self.assertNotIn("albumItem", item)  # 历史 tab 无 albumItem（收藏 tab 才有）
         # screenPlayUrl 用固定深链 + (rawId, source)，无票据
         self.assertIn('"rawId":"347BDED5"', item["screenPlayUrl"])

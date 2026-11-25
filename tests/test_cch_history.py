@@ -54,6 +54,8 @@ class CchHistoryIdentityTest(unittest.TestCase):
         self.assertEqual("playHistory", item["playFrom"])
         self.assertEqual("content-audio", item["firstType"])
         self.assertEqual(0, item["id"])
+        # spec review 守门：历史 tab isAudition=False（非 None），字段不漂移
+        self.assertIs(False, item["isAudition"])
 
 
 if __name__ == "__main__":

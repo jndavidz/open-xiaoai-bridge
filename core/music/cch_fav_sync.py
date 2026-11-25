@@ -28,10 +28,9 @@ def _cfg(key: str, default=None):
 def enabled() -> bool:
     """worker 总开关（cch_fav_sync_enabled，默认 True——纯 bridge 侧，不依赖设备刷机；
     生产 Songloft 未部署新端点时 404 失败会降频到 10s，不影响其它链路）。"""
-    val = _cfg("cch_fav_sync_enabled", True)
-    if isinstance(val, str):
-        return val.strip().lower() in ("1", "true", "yes", "on")
-    return bool(val)
+    from core.music.cch_config import cfg_bool
+
+    return cfg_bool(_cfg("cch_fav_sync_enabled", True), True)
 
 
 def apply_change_response(prev_cursor: str | None, response: object) -> tuple[str | None, bool]:

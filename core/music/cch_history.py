@@ -63,7 +63,7 @@ def history_item_schema(items: list) -> list:
             sid=0, raw_id=rid, source=str(it.get("source") or "kwqq"),
             title=name, artist=artist, album=album, cover=cover,
             duration=duration, pos=pos, collect=bool(it.get("collect")),
-            play_from="playHistory", history_extras=True))
+            play_from="playHistory", history_extras=True, is_audition=False))
     return out
 
 
