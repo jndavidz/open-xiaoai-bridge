@@ -160,6 +160,41 @@ async def search(keyword: str, page: int = 1, page_size: int = 15,
             if _i["source"] and _i["id"]]
 
 
+def search_params_for_intent(song: str, artist: str) -> tuple[str, str]:
+    """点播意图 (song, artist) → 分类搜索参数 (keywords, type)（纯函数，可单测）。
+
+    用户裁决 2026-11-25：LLM 只给语义字段，bridge 决定搜索参数。
+    - 仅 artist → type=artist（歌手曲目搜索，插件 /browse/search 走门面 search/multi）
+    - 仅 song 或两者都有 → type=music（单曲搜索，artist 作版本过滤由调用方处理）
+    """
+    song = str(song or "").strip()
+    artist = str(artist or "").strip()
+    if artist and not song:
+        return artist, "artist"
+    return song or artist, "music"
+
+
+async def browse_search(keywords: str, search_type: str, *, page: int = 1,
+                        limit: int = 20, http: aiohttp.ClientSession) -> list[dict]:
+    """Songloft 插件层分类搜索（与 App 同源，非直连门面）——票 02。
+
+    POST /api/v1/jsplugin/kwqq/browse/search {keywords, type, page, limit}
+    type ∈ music|album|artist|sheet|mv（kwqq main.js BROWSE_ROUTES VERIFIED）。
+    返回 items 经 to_item 映射为 bridge item；失败抛 SongloftError（调用方回退 /api/search）。
+    """
+    body = {"keywords": str(keywords or "").strip(),
+            "type": str(search_type or "music").strip().lower(),
+            "page": max(1, int(page)), "limit": max(1, min(50, int(limit)))}
+    if not body["keywords"]:
+        return []
+    data = await _request(http, "POST", f"{_PLUGIN_PATH}/browse/search", json_body=body)
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
+    return [_i for _i in (to_item(r) for r in items if isinstance(r, dict))
+            if _i["source"] and _i["id"]]
+
+
 async def lyric(title: str, artist: str = "",
                 *, http: aiohttp.ClientSession) -> dict:
     """跨源歌词回搜：`{lyric, tlyric?, lxlyric?}`；lxlyric = 逐字（洛雪格式）。

@@ -10,6 +10,41 @@ import unittest
 from core.music import songloft_api
 
 
+class BrowseSearchTest(unittest.TestCase):
+    """票 02：意图 → 分类搜索参数（纯函数）+ browse_search 端点契约。"""
+
+    def test_params_artist_only(self):
+        self.assertEqual(("任素汐", "artist"),
+                         songloft_api.search_params_for_intent("", "任素汐"))
+
+    def test_params_song_only(self):
+        self.assertEqual(("青花瓷", "music"),
+                         songloft_api.search_params_for_intent("青花瓷", ""))
+
+    def test_params_both_use_song_music(self):
+        self.assertEqual(("青花瓷", "music"),
+                         songloft_api.search_params_for_intent("青花瓷", "周杰伦"))
+
+    def test_browse_search_endpoint_and_body(self):
+        import asyncio
+        from unittest import mock
+
+        captured = {}
+        async def fake_request(http, method, path, *, json_body=None, **kw):
+            captured.update(method=method, path=path, body=json_body)
+            return {"items": [{"title": "晴天", "artist": "周杰伦",
+                                "source_data": {"s": "kugou", "i": "ID1"}}]}
+        http = object()
+        with mock.patch.object(songloft_api, "_request", fake_request):
+            items = asyncio.run(songloft_api.browse_search("周杰伦", "artist", http=http))
+        self.assertEqual("POST", captured["method"])
+        self.assertTrue(captured["path"].endswith("/browse/search"))
+        self.assertEqual({"keywords": "周杰伦", "type": "artist", "page": 1, "limit": 20},
+                         captured["body"])
+        self.assertEqual("晴天", items[0]["name"])
+        self.assertEqual("ID1", items[0]["id"])
+
+
 class SongRawidTest(unittest.TestCase):
     """票 10h：song_rawid 是收藏 rawID 提取的单一实现（favorite schema + 历史红心校准共用）。"""
 

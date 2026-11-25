@@ -137,6 +137,24 @@ class RegistryContractTest(unittest.TestCase):
         ]
         self.assertIn("song_request", names)
 
+    def test_tool_spec_has_song_field(self):
+        """票 01：LLM 双字段契约——song(歌名) + artist(歌手)，query 兼容保留。"""
+        props = song_request.TOOL_SPEC["function"]["parameters"]["properties"]
+        self.assertIn("song", props)
+        self.assertIn("query", props, "内部调用/旧 LLM 的 query 须兼容")
+        self.assertIn("artist", props)
+
+    def test_intent_fields_prefers_song_over_query(self):
+        self.assertEqual(("青花瓷", "周杰伦"),
+                         song_request.intent_fields({"song": "青花瓷", "query": "旧", "artist": "周杰伦"}))
+
+    def test_intent_fields_falls_back_to_query(self):
+        # 内部调用 cch_click 用 query=name
+        self.assertEqual(("晴天", ""), song_request.intent_fields({"query": "晴天"}))
+
+    def test_validate_accepts_song_without_query(self):
+        self.assertIsNone(song_request.validate({"action": "play", "song": "青花瓷"}))
+
     def test_external_network_accounting(self):
         # 点歌要出公网搜歌（kw-qq-api 在 NAS，但搜索属联网取数），计入联网口径
         self.assertIn("song_request", tools_registry.EXTERNAL_NETWORK_TOOLS)
@@ -468,9 +486,9 @@ class PlayPathTest(unittest.TestCase):
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             _run(song_request.run({"action": "play", "query": "晴天"}))
 
-        # 三个版本合并为一首，再按歌手补出别的歌
+        # 票 03：三个版本合并为一首，且不再按歌手补歌
         self.assertEqual(
-            ["晴天", "七里香"],
+            ["晴天"],
             [c["name"] for c in song_request._state["candidates"]],
         )
 
@@ -489,8 +507,8 @@ class PlayPathTest(unittest.TestCase):
         names = [c["name"] for c in song_request._state["candidates"]]
         self.assertEqual(["晴天"], names)
 
-    def test_single_track_extends_by_singer(self):
-        # 候选只剩同一首时，用歌手再搜一轮补别的歌，队列才有意义
+    def test_single_track_no_singer_expansion(self):
+        # 票 03：候选只剩一首时不补歌（用户裁决），队列只播这首
         def _by_query(url, params):
             if params.get("keywords") == "晴天":
                 return _envelope(200, {"keywords": "晴天", "total": 1,
@@ -512,7 +530,7 @@ class PlayPathTest(unittest.TestCase):
             _run(song_request.run({"action": "play", "query": "晴天"}))
 
         names = [c["name"] for c in song_request._state["candidates"]]
-        self.assertEqual(["晴天", "七里香"], names)
+        self.assertEqual(["晴天"], names)
 
     def test_first_source_failure_falls_back(self):
         # kuwo 传输层失败（_api 返回 None）→ netease 接管
@@ -707,12 +725,12 @@ class GateAndValidateTest(unittest.TestCase):
     def test_play_without_query_rejected(self):
         with _patch_cfg(enabled=True):
             out = _run(song_request.run({"action": "play"}))
-        self.assertIn("query", out)
+        self.assertIn("song", out)
 
     def test_album_without_query_rejected(self):
         with _patch_cfg(enabled=True):
             out = _run(song_request.run({"action": "album"}))
-        self.assertIn("query", out)
+        self.assertIn("song", out)
 
     def test_validate_direct(self):
         self.assertIsNone(song_request.validate({"action": "stop"}))

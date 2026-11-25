@@ -599,7 +599,7 @@ APP_CONFIG = {
         "tool_calls_enabled": True,
         "max_tool_rounds": 3,
         # 2026-10-27 V1 联调定稿（现网口径）：设备动作必须走工具，禁止口头答应
-        "rule_prompt": "简短口语，不用 markdown。播放/暂停/停止/切歌等设备动作必须调用工具执行，禁止只口头答应。在线点歌一律用 song_request；music_* 只用于家庭音乐服务器状态查询。",
+        "rule_prompt": "简短口语，不用 markdown。播放/暂停/停止/切歌等设备动作必须调用工具执行，禁止只口头答应。在线点歌一律用 song_request；music_* 只用于家庭音乐服务器状态查询。点歌填 song/artist：「播放X的歌」→artist=X；「播放X」→song=X；「播放X的Y」→song=Y,artist=X；只提取名字本身，不带「播放/的歌」。",
         "rule_prompt_for_skill": "",
         "extra_body": {},
         # P1-05 灰度转正：流式默认开（2026-10-26 真机窗口验证：首音 ~3s vs 基线 4.8s、

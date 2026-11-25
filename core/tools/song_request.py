@@ -117,8 +117,9 @@ TOOL_SPEC = {
         "name": NAME,
         "description": (
             "按歌名/歌手/专辑名在线搜歌并马上在音箱播放（320k 音质）。"
-            "query 可以是歌曲名、歌手名或专辑名（按关键词检索，专辑名会返回该专辑曲目）；"
-            "action=play 播放 query 指定的歌；action=album 播放整张专辑"
+            "action=play 时用 song=歌名、artist=歌手（都从用户原话提取，不带「播放/的歌」）；"
+            "只说歌名填 song，只说歌手填 artist，说「周杰伦的青花瓷」两字段都填；"
+            "query 是 song 的兼容别名（内部调用用）；action=album 播放整张专辑"
             "（query=专辑名，artist 可提高同名专辑命中率），按官方曲序连播；"
             "action=next/prev 切上一首下一首（优先桥内点歌队列，无队列时切设备自身队列）；"
             "action=pause 暂停；action=resume 继续/恢复播放（用户说「继续播放」时用这个，"
@@ -135,13 +136,17 @@ TOOL_SPEC = {
                         "pause=暂停，resume=继续播放，stop=停止"
                     ),
                 },
+                "song": {
+                    "type": "string",
+                    "description": "歌名。用户说「播放X」时填 X；「播放X的Y」时填 Y。play 用",
+                },
                 "query": {
                     "type": "string",
-                    "description": "搜索词（歌名/歌手；action=album 时为专辑名）。play/album 必填",
+                    "description": "song 的兼容别名（内部点击调用用）；action=album 时为专辑名",
                 },
                 "artist": {
                     "type": "string",
-                    "description": "可选：歌手名（action=album 时用于同名专辑排序）",
+                    "description": "可选：歌手名。用户说「播放X的歌」时填 X；「播放X的Y」时填 X",
                 },
                 "source": {
                     "type": "string",
@@ -168,13 +173,24 @@ def _cfg(key: str, default=None):
     return ConfigManager.instance().get_app_config(f"song_request.{key}", default)
 
 
+def intent_fields(args: dict) -> tuple[str, str]:
+    """从工具参数提取 (song, artist) 语义字段（纯函数，可单测）。
+    song 优先取 LLM 填的 song；缺省回退 query（内部点击调用 cch_click 用 query=name）。
+    """
+    a = args or {}
+    song = str(a.get("song") or "").strip() or str(a.get("query") or "").strip()
+    artist = str(a.get("artist") or "").strip()
+    return song, artist
+
+
 def validate(args: dict) -> str | None:
-    """参数校验：action 白名单 + play/album 必带 query（返回拒绝原因即拒绝）。"""
+    """参数校验：action 白名单 + play/album 必带 song/query/artist 之一。"""
     action = str((args or {}).get("action") or "").strip().lower()
     if action not in ("play", "album", "next", "prev", "pause", "resume", "stop"):
         return "action 必须是 play/album/next/prev/pause/resume/stop"
-    if action in ("play", "album") and not str((args or {}).get("query") or "").strip():
-        return "play/album 需要 query（歌名、歌手或专辑名）"
+    song, artist = intent_fields(args)
+    if action in ("play", "album") and not (song or artist):
+        return "play/album 需要 song 或 artist（歌名/歌手）"
     return None
 
 
@@ -275,6 +291,31 @@ async def _songloft_candidates(query: str) -> list[dict]:
     async with aiohttp.ClientSession() as http:
         items = await songloft_api.search(query, page_size=_SEARCH_LIMIT, http=http)
     return _dedupe_items(_drop_query_variants(items, query))
+
+
+async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
+    """play 意图 → 分类搜索（Songloft 插件层 /browse/search，与 App 同源）。
+    失败回退旧 /api/search（_managed_collect）——票 24 兜底保留。"""
+    from core.music import songloft_api
+
+    keywords, stype = songloft_api.search_params_for_intent(song, artist)
+    if keywords:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as http:
+                items = await songloft_api.browse_search(keywords, stype, http=http)
+            if items:
+                if stype == "music" and artist:
+                    # 双字段：按歌手过滤版本（只认主歌手命中的项）
+                    items = [it for it in items
+                             if artist in str(it.get("artist") or it.get("singer") or "")]
+                logger.info(f"[SongRequest] cch browse_search type={stype} keywords={keywords!r} n={len(items)}",
+                            module="SongRequest")
+                return items
+        except Exception as exc:  # noqa: BLE001 - 分类搜索失败回退普通搜索
+            logger.warning(f"[SongRequest] cch browse_search failed: {type(exc).__name__}, fallback",
+                           module="SongRequest")
+    return await _managed_collect(keywords or song, args.get("source"), artist=artist)
 
 
 async def _managed_collect(query: str, requested_source, *, artist: str = "",
@@ -408,6 +449,7 @@ async def _run_cch(action: str, args: dict) -> str:
             return "CCH 暂不支持上一首"
         # play / album：搜歌 → songloft prepare → renderData → 9102 /cmd
         query = str(args.get("query") or "").strip()
+        song, artist = intent_fields(args)  # 票 01 双字段；query 是 song 兼容别名
         if action == "play":
             # 立即暂停（用户 2026-11-21）：派生 key 有 10 分钟缓存；stop 走「连发+回执」，
             # 广播有间歇丢失，单发一次不够（否则旧曲会在播报前继续响）。
@@ -471,11 +513,13 @@ async def _run_cch(action: str, args: dict) -> str:
             logger.info(f"[SongRequest] cch rawID direct: id={raw_id} src={src} name={query!r} "
                         f"copyright={item['extra'].get('copyrightId') or ''}",
                         module="SongRequest")
+        elif action == "play":
+            items = await _collect_for_play(song, artist, args)
         else:
             items = await _managed_collect(
                 query, args.get("source"),
                 artist=str(args.get("artist") or "").strip(),
-                album=(action == "album"),
+                album=True,
             )
         if not items:
             return f"没有找到能播放的曲目《{query}》"
@@ -1138,31 +1182,6 @@ def _queue_for(current: dict, candidates: list[dict]) -> list[dict]:
     return queue
 
 
-async def _extend_with_singer(session, source: str, items: list[dict]) -> list[dict]:
-    """候选只有同一首歌时，用歌手再搜一轮补出「别的歌」（队列才有意义）。"""
-    singer = str(items[0].get("singer") or "").strip() if items else ""
-    if not singer:
-        return items
-    current_key = _norm_title(items[0].get("name")) if items else ""
-    extra = _dedupe_items(await _search(session, source, singer))
-    if not extra:
-        return items
-    seen = {_item_key(i) for i in items}
-    merged = list(items)
-    for item in extra:
-        # 歌手检索结果里仍可能带当前曲的拼歌/衍生标题（如「晴天+告白气球 (Live)」），
-        # 按当前曲名再过滤一次（真机 2026-10-27：下一首又播同一首的拼接版）
-        title = _norm_title(item.get("name"))
-        if current_key and title != current_key and title.startswith(current_key):
-            continue
-        key = _item_key(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(item)
-    return merged
-
-
 # ---- play 主路径 ----
 
 
@@ -1175,12 +1194,8 @@ async def _try_play_group(speaker, session, raw_items: list[dict], items: list[d
         )
         if not ok:
             continue  # 无直链/加密件/设备拒收：候选内继续，不行再落下一源
+        # 票 03：不再按歌手补歌——单曲就播一首（用户裁决），队列 = 搜索结果去重后
         queue = _queue_for(item, items)
-        if len(queue) < 2:
-            # 队列只剩同一首：按歌手补别的歌后再按当前曲过滤
-            extra = await _extend_with_singer(
-                session, str(item.get("source") or label).strip().lower() or label, items)
-            queue = _queue_for(item, list(items) + extra)
         _note_played(item, queue, play_seq=play_seq)
         logger.info(
             f"[SongRequest] playing {item.get('name')!r} via {label} "
