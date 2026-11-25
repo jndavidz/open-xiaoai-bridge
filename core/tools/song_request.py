@@ -327,10 +327,11 @@ async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
             if items:
                 # 票 03：分类搜索结果同样去变体+同名去重（与回退路径口径一致）
                 items = _dedupe_items(_drop_query_variants(items, keywords))
-                if stype == "music" and artist:
-                    # 双字段（如「周杰伦的青花瓷」）：按 **歌名精确匹配** 过滤，
-                    # 不是按歌手——否则搜索"青花瓷"时各源混进的晴天/组曲（同为周杰伦）会保留。
-                    # artist 仅作辅助（歌名匹配但歌手不符时排除，防同名不同歌手）。
+                if stype == "music" and song:
+                    # 有歌名（如「周杰伦的青花瓷」或 LLM 漏填 artist 的「青花瓷」）：
+                    # 按 **歌名精确匹配** 过滤，不是按歌手——否则搜索"青花瓷"时各源混进的
+                    # 晴天/组曲会保留。artist 仅作辅助（填了且不符则排除，防同名不同歌手）。
+                    # 不依赖 artist 是因为 LLM 可能漏填（真机 17:03 第一次 n=68 未过滤）。
                     song_key = _norm_title(song or keywords)
                     matched = []
                     for it in items:

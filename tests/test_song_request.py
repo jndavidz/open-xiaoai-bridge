@@ -353,6 +353,20 @@ class FetchLayerTest(unittest.TestCase):
 class CollectForPlayTest(unittest.TestCase):
     """票 02 集成：_collect_for_play 意图→分类搜索 + 去重 + 回退（mock 模块边界）。"""
 
+    def test_song_only_without_artist_still_exact_filters(self):
+        # LLM 漏填 artist 时（真机 17:03 第一次 n=68）仍须按 song 精确过滤
+        import asyncio
+        from unittest import mock
+        async def fake_browse(keywords, stype, *, http=None, raw=False):
+            return [
+                {"id": "ID1", "name": "青花瓷", "artist": "周杰伦", "source": "kugou"},
+                {"id": "ID2", "name": "晴天", "artist": "周杰伦", "source": "qq"},
+                {"id": "ID3", "name": "晴天", "artist": "其他", "source": "qq"},
+            ]
+        with mock.patch("core.music.songloft_api.browse_search", fake_browse):
+            items = asyncio.run(song_request._collect_for_play("青花瓷", "", {}))
+        self.assertEqual(["青花瓷"], [i["name"] for i in items])
+
     def test_artist_only_uses_two_step_artist_search(self):
         import asyncio
         from unittest import mock
