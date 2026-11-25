@@ -507,5 +507,136 @@ class CollectFavoriteTest(CchNpTestBase):
         self.assertEqual([2], seen["remove"])
 
 
+class PlaybackModeTest(unittest.TestCase):
+    """票 11：单曲/批量判定 + 五模式下一首选择（纯函数，public seam）。"""
+
+    def test_classify_single_when_query_exact_matches_a_title(self):
+        # 点播特定歌：query 精确命中某结果歌名 → 单曲一次
+        items = [{"name": "青花瓷"}, {"name": "青花在瓷上"}, {"name": "东风破"}]
+        self.assertEqual("single", cch_np.classify_play_intent("青花瓷", items))
+
+    def test_classify_batch_when_query_is_artist(self):
+        # 点播歌手：没有任何结果歌名 == query → 批量
+        items = [{"name": "思念"}, {"name": "贝加尔湖畔"}, {"name": "传奇"}]
+        self.assertEqual("batch", cch_np.classify_play_intent("李健的歌", items))
+
+    def test_classify_strips_hao_and_wan(self):
+        # "播放青花瓷" 的 query 可能带"的歌"等口语尾巴 —— 精确匹配失败仍按批量保守处理
+        items = [{"name": "青花瓷"}, {"name": "青花在瓷上"}]
+        self.assertEqual("single", cch_np.classify_play_intent("青花瓷", items))
+
+    def test_choose_next_normal_sequential(self):
+        self.assertEqual(1, cch_np.choose_next("normal", 3, 0, set()))
+        self.assertEqual(2, cch_np.choose_next("normal", 3, 1, set()))
+        self.assertIsNone(cch_np.choose_next("normal", 3, 2, set()), "顺序末首停")
+
+    def test_choose_next_single_once_stops_after_first(self):
+        self.assertIsNone(cch_np.choose_next("single", 5, 0, set()), "单曲一次：第一首就停")
+        self.assertIsNone(cch_np.choose_next("single", 5, 3, set()))
+
+    def test_choose_next_repeatone_replays_same(self):
+        self.assertEqual(0, cch_np.choose_next("repeatone", 3, 0, set()))
+        self.assertEqual(2, cch_np.choose_next("repeatone", 3, 2, set()))
+
+    def test_choose_next_repeat_wraps_to_zero(self):
+        self.assertEqual(0, cch_np.choose_next("repeat", 3, 2, set()), "循环末首回队首")
+
+    def test_choose_next_shuffle_picks_unplayed(self):
+        nxt = cch_np.choose_next("shuffle", 4, 0, {0}, random_seed=42)
+        self.assertIn(nxt, (1, 2, 3))
+        self.assertNotEqual(0, nxt, "乱序不选已播")
+
+    def test_choose_next_shuffle_empty_pool_restarts(self):
+        # 全部播过 → 重置后随机（避免死循环）
+        nxt = cch_np.choose_next("shuffle", 3, 0, {0, 1, 2}, random_seed=7)
+        self.assertIn(nxt, (0, 1, 2))
+
+    def test_choose_next_unknown_mode_falls_back_normal(self):
+        self.assertEqual(1, cch_np.choose_next("unknown", 3, 0, set()))
+
+
+class PlaybackModeIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    """票 11：play_mode 接入 advance（验证 pure function 真被调用）。"""
+
+    def setUp(self):
+        from core.tools import song_request as sr
+        from core.music import cch_cast
+        self.sr = sr
+        self._saved = dict(sr._cch_state)
+        self._mode = cch_np.current_play_mode()
+        self._cast_saved = {k: getattr(cch_cast, k) for k in (
+            "revoke", "resolve_ticket_url", "kwqq_meta", "cast_native",
+            "host_token_deploy", "m5_enabled", "wait_np_play")}
+        cch_np._last_advance_at = -1e9
+
+    def tearDown(self):
+        from core.music import cch_cast
+        self.sr._cch_state.clear()
+        self.sr._cch_state.update(self._saved)
+        cch_np.set_play_mode(self._mode)
+        for k, v in self._cast_saved.items():
+            setattr(cch_cast, k, v)
+
+    def _fake_downlink(self):
+        from unittest import mock
+        cch_cast = __import__('core.music.cch_cast', fromlist=['x'])
+        rec = {"revoke": [], "cast": []}
+        async def fake_revoke(session, epoch, entry):
+            rec["revoke"].append(entry); return True
+        async def fake_resolve(ref, *, session, epoch, entry):
+            return "http://ticket"
+        async def fake_meta(rid, source):
+            return {"cover": "", "title": "歌" + rid, "duration": 200}
+        async def fake_cast(rd):
+            rec["cast"].append(rd); return True, "OK"
+        async def fake_token():
+            pass
+        cch_cast.revoke = fake_revoke
+        cch_cast.resolve_ticket_url = fake_resolve
+        cch_cast.kwqq_meta = fake_meta
+        cch_cast.cast_native = fake_cast
+        cch_cast.host_token_deploy = fake_token
+        cch_cast.m5_enabled = lambda: False
+        import asyncio as _aio
+        async def fake_wait(t):
+            return True
+        cch_cast.wait_np_play = fake_wait
+        return rec
+
+    async def test_single_mode_finish_stops_no_advance(self):
+        rec = self._fake_downlink()
+        self.sr._cch_state.update({"entry": 0, "items": [
+            {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"}],
+            "play_mode": "single", "played": []})
+        action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
+        self.assertEqual("single_once", action["action"])
+        self.assertEqual(len(rec["cast"]), 0, "单曲一次：曲终不推进")
+        self.assertEqual(self.sr._cch_state["entry"], 0)
+
+    async def test_repeatone_mode_finish_replays_same(self):
+        rec = self._fake_downlink()
+        self.sr._cch_state.update({"entry": 1, "items": [
+            {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"}],
+            "play_mode": "repeatone", "played": []})
+        action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
+        self.assertEqual("advanced", action["action"])
+        self.assertEqual(action["index"], 1, "单曲循环：仍播当前曲")
+
+    async def test_repeat_mode_wraps_from_last(self):
+        rec = self._fake_downlink()
+        self.sr._cch_state.update({"entry": 1, "items": [
+            {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"}],
+            "play_mode": "repeat", "played": []})
+        action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
+        self.assertEqual("advanced", action["action"])
+        self.assertEqual(action["index"], 0, "循环：末首回队首")
+
+    def test_set_play_mode_validates(self):
+        cch_np.set_play_mode("Shuffle")
+        self.assertEqual("shuffle", cch_np.current_play_mode())
+        cch_np.set_play_mode("BOGUS")
+        self.assertEqual("shuffle", cch_np.current_play_mode(), "未知值保留上次")
+
+
 if __name__ == "__main__":
     unittest.main()

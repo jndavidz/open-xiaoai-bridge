@@ -35,6 +35,81 @@ _last_advance_at: float = -1e9
 _speak_timer: asyncio.TimerHandle | None = None
 
 
+# 播控页播放模式（票 11）：由 worker 抓 cmdVal playMode 经 HTTP 上报 set_play_mode；
+# 缺省 normal（顺序）。批量点播读此值决定换代行为，单曲点播强制 single。
+_current_play_mode: str = "normal"
+
+
+def set_play_mode(mode: str) -> None:
+    """设备播控页 playMode 上报入口（Normal/Shuffle/Repeat/RepeatOne → 内部小写）。
+    仅接受已知四档，未知值忽略（fail-safe 保留上次有效值）。"""
+    global _current_play_mode
+    m = str(mode or "").strip().lower()
+    if m in ("normal", "shuffle", "repeat", "repeatone"):
+        _current_play_mode = m
+
+
+def current_play_mode() -> str:
+    return _current_play_mode
+
+
+def classify_play_intent(query: str, items: list) -> str:
+    """判定点播意图：single（点播特定歌，只播一次就停）vs batch（歌手/批量，按播放模式连续播）。
+
+    判据（用户裁决 2026-11-25，由点播类型自动决定，不改原厂四档 UI）：
+    query 归一化后**精确命中**任一搜索结果的歌名 → single；否则 batch。
+    - 「播放青花瓷」→ 结果含「青花瓷」→ single（即便还有「青花在瓷上」等变体）
+    - 「播放李健的歌」→ 结果全是歌手的不同曲（思念/传奇…），无一是「李健的歌」→ batch
+    """
+    import re
+
+    def norm(s: str) -> str:
+        return re.sub(r"[\s\u3000]+", "", str(s or "")).strip().lower()
+
+    q = norm(query)
+    if not q:
+        return "batch"
+    # 去掉常见口语尾巴（"的歌"/"歌曲"）后再精确匹配——"播放周杰伦的歌"若结果里有
+    # 名为"周杰伦的歌"的曲才算 single，通常没有 → batch，符合预期。
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        name = norm(it.get("name") or it.get("title") or "")
+        if name and name == q:
+            return "single"
+    return "batch"
+
+
+def choose_next(mode: str, queue_len: int, idx: int, played: set[int],
+                *, random_seed: int | None = None) -> int | None:
+    """五模式下一首选择（纯函数，可单测）。返回 None = 停止不推进。
+
+    mode: single(单曲一次) / normal(顺序) / shuffle(乱序) / repeat(循环) / repeatone(单曲循环)
+    played: 已播过的 index 集合（shuffle 用，避免重复）
+    """
+    if queue_len <= 0:
+        return None
+    idx = idx if 0 <= idx < queue_len else 0
+    mode = (mode or "normal").strip().lower()
+
+    if mode == "single":
+        return None
+    if mode == "repeatone":
+        return idx
+    if mode == "repeat":
+        return (idx + 1) % queue_len
+    if mode == "shuffle":
+        pool = [i for i in range(queue_len) if i not in played]
+        if not pool:  # 全部播过 → 重置池
+            pool = list(range(queue_len))
+        if random_seed is not None:
+            import random
+            return random.Random(random_seed).choice(pool)
+        return pool[0] if len(pool) == 1 else pool[int(__import__("time").time() * 1000) % len(pool)]
+    # normal 及未知模式回退顺序
+    return idx + 1 if idx + 1 < queue_len else None
+
+
 def np_enabled() -> bool:
     from core.tools import song_request as sr
 
@@ -92,21 +167,29 @@ async def _advance_if_finished() -> dict:
             return {"action": "advance_cooldown"}
         items = sr._cch_state.get("items") or []
         idx = int(sr._cch_state.get("entry", 0))
-        # 票 23 单发标志：点击播 = 单曲意图，曲终不换代（防搜索变体连播）。
-        # 标志由点击播设置、下一次语音点歌路径显式清除。
+        # 票 23 单发标志：点击播 = 单曲意图，曲终不换代（防搜索变体连播）——
+        # 与五模式的 single 等价，保留兼容。
         if sr._cch_state.get("no_advance"):
             logger.info("[CchNp] advance suppressed (no_advance single-shot)", module="CchNp")
             _last_advance_at = now
             return {"action": "no_advance"}
-        # 旧票逐条撤（spec 裁决 4）：尽力而为，失败不阻塞 advance
+        # 票 11：五模式换代。play_mode 由点播意图（single）或设备播控页状态
+        # （normal/shuffle/repeat/repeatone）决定，存于 _cch_state.play_mode。
+        mode = str(sr._cch_state.get("play_mode") or "normal").lower()
+        played = set(sr._cch_state.get("played") or ())
+        played.add(idx)
+        nxt = choose_next(mode, len(items), idx, played)
+        sr._cch_state["played"] = list(played)
+        # 旧票逐条撤（spec 裁决 4）：无论推进还是停止，都撤刚播完那条的旧票
         if idx < len(items):
             await _revoke_entry(idx, items[idx])
-        nxt = idx + 1
-        if nxt >= len(items):
-            logger.info(f"[CchNp] queue exhausted (played {idx + 1}/{len(items)}) — fallback to native chain",
-                        module="CchNp")
+        if nxt is None:
+            reason = "single_once" if mode == "single" else (
+                     "queue_exhausted" if mode == "normal" else "stop")
+            logger.info(f"[CchNp] advance stop mode={mode} reason={reason} "
+                        f"(played {len(played)}/{len(items)})", module="CchNp")
             _last_advance_at = now
-            return {"action": "queue_exhausted"}
+            return {"action": reason}
         item = items[nxt]
         sr._cch_state["entry"] = nxt
         try:
