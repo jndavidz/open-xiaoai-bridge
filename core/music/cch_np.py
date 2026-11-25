@@ -23,6 +23,7 @@ META 事件更新内存态（Title/IconUri/isFavorite），供收藏幂等（票
 from __future__ import annotations
 
 import asyncio
+import random
 
 from core.utils.logger import logger
 
@@ -31,6 +32,8 @@ _advance_lock = asyncio.Lock()
 # 换代冷却窗：finish/stop 系事件可能连发（stop→finish 相邻上报），同一窗口只 advance 一次
 _ADVANCE_COOLDOWN_S = 2.0
 _last_advance_at: float = -1e9
+# 乱序模式 RNG（模块级单例；rng 参数可注入做确定性测试）
+_rng = random.Random()
 # 票 04：/speak 恢复定时器（桥内定时器，非轮询）；新 speak 顶掉旧定时器
 _speak_timer: asyncio.TimerHandle | None = None
 
@@ -53,39 +56,42 @@ def current_play_mode() -> str:
     return _current_play_mode
 
 
-def classify_play_intent(query: str, items: list) -> str:
-    """判定点播意图：single（点播特定歌，只播一次就停）vs batch（歌手/批量，按播放模式连续播）。
+def classify_play_intent(items: list) -> str:
+    """判定点播意图（票 11，2026-11-25 实测定案）：基于 bridge 去重后的搜索结果特征。
 
-    判据（用户裁决 2026-11-25，由点播类型自动决定，不改原厂四档 UI）：
-    query 归一化后**精确命中**任一搜索结果的歌名 → single；否则 batch。
-    - 「播放青花瓷」→ 结果含「青花瓷」→ single（即便还有「青花在瓷上」等变体）
-    - 「播放李健的歌」→ 结果全是歌手的不同曲（思念/传奇…），无一是「李健的歌」→ batch
+    背景（真机/Songloft 日志 VERIFIED）：
+    - Songloft 聚合搜索无论歌名还是歌手都返回 26–30 项；
+    - bridge `_dedupe_items` 按归一化歌名去重后：**单曲**「青花瓷」只剩 1–2 项且歌名
+      全是「青花瓷」（同曲版本被去重）；**歌手**「任素汐」剩约 10 项且歌名各不相同
+      （思念/传奇/…）。这就是用户说的「单曲搜索结果明显少」。
+    ⇒ 判据 = 去重后结果的**歌名同质度**：所有项歌名归一后相同/仅 variant 差异 → single；
+      歌名各不相同 → batch。不依赖 query 文本（实测 LLM 填纯名字，无法区分）。
     """
     import re
 
-    def norm(s: str) -> str:
-        return re.sub(r"[\s\u3000]+", "", str(s or "")).strip().lower()
+    def norm(name: str) -> str:
+        t = re.sub(r"[\(（\[【].*?[\)）\]】]", "", str(name or "").strip().lower())
+        t = re.sub(r"live|伴奏|remix|cover|翻自|翻唱|demo", "", t)
+        return re.sub(r"[\s\-_·.,，。!！?？'\"、]+", "", t)
 
-    q = norm(query)
-    if not q:
-        return "batch"
-    # 去掉常见口语尾巴（"的歌"/"歌曲"）后再精确匹配——"播放周杰伦的歌"若结果里有
-    # 名为"周杰伦的歌"的曲才算 single，通常没有 → batch，符合预期。
-    for it in items or []:
-        if not isinstance(it, dict):
-            continue
-        name = norm(it.get("name") or it.get("title") or "")
-        if name and name == q:
-            return "single"
-    return "batch"
+    titles = [norm(it.get("name") or it.get("title") or "")
+              for it in (items or []) if isinstance(it, dict)]
+    titles = [t for t in titles if t]
+    if not titles:
+        return "batch"           # 无结果 → 保守批量（不臆断单曲）
+    distinct = set(titles)
+    if len(distinct) == 1:
+        return "single"          # 去重后全是同一首（同曲版本）→ 单曲点播
+    return "batch"               # 多首不同歌 → 歌手批量
 
 
 def choose_next(mode: str, queue_len: int, idx: int, played: set[int],
-                *, random_seed: int | None = None) -> int | None:
+                 *, rng: random.Random | None = None) -> int | None:
     """五模式下一首选择（纯函数，可单测）。返回 None = 停止不推进。
 
     mode: single(单曲一次) / normal(顺序) / shuffle(乱序) / repeat(循环) / repeatone(单曲循环)
     played: 已播过的 index 集合（shuffle 用，避免重复）
+    rng: 可注入随机源（确定性测试用），缺省用模块级 _rng——依赖注入而非测试后门。
     """
     if queue_len <= 0:
         return None
@@ -102,10 +108,7 @@ def choose_next(mode: str, queue_len: int, idx: int, played: set[int],
         pool = [i for i in range(queue_len) if i not in played]
         if not pool:  # 全部播过 → 重置池
             pool = list(range(queue_len))
-        if random_seed is not None:
-            import random
-            return random.Random(random_seed).choice(pool)
-        return pool[0] if len(pool) == 1 else pool[int(__import__("time").time() * 1000) % len(pool)]
+        return (rng or _rng).choice(pool)
     # normal 及未知模式回退顺序
     return idx + 1 if idx + 1 < queue_len else None
 
@@ -173,9 +176,11 @@ async def _advance_if_finished() -> dict:
             logger.info("[CchNp] advance suppressed (no_advance single-shot)", module="CchNp")
             _last_advance_at = now
             return {"action": "no_advance"}
-        # 票 11：五模式换代。play_mode 由点播意图（single）或设备播控页状态
-        # （normal/shuffle/repeat/repeatone）决定，存于 _cch_state.play_mode。
-        mode = str(sr._cch_state.get("play_mode") or "normal").lower()
+        # 票 11：五模式换代。单一真相源——点播意图存 _cch_state.play_intent（single/batch，
+        # 不可变）；播控页四档状态实时读 current_play_mode()（worker 上报，可切换）。
+        # 不再把四档值快照进队列，避免「点播后切按钮不生效」的双真相源问题。
+        intent = str(sr._cch_state.get("play_intent") or "batch").lower()
+        mode = "single" if intent == "single" else current_play_mode()
         played = set(sr._cch_state.get("played") or ())
         played.add(idx)
         nxt = choose_next(mode, len(items), idx, played)

@@ -119,6 +119,13 @@ async def execute_tool(name: str, arguments_json: str | None = None) -> str:
                     args = parsed
             except (json.JSONDecodeError, TypeError):
                 return f"tool_error: invalid arguments json for '{name}': {arguments_json!r}"
+        if name == "song_request":
+            # 点播判据取证（票 11）：记录 LLM 填给工具的搜索词原文（无敏感信息），
+            # 用于区分「歌名 single」vs「歌手 batch」——实测后作为可观测性保留。
+            logger.info(
+                f"[Tool] song_request action={args.get('action')} "
+                f"query={args.get('query')!r} artist={args.get('artist')!r} "
+                f"target={args.get('target')!r}", module="Registry")
         if risk in ("b", "c"):
             return await execute_guarded(
                 mod,

@@ -65,6 +65,7 @@ def reset_playback_target() -> None:
     _playback_target_text = ""
 
 
+
 def _resolve_target(explicit) -> str:
     """目标判定（两层结合）：本轮上下文优先于 LLM 显式值，避免模型被历史对话带偏。
 
@@ -725,15 +726,13 @@ async def _run_cch(action: str, args: dict) -> str:
         # 票 11：play_mode = 点播意图（single 特定歌 / 批量走播控页模式）+ played 重置
         from core.music import cch_np as _np
 
-        _intent = _np.classify_play_intent(query, items)
-        if _intent == "single":
-            _play_mode = "single"   # 点播特定歌：只播一次就停（队列保留供 tab 显示）
-        else:
-            _play_mode = _np.current_play_mode()  # 批量：读设备播控页四档状态
+        _intent = _np.classify_play_intent(items)  # 基于去重后结果同质度判定（实测定案）
         _cch_state.update({"entry": 0, "items": items, "no_advance": False,
-                           "play_mode": _play_mode, "played": []})
-        logger.info(f"[SongRequest] cch play_mode={_play_mode} intent={_intent} n={len(items)}",
-                    module="SongRequest")
+                           "play_intent": _intent, "played": []})
+        # 播控页四档状态不在此快照——由 cch_np.current_play_mode() 实时读（单一真相源），
+        # 保证「点播后切按钮立即生效」。
+        logger.info(f"[SongRequest] cch play_intent={_intent} mode={_np.current_play_mode()} "
+                    f"n={len(items)}", module="SongRequest")
         # 播放历史 UI 接管：CCH 设备专属历史（不用 Songloft 全局），点歌成功登记当前曲
         try:
             from core.music import cch_history

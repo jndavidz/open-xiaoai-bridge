@@ -510,20 +510,25 @@ class CollectFavoriteTest(CchNpTestBase):
 class PlaybackModeTest(unittest.TestCase):
     """票 11：单曲/批量判定 + 五模式下一首选择（纯函数，public seam）。"""
 
-    def test_classify_single_when_query_exact_matches_a_title(self):
-        # 点播特定歌：query 精确命中某结果歌名 → 单曲一次
-        items = [{"name": "青花瓷"}, {"name": "青花在瓷上"}, {"name": "东风破"}]
-        self.assertEqual("single", cch_np.classify_play_intent("青花瓷", items))
+    def test_classify_single_when_results_are_same_song(self):
+        # 实测：搜「青花瓷」去重后全是同一首（含变体）→ single
+        items = [{"name": "青花瓷"}, {"name": "青花瓷 (Live)"}, {"name": "青花瓷(伴奏)"}]
+        self.assertEqual("single", cch_np.classify_play_intent(items))
 
-    def test_classify_batch_when_query_is_artist(self):
-        # 点播歌手：没有任何结果歌名 == query → 批量
-        items = [{"name": "思念"}, {"name": "贝加尔湖畔"}, {"name": "传奇"}]
-        self.assertEqual("batch", cch_np.classify_play_intent("李健的歌", items))
+    def test_classify_batch_when_results_are_different_songs(self):
+        # 实测：搜「任素汐」去重后是不同歌 → batch
+        items = [{"name": "思念"}, {"name": "传奇"}, {"name": "贝加尔湖畔"}]
+        self.assertEqual("batch", cch_np.classify_play_intent(items))
 
-    def test_classify_strips_hao_and_wan(self):
-        # "播放青花瓷" 的 query 可能带"的歌"等口语尾巴 —— 精确匹配失败仍按批量保守处理
-        items = [{"name": "青花瓷"}, {"name": "青花在瓷上"}]
-        self.assertEqual("single", cch_np.classify_play_intent("青花瓷", items))
+    def test_classify_single_when_exact_title_plus_variant(self):
+        # 用户复现：「恰似你的温柔」三首 → 归一后同一首 → single
+        items = [{"name": "恰似你的温柔"}, {"name": "恰似你的温柔 (Live)"},
+                 {"name": "恰似你的温柔(伴奏)"}]
+        self.assertEqual("single", cch_np.classify_play_intent(items))
+
+    def test_classify_empty_conservative(self):
+        self.assertEqual("batch", cch_np.classify_play_intent([]))
+        self.assertEqual("batch", cch_np.classify_play_intent(None))
 
     def test_choose_next_normal_sequential(self):
         self.assertEqual(1, cch_np.choose_next("normal", 3, 0, set()))
@@ -542,14 +547,23 @@ class PlaybackModeTest(unittest.TestCase):
         self.assertEqual(0, cch_np.choose_next("repeat", 3, 2, set()), "循环末首回队首")
 
     def test_choose_next_shuffle_picks_unplayed(self):
-        nxt = cch_np.choose_next("shuffle", 4, 0, {0}, random_seed=42)
+        import random
+        nxt = cch_np.choose_next("shuffle", 4, 0, {0}, rng=random.Random(42))
         self.assertIn(nxt, (1, 2, 3))
         self.assertNotEqual(0, nxt, "乱序不选已播")
 
     def test_choose_next_shuffle_empty_pool_restarts(self):
         # 全部播过 → 重置后随机（避免死循环）
-        nxt = cch_np.choose_next("shuffle", 3, 0, {0, 1, 2}, random_seed=7)
+        import random
+        nxt = cch_np.choose_next("shuffle", 3, 0, {0, 1, 2}, rng=random.Random(7))
         self.assertIn(nxt, (0, 1, 2))
+
+    def test_choose_next_shuffle_rng_injection_is_deterministic(self):
+        # rng 依赖注入是正当 seam（确定性测试），不是测试后门
+        import random
+        a = cch_np.choose_next("shuffle", 5, 0, set(), rng=random.Random(1))
+        b = cch_np.choose_next("shuffle", 5, 0, set(), rng=random.Random(1))
+        self.assertEqual(a, b)
 
     def test_choose_next_unknown_mode_falls_back_normal(self):
         self.assertEqual(1, cch_np.choose_next("unknown", 3, 0, set()))
@@ -607,7 +621,7 @@ class PlaybackModeIntegrationTest(unittest.IsolatedAsyncioTestCase):
         rec = self._fake_downlink()
         self.sr._cch_state.update({"entry": 0, "items": [
             {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"}],
-            "play_mode": "single", "played": []})
+            "play_intent": "single", "played": []})
         action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
         self.assertEqual("single_once", action["action"])
         self.assertEqual(len(rec["cast"]), 0, "单曲一次：曲终不推进")
@@ -615,18 +629,20 @@ class PlaybackModeIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_repeatone_mode_finish_replays_same(self):
         rec = self._fake_downlink()
+        cch_np.set_play_mode("repeatone")
         self.sr._cch_state.update({"entry": 1, "items": [
             {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"}],
-            "play_mode": "repeatone", "played": []})
+            "play_intent": "batch", "played": []})
         action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
         self.assertEqual("advanced", action["action"])
         self.assertEqual(action["index"], 1, "单曲循环：仍播当前曲")
 
     async def test_repeat_mode_wraps_from_last(self):
         rec = self._fake_downlink()
+        cch_np.set_play_mode("repeat")
         self.sr._cch_state.update({"entry": 1, "items": [
             {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"}],
-            "play_mode": "repeat", "played": []})
+            "play_intent": "batch", "played": []})
         action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
         self.assertEqual("advanced", action["action"])
         self.assertEqual(action["index"], 0, "循环：末首回队首")
