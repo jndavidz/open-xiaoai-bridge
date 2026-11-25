@@ -432,45 +432,37 @@ async def _run_cch(action: str, args: dict) -> str:
             try:
                 from core.music import songloft_api
                 async with aiohttp.ClientSession() as http:
-                    pl_id = await songloft_api.favorites_playlist_id(http=http)
-                    songs = await songloft_api.playlist_songs(pl_id, http=http)
-                    fav_song = None
-                    for s in songs:
-                        sd_raw = s.get("source_data")
-                        if not isinstance(sd_raw, str) or not sd_raw:
-                            continue
-                        try:
-                            sd = json.loads(sd_raw)
-                        except (ValueError, TypeError):
-                            continue
-                        if str(sd.get("i") or "") != raw_id:
-                            continue
-                        if sd.get("c"):
-                            item["extra"]["copyrightId"] = str(sd["c"])
-                        fav_song = s
-                        break
-                    # 封面/专辑/歌手：从门面按 rawID 精确匹配（收藏记录 title 作搜索词，
-                    # 避开显示层「歌名-《专辑》-平台」组合串），只接受 http(s) 原图。
-                    search_kw = str((fav_song or {}).get("title") or query or "")
-                    sep = search_kw.find("-《")
-                    if sep > 0:
-                        search_kw = search_kw[:sep].strip()
-                    if search_kw:
-                        res = await songloft_api.search(search_kw, http=http)
-                        rows = res if isinstance(res, list) else (res.get("results") or [])
-                        for r in rows:
-                            if str(r.get("id") or "") != raw_id:
-                                continue
-                            cover = str(r.get("cover") or "").strip()
-                            if cover.startswith("http://") or cover.startswith("https://"):
-                                item["cover"] = cover
-                            if not str(item.get("album") or "").strip() and r.get("album"):
-                                item["album"] = str(r.get("album"))
-                            if not str(item.get("artist") or "").strip():
-                                artist = r.get("artist") or r.get("singer")
-                                if artist:
-                                    item["artist"] = str(artist)
-                            break
+                    # 单一接口反查收藏记录：copyrightId（咪咕取链必需）+ cover/album/artist
+                    hit = await songloft_api.lookup_favorite_by_rawid(raw_id, http=http)
+                    if hit:
+                        if hit["copyrightId"]:
+                            item["extra"]["copyrightId"] = hit["copyrightId"]
+                        cover = hit["cover"].strip()
+                        if cover.startswith("http://") or cover.startswith("https://"):
+                            item["cover"] = cover
+                        if not str(item.get("album") or "").strip() and hit["album"]:
+                            item["album"] = hit["album"]
+                        if not str(item.get("artist") or "").strip() and hit["artist"]:
+                            item["artist"] = hit["artist"]
+                        # 收藏记录无封面时（如恰似你的温柔/kuwo），按 title 从门面补原图
+                        if not item.get("cover"):
+                            search_kw = str(hit["title"] or query).split("-《")[0].strip()
+                            if search_kw:
+                                res = await songloft_api.search(search_kw, http=http)
+                                rows = res if isinstance(res, list) else (res.get("results") or [])
+                                for r in rows:
+                                    if str(r.get("id") or "") != raw_id:
+                                        continue
+                                    rc = str(r.get("cover") or "").strip()
+                                    if rc.startswith("http://") or rc.startswith("https://"):
+                                        item["cover"] = rc
+                                    if not str(item.get("album") or "").strip() and r.get("album"):
+                                        item["album"] = str(r.get("album"))
+                                    if not str(item.get("artist") or "").strip():
+                                        ar = r.get("artist") or r.get("singer")
+                                        if ar:
+                                            item["artist"] = str(ar)
+                                    break
             except Exception as exc:  # noqa: BLE001 - 补齐失败不阻塞点播（fail-open）
                 logger.warning(f"[SongRequest] cch rawID metadata lookup failed: "
                                f"{type(exc).__name__}", module="SongRequest")

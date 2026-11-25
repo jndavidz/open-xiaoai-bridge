@@ -39,13 +39,12 @@ TOOL_SPEC = {
 
 
 def _current_track_name() -> str:
-    from core.tools import song_request as sr
+    """播报文案用的当前曲名。复用 cch_np 的权威当前曲源（队列 entry item），
+    不再自己读 _cch_state（消除重复读取逻辑）。"""
+    from core.music import cch_np
 
-    items = sr._cch_state.get("items") or []
-    idx = int(sr._cch_state.get("entry", 0))
-    if 0 <= idx < len(items):
-        return str(items[idx].get("name") or "")
-    return ""
+    song = cch_np._current_from_cch_queue()
+    return str((song or {}).get("name") or "")
 
 
 async def run(args: dict) -> str:

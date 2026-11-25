@@ -293,6 +293,49 @@ async def playlist_songs(playlist_id: int, *, http, limit=200) -> list:
     return songs
 
 
+async def lookup_favorite_by_rawid(raw_id: str, *, http=None, playlist_id=None) -> dict | None:
+    """按歌曲唯一身份 rawID 从 Songloft 收藏歌单查回完整元数据（架构统一：
+    收藏/历史点击、rawID 直构点播、红心反查、收藏写入都复用这一处，消除 4 份重复循环）。
+
+    Returns:
+        {"song_id": int, "title": str, "cover": str, "album": str, "artist": str,
+         "copyrightId": str, "source": str} 或 None（未找到/异常）。
+    """
+    import json as _json
+    own = http is None
+    if own:
+        import aiohttp
+        http = aiohttp.ClientSession()
+    try:
+        pl = int(playlist_id) if playlist_id is not None else await favorites_playlist_id(http=http)
+        songs = await playlist_songs(pl, http=http)
+        for s in songs:
+            sd_raw = s.get("source_data")
+            if not isinstance(sd_raw, str) or not sd_raw:
+                continue
+            try:
+                sd = _json.loads(sd_raw)
+            except (ValueError, TypeError):
+                continue
+            if str(sd.get("i") or "") != str(raw_id):
+                continue
+            return {
+                "song_id": int(s.get("id") or 0),
+                "title": str(s.get("title") or sd.get("n") or ""),
+                "cover": str(s.get("cover_url") or ""),
+                "album": str(s.get("album") or sd.get("al") or ""),
+                "artist": str(s.get("artist") or sd.get("a") or ""),
+                "copyrightId": str(sd.get("c") or ""),
+                "source": str(sd.get("s") or ""),
+            }
+    except Exception:  # noqa: BLE001 - fail-open：反查失败不阻塞点播
+        return None
+    finally:
+        if own:
+            await http.close()
+    return None
+
+
 async def favorites_changes(cursor: str | None, *, http) -> dict:
     """收藏变更长轮询（CCH 即时同步；Songloft upstream `favorites/changes`）。
 
@@ -404,52 +447,12 @@ def favorite_item_schema(songs: list) -> list:
         artist = str(song.get("artist") or sd_artist or "").strip()
         album = str(song.get("album") or sd_album or "").strip()
         cover = str(song.get("cover_url") or "").strip()
-        # 本轮裁决：歌名栏显示「歌名-《专辑》-平台」（宽栏）；歌手列保持纯歌手。
-        display_title = _fav_title_label(title, album, source)
-        out.append({
-            "duration": duration,
-            "albumRawId": "0",
-            "text": None,
-            "otherTypeIds": None,
-            "lyric": None,
-            "lastPage": None,
-            "id": sid,
-            "source": src,
-            "category": "audio",
-            "type": "music",
-            "isCharge": False,
-            "isAudition": None,
-            "copyright": 0,
-            "title": display_title,
-            "rawId": raw_id,
-            "pos": pos,
-            "packageType": None,
-            "audioType": None,
-            "singer": None,          # 实测恒 null；歌手走 authors[]
-            "collect": True,
-            "playFrom": "playFavorite",
-            "vip": False,
-            "chargeStatus": None,
-            "screenPlayUrl": ("genie://com.alibaba.ailabs.genie.musicplayer?cmd=start"
-                              "&data={\"type\":\"content\"}&contentList="
-                              "[{\"rawId\":\"%s\",\"source\":\"%s\"}]" % (raw_id, src)),
-            "sourceIcon": None,
-            "playUrls": [],
-            "bindingSourceList": None,
-            "extendInfo": None,
-            "itemType": {"name": "CONTENT"},
-            "valid": {"name": "VALID"},
-            "cover": _fav_cover(cover),
-            "authors": _fav_authors(artist, src),
-            "albumItem": ({"id": 0, "rawId": "0", "source": src, "title": album,
-                           "category": "audio", "type": "music", "isCharge": False,
-                           "isAudition": False, "copyright": 0, "boughtStatus": False,
-                           "albumType": {"name": "ALBUM"}, "finished": {"name": "NOT_FINISHED"},
-                           "itemType": {"name": "ALBUM"}, "valid": {"name": "VALID"},
-                           "online": {"name": "OFFLINE"}, "cover": _fav_cover(cover),
-                           "alias": [album] if album else [], "authors": None,
-                           "appIds": ["160"], "contentCopyright": ["has_genie_right"]}
-                          if album else None),
-            "revealLabel": None,
-        })
+        # 架构统一：原厂 item schema 由 cch_schema 单一实现（收藏/历史共用）
+        from core.music.cch_schema import native_item_schema
+        out.append(native_item_schema(
+            sid=sid, raw_id=raw_id, source=source, title=title,
+            artist=artist, album=album, cover=cover, duration=duration, pos=pos,
+            collect=True, play_from="playFavorite",
+            display_title=_fav_title_label(title, album, source),
+            include_album_item=True))
     return out

@@ -292,12 +292,14 @@ async def speak_with_resume(text: str, *, delay_s: float | None = None) -> dict:
 # ---- 票 13：收藏（Songloft 服务端为唯一落点，2026-11-21 用户裁决） ----
 
 
-async def apply_favorite(item: dict, intent: bool, playlist_id=None) -> dict:
-    """收藏写入统一实现（票 13）：ensure_song → Songloft 入单/出单 → push_favorites。
+async def apply_favorite(item: dict, intent: bool, playlist_id=None,
+                         song_id: int | None = None) -> dict:
+    """收藏写入统一实现（票 13 → 2026-11-25 架构统一）：ensure_song → 入单/出单 → push。
 
-    **所有收藏消费者（语音 cch_collect / 屏上爱心 HEART）共用此函数**——写入层唯一。
-    当前曲来源由调用方按各自设备侧真实状态传入 item（voice=_cch_state，heart=ContentPlay log），
-    歌单恒在 Songloft 服务端（唯一真相），设备 favorites.json 只是其镜像。
+    **所有收藏消费者共用此唯一写入口**：语音 cch_collect / 屏上爱心 HEART 传 item
+    （内部 ensure_song）；收藏 tab 红心 FAVADD/FAVREMOVE 已按 rawID 反查到 song_id，
+    传 song_id 跳过 ensure_song（避免 REMOVE 时 upsert 出新 id）。
+    歌单恒在 Songloft 服务端（唯一真相），设备 favorites.json 只是镜像。
     """
     try:
         import aiohttp
@@ -305,7 +307,8 @@ async def apply_favorite(item: dict, intent: bool, playlist_id=None) -> dict:
         from core.music import songloft_api
 
         async with aiohttp.ClientSession() as http:
-            song_id = await songloft_api.ensure_song(item, http=http)
+            if song_id is None:
+                song_id = await songloft_api.ensure_song(item, http=http)
             extra = {"playlist_id": playlist_id} if playlist_id is not None else {}
             if intent:
                 res = await songloft_api.add_to_favorites(song_id, http=http, **extra)

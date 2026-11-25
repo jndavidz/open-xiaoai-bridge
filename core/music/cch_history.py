@@ -44,8 +44,6 @@ def history_item_schema(items: list) -> list:
     """bridge item 列表 → 原厂播放历史 item schema（纯函数可单测）。
     与收藏 schema 同构，差异：playFrom=playHistory + firstType/secondType；
     id 用 rawId（字符串 hash，非数字也保留——原厂 UI 主要按 rawId 点播）。"""
-    from core.music.songloft_api import _fav_authors, _fav_cover
-
     out = []
     for pos, it in enumerate(items or []):
         name = str(it.get("name") or it.get("title") or "").strip()
@@ -60,26 +58,12 @@ def history_item_schema(items: list) -> list:
             duration = int(float(it.get("duration_s") or it.get("duration") or 0))
         except (TypeError, ValueError):
             duration = 0
-        out.append({
-            "duration": duration, "albumRawId": "0", "text": None,
-            "otherTypeIds": None, "lyric": None, "lastPage": None,
-            "id": 0, "source": src, "category": "audio", "type": "music",
-            "isCharge": False, "isAudition": False, "copyright": 0,
-            "title": name, "rawId": rid, "pos": pos,
-            "packageType": None, "audioType": None, "singer": None,
-            "collect": bool(it.get("collect")), "playFrom": "playHistory",
-            "vip": False, "chargeStatus": None,
-            "screenPlayUrl": ("genie://com.alibaba.ailabs.genie.musicplayer?cmd=start"
-                              "&data={\"type\":\"content\"}&contentList="
-                              "[{\"rawId\":\"%s\",\"source\":\"%s\"}]" % (rid, src)),
-            "sourceIcon": None, "playUrls": [], "bindingSourceList": None,
-            "extendInfo": None, "itemType": {"name": "CONTENT"},
-            "valid": {"name": "VALID"}, "cover": _fav_cover(cover),
-            "authors": _fav_authors(artist, src),
-            "firstType": "content-audio", "secondType": "music",
-            "timeStamp": None, "currentPlay": None, "offline": False,
-            "url": None, "revealLabel": None,
-        })
+        from core.music.cch_schema import native_item_schema
+        out.append(native_item_schema(
+            sid=0, raw_id=rid, source=str(it.get("source") or "kwqq"),
+            title=name, artist=artist, album=album, cover=cover,
+            duration=duration, pos=pos, collect=bool(it.get("collect")),
+            play_from="playHistory", history_extras=True))
     return out
 
 

@@ -162,7 +162,7 @@ async def _fav_collect(ev: dict) -> None:
     抓 operation/rawId/source 写 spool，这里按 rawID 在 Songloft 收藏歌单找到 song_id，
     调 add/remove_from_favorites 真正改我方收藏（真相源），再 push 设备。
     """
-    from core.music import songloft_api, cch_cast
+    from core.music import songloft_api, cch_np
 
     src = str(ev.get("source") or "")
     rid = str(ev.get("rid") or "").strip()
@@ -170,39 +170,14 @@ async def _fav_collect(ev: dict) -> None:
     if not rid:
         logger.warning("[CchClick] FAVADD/REMOVE missing rid, skip", module="CchClick")
         return
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as http:
-            pl_id = await songloft_api.favorites_playlist_id(http=http)
-            songs = await songloft_api.playlist_songs(pl_id, http=http)
-            song_id = None
-            for s in songs:
-                sd_raw = s.get("source_data")
-                if not isinstance(sd_raw, str) or not sd_raw:
-                    continue
-                try:
-                    sd = json.loads(sd_raw)
-                except (ValueError, TypeError):
-                    continue
-                if str(sd.get("i") or "") == rid:
-                    song_id = int(s["id"])
-                    break
-            if song_id is None:
-                # 不在收藏列表（如 ADD 一首新歌）：从门面按 rawID 查不到就直接跳过，
-                # 收藏 tab 的红心只应对已收藏曲做 REMOVE；ADD 通常是误触/云端曲。
-                logger.info(f"[CchClick] FAV {src} rid={rid} not in favorites, skip",
-                            module="CchClick")
-                return
-            if intent:
-                await songloft_api.add_to_favorites(song_id, http=http)
-            else:
-                await songloft_api.remove_from_favorites(song_id, http=http)
-        await cch_cast.push_favorites()
-        logger.info(f"[CchClick] FAV {src} rid={rid} song={song_id} -> push done",
-                    module="CchClick")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[CchClick] FAV {src} failed: {type(exc).__name__}: {exc}",
-                       module="CchClick")
+    # 按 rawID 反查 song_id（单一接口），然后走 cch_np.apply_favorite 统一写入口
+    hit = await songloft_api.lookup_favorite_by_rawid(rid)
+    if not hit or not hit["song_id"]:
+        logger.info(f"[CchClick] FAV {src} rid={rid} not in favorites, skip", module="CchClick")
+        return
+    result = await cch_np.apply_favorite(hit, intent, song_id=hit["song_id"])
+    logger.info(f"[CchClick] FAV {src} rid={rid} song={hit['song_id']} -> "
+                f"{result.get('action')}", module="CchClick")
 
 
 async def _histpos_play(ev: dict) -> None:
@@ -216,27 +191,12 @@ async def _histpos_play(ev: dict) -> None:
 
 
 async def _fav_name_by_rawid(raw_id: str) -> str:
-    """按 rawID 从 Songloft 收藏歌单反查 display title（仅用于播报/兜底，
-    点播身份始终是 rawID+source）。查不到返回空串，不影响点播。"""
-    try:
-        import aiohttp
-        from core.music import songloft_api
-        async with aiohttp.ClientSession() as http:
-            pl = await songloft_api.favorites_playlist_id(http=http)
-            songs = await songloft_api.playlist_songs(pl, http=http)
-        for s in songs:
-            sd_raw = s.get("source_data")
-            if not isinstance(sd_raw, str) or not sd_raw:
-                continue
-            try:
-                sd = json.loads(sd_raw)
-            except (ValueError, TypeError):
-                continue
-            if str(sd.get("i") or "") == raw_id:
-                return str(s.get("title") or sd.get("n") or "")
-    except Exception:  # noqa: BLE001 - 仅播报名，fail-open
-        pass
-    return ""
+    """按 rawID 反查 display title（仅播报/兜底，点播身份始终 rawID+source）。
+    复用 songloft_api.lookup_favorite_by_rawid 单一接口。"""
+    from core.music import songloft_api
+
+    hit = await songloft_api.lookup_favorite_by_rawid(raw_id)
+    return (hit or {}).get("title") or ""
 
 
 async def _histpos_to_ev(ev: dict) -> dict | None:
@@ -489,10 +449,7 @@ async def run_worker() -> None:
                                module="CchClick")
             await asyncio.sleep(delay)
     finally:
+        # 仅取消未决播放任务；降频/告警已在 except 分支处理（旧版此处引用已删除的
+        # exc 变量，正常取消必 NameError，且重复了降频逻辑——已删除）。
         if _pending_task is not None:
             _pending_task.cancel()
-            if fail_streak >= _FAIL_STREAK_SLOW:
-                delay = _SLOW_POLL_S
-            logger.warning(f"[CchClick] poll err ({fail_streak}): {type(exc).__name__}",
-                           module="CchClick")
-        await asyncio.sleep(delay)

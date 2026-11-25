@@ -43,6 +43,18 @@ class CchHistoryIdentityTest(unittest.TestCase):
         hit = cch_history.get_by_pos_from_items(self.ITEMS, "2")
         self.assertEqual("60091900", hit["rawId"])
 
+    def test_history_item_schema_via_public_seam(self):
+        """history schema 输出经公共 cch_schema 生成，关键字段保持原厂形态。"""
+        item = cch_history.history_item_schema([{
+            "name": "屋顶", "id": "347BDED5", "source": "kugou", "artist": "温岚",
+            "album": "爱回转", "cover": "http://img.example/r.jpg", "duration_s": 319,
+        }])[0]
+        self.assertEqual("屋顶", item["title"])
+        self.assertEqual("347BDED5", item["rawId"])
+        self.assertEqual("playHistory", item["playFrom"])
+        self.assertEqual("content-audio", item["firstType"])
+        self.assertEqual(0, item["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

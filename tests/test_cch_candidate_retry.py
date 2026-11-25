@@ -105,8 +105,8 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         """rawID 直构时从 Songloft 收藏 source_data.c 补 extra.copyrightId（§2.77-58）——
         咪咕 /song/url 需要 copyright，直构丢了搜索项的 extra 会 404（本轮真机回归）。"""
         calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
-        songs = [{"id": 99, "title": "夜来香", "source_data": json.dumps({
-            "s": "migu", "i": "600919000005273800", "c": "6005663JF5A"})}]
+        hit = {"song_id": 99, "title": "夜来香", "cover": "", "album": "",
+               "artist": "", "copyrightId": "6005663JF5A", "source": "migu"}
 
         async def fake_pick(http, source, it):
             calls["pick"].append(it["id"])
@@ -121,10 +121,8 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
             self._setup(stack, items=[], pick=fake_pick,
                         resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
             stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
-            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
-                                      AsyncMock(return_value=1)))
-            stack.enter_context(patch("core.music.songloft_api.playlist_songs",
-                                      AsyncMock(return_value=songs)))
+            stack.enter_context(patch("core.music.songloft_api.lookup_favorite_by_rawid",
+                                      AsyncMock(return_value=hit)))
             sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
             await sr._run_cch("play", {
                 "query": "夜来香", "raw_id": "600919000005273800", "source": "migu"})
@@ -136,8 +134,9 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         """§2.77-59：FAVCLICK rawID 直构从门面按 rawID 精确匹配补 cover/album/artist。
         否则点红心收藏时写 Songloft 的 item 无 cover → 收藏 tab 无封面（恰似你的温柔/kuwo）。"""
         calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
-        songs = [{"id": 4199, "title": "恰似你的温柔", "source_data": json.dumps({
-            "s": "kuwo", "i": "671381931"})}]
+        # 新架构：lookup_favorite_by_rawid 单一接口反查收藏记录（无 cover）
+        hit = {"song_id": 4199, "title": "恰似你的温柔", "cover": "", "album": "",
+               "artist": "", "copyrightId": "", "source": "kuwo"}
         facade = [
             {"id": "671381931", "name": "恰似你的温柔", "artist": "邓丽君",
              "album": "华语经典好歌珍藏",
@@ -157,10 +156,8 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
             self._setup(stack, items=[], pick=fake_pick,
                         resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
             stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
-            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
-                                      AsyncMock(return_value=1)))
-            stack.enter_context(patch("core.music.songloft_api.playlist_songs",
-                                      AsyncMock(return_value=songs)))
+            stack.enter_context(patch("core.music.songloft_api.lookup_favorite_by_rawid",
+                                      AsyncMock(return_value=hit)))
             stack.enter_context(patch("core.music.songloft_api.search",
                                       AsyncMock(return_value=facade)))
             sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
