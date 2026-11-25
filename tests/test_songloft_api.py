@@ -13,8 +13,10 @@ from core.music import songloft_api
 class BrowseSearchTest(unittest.TestCase):
     """票 02：意图 → 分类搜索参数（纯函数）+ browse_search 端点契约。"""
 
-    def test_params_artist_only(self):
-        self.assertEqual(("任素汐", "artist"),
+    def test_params_artist_only_uses_music_search(self):
+        # type=artist 返回歌手对象 {id,name,avatar} 无 source_data → to_item 过滤空，
+        # 真机否决；改用歌手名做 type=music（返回该歌手曲目）
+        self.assertEqual(("任素汐", "music"),
                          songloft_api.search_params_for_intent("", "任素汐"))
 
     def test_params_song_only(self):

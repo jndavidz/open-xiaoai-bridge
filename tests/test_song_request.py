@@ -344,7 +344,7 @@ class FetchLayerTest(unittest.TestCase):
 class CollectForPlayTest(unittest.TestCase):
     """票 02 集成：_collect_for_play 意图→分类搜索 + 去重 + 回退（mock 模块边界）。"""
 
-    def test_artist_only_uses_artist_search(self):
+    def test_artist_only_uses_music_search_with_artist_name(self):
         import asyncio
         from unittest import mock
         captured = {}
@@ -353,7 +353,7 @@ class CollectForPlayTest(unittest.TestCase):
             return [{"id": "ID1", "name": "思念", "artist": "任素汐", "source": "kugou"}]
         with mock.patch("core.music.songloft_api.browse_search", fake_browse):
             items = asyncio.run(song_request._collect_for_play("", "任素汐", {}))
-        self.assertEqual(("任素汐", "artist"), (captured["kw"], captured["type"]))
+        self.assertEqual(("任素汐", "music"), (captured["kw"], captured["type"]))
         self.assertEqual(["思念"], [i["name"] for i in items])
 
     def test_song_plus_artist_filters_version(self):

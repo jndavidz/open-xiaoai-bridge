@@ -164,13 +164,13 @@ def search_params_for_intent(song: str, artist: str) -> tuple[str, str]:
     """点播意图 (song, artist) → 分类搜索参数 (keywords, type)（纯函数，可单测）。
 
     用户裁决 2026-11-25：LLM 只给语义字段，bridge 决定搜索参数。
-    - 仅 artist → type=artist（歌手曲目搜索，插件 /browse/search 走门面 search/multi）
+    - 仅 artist → 用歌手名做 type=music 搜索（实测普通搜索返回该歌手曲目，
+      to_item 只需要 source_data.s/i；type=artist 返回的是歌手对象 {id,name,avatar}
+      无 source_data，会被 to_item 过滤空——2026-11-25 真机 VERIFIED 否决）
     - 仅 song 或两者都有 → type=music（单曲搜索，artist 作版本过滤由调用方处理）
     """
     song = str(song or "").strip()
     artist = str(artist or "").strip()
-    if artist and not song:
-        return artist, "artist"
     return song or artist, "music"
 
 
