@@ -318,7 +318,9 @@ def _accept_event(ev: dict) -> None:
     #  note_recent_play（主动点播 8s 占窗）区分回声，无登记的用户点击放行。
     # 收藏 tab 点击（§2.77-45）：FAVCLICK = tap_hook 从 playFavorite 点击 pos join ring 得到
     # 的用户实际点的收藏曲（正确数据源）；记时间戳用于抑制随后 cp_hook 的云端错歌 spool。
-    if source == "FAVCLICK":
+    if source in ("FAVCLICK", "CLICK"):
+        # 两类用户点击都记时间戳，抑制随后 cp_hook 的云端错歌 spool（票 12：
+        # 当前播放 tab 点击 CLICK 后紧跟云端 NE=错歌，须挡住防止覆盖正确曲）。
         _recent_favclick_ts = time.time()
     # cp_hook 云端源 spool（NE/KG...）若在 FAVCLICK 后短时间内到达 → 是同一点击的云端回声
     # （错歌），drop，避免双链竞速覆盖正确曲。FAVCLICK 自身走正常 dedupe/debounce 点播。
@@ -392,9 +394,10 @@ async def _play_event(ev: dict) -> None:
     source = str(ev.get("source") or "")
     raw_id = ""
     platform = ""
-    if source == "FAVCLICK":
-        # 真相源：native 从 playFavorite 日志带的 item_id(=rawID) + source(=平台)，
-        # 写进 spool 的 rid/album 字段。跳过按标题重搜，直接按 rawID+平台点播
+    if source in ("FAVCLICK", "CLICK"):
+        # 真相源：native 从 playFavorite / 当前播放 tab ContentPlay 日志带的
+        # rawID(request_id=bridge-<rawId> 或 item_id) + source(=平台)，写进 spool 的
+        # rid/album 字段。跳过按标题重搜（云端 ContentPlay 常是错歌），按 rawID+平台点播
         # （平台角标正确、命中收藏原始版本、同名曲靠 rawID 区分）。
         raw_id = str(ev.get("rid") or "").strip()
         platform = str(ev.get("album") or "").strip().lower()
@@ -412,7 +415,7 @@ async def _play_event(ev: dict) -> None:
                            module="CchClick")
     # FAVCLICK 是用户最新点击意图（无 artist，dedupe 退化会误杀同名语音点播）——跳过
     # 二次 dedupe，与入口一致；云端回声由 favclick-guard 挡。
-    reason = "" if source == "FAVCLICK" else dedupe(name, artist)
+    reason = "" if source in ("FAVCLICK", "CLICK") else dedupe(name, artist)
     if reason:
         # 去抖窗口内状态变化（如更早的播放刚占窗）——二次防线，宁少播不重播
         logger.info(f"[CchClick] recv name={name} src={source} action=drop({reason})",

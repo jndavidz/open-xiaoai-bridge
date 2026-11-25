@@ -249,6 +249,25 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("migu", seen.get("source"), "平台 lower 后透传")
         self.assertEqual("夜来香", seen.get("query"), "纯歌名仅用于播报/兜底")
 
+    async def test_curplay_click_passes_rawid_source(self):
+        """票 12：当前播放 tab 点击 CLICK spool 带 rid(rawID)+album(平台) → rawID 直构点播，
+        不依赖云端错歌名（真机：Cloud NE=荒原，我方队列曲 rawId=7D6B... 喜月）。"""
+        seen = {}
+
+        async def fake_run(args):
+            seen.update(args)
+            return "ok"
+
+        with mock.patch("core.tools.song_request.run", fake_run):
+            await cch_click._play_event({
+                "name": "喜月 - 任素汐", "artist": "任素汐",
+                "source": "CLICK", "rid": "7D6BF0230D0486BD7981D72AA6586E6B",
+                "album": "KWQQ"})
+
+        self.assertEqual("7D6BF0230D0486BD7981D72AA6586E6B", seen.get("raw_id"),
+                         "rawID 透传，不用云端错歌名重搜")
+        self.assertEqual("kwqq", seen.get("source"))
+
     async def test_histpos_resolves_truth_source_by_pos(self):
         """HISTPOS(pos) → cch_history 反查 (rawID, source, name) → rawID 直构点播。
         架构统一：显示索引只是定位，歌曲身份永远是 (source, rawID)，不用歌名搜索。"""
