@@ -136,40 +136,41 @@ def item_for_favorite_from_history(hit: dict) -> dict:
     album_item = hit.get("albumItem")
     if isinstance(album_item, dict):
         out["album"] = str(album_item.get("title") or "").strip()
+    # §2.77-58：咪咕 by-id 取链需 copyrightId。设备 play_history.json 的原厂 schema
+    # 不带该字段，但 bridge 内存 deque 的门面 item（点歌时 note）带 extra.copyrightId——
+    # 有则透传，ensure_song 写进 source_data.c；缺则留空（其它平台不需要，fail-open）。
+    extra = hit.get("extra")
+    if isinstance(extra, dict) and extra.get("copyrightId"):
+        out["extra"] = {"copyrightId": str(extra["copyrightId"]).strip()}
     return out
 
 
-async def get_by_rawid(raw_id) -> dict | None:
-    """按 rawID 从历史真相源取完整 item（票 01：FAVADD 重建收藏用）。
-    与 get_by_pos 同构：先设备 play_history.json 回读，内存 deque fallback。"""
+async def _get_from_truth(key, from_items) -> dict | None:
+    """历史真相源统一查询骨架：先设备 play_history.json 回读，内存 deque fallback。
+
+    重启后内存丢但设备文件在，点击反查不受影响；设备回读失败降级内存（fail-open）。
+    key/from_items 由调用方给定（pos→身份子集 / rawID→完整 item），骨架不感知语义。"""
     from core.music import cch_cast
 
     try:
         ok, payload = await cch_cast.musicctl("historyfile", {})
         if ok and isinstance(payload, dict) and isinstance(payload.get("items"), list):
-            hit = get_by_rawid_from_items(payload["items"], raw_id)
+            hit = from_items(payload["items"], key)
             if hit:
                 return hit
     except Exception:  # noqa: BLE001 - 设备回读失败降级内存
         pass
-    return get_by_rawid_from_items(list(_items), raw_id)
+    return from_items(list(_items), key)
+
+
+async def get_by_rawid(raw_id) -> dict | None:
+    """按 rawID 从历史真相源取完整 item（票 01：FAVADD 重建收藏用）。"""
+    return await _get_from_truth(raw_id, get_by_rawid_from_items)
 
 
 async def get_by_pos(pos) -> dict | None:
-    """按显示索引 pos 取历史条目唯一身份。真相源 = 设备 play_history.json
-    （经 9102 historyfile read 回读），bridge 内存 deque 仅作 fallback——
-    重启后内存丢但设备文件在，点击反查不受影响。"""
-    from core.music import cch_cast
-
-    try:
-        ok, payload = await cch_cast.musicctl("historyfile", {})
-        if ok and isinstance(payload, dict) and isinstance(payload.get("items"), list):
-            hit = get_by_pos_from_items(payload["items"], pos)
-            if hit:
-                return hit
-    except Exception:  # noqa: BLE001 - 设备回读失败降级内存
-        pass
-    return get_by_pos_from_items(list(_items), pos)
+    """按显示索引 pos 取历史条目唯一身份。"""
+    return await _get_from_truth(pos, get_by_pos_from_items)
 
 
 async def _push() -> None:

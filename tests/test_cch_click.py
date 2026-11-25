@@ -601,8 +601,11 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         """票01 根因守门：FAVADD 新歌不在收藏表 → 从历史反查 item 走 ensure_song，
         不再因 lookup_favorite_by_rawid 返回 None 而 skip。"""
         from core.music import cch_np
-        hist_item = {"rawId": "B3A52A7A", "source": "kugou", "title": "晴天",
-                     "artist": "周杰伦", "duration": 269, "cover": {"img": "http://img/q.jpg"}}
+        # 用真实原厂 schema 结构（authors[0].title + cover.img），不臆造顶层 artist
+        hist_item = {"rawId": "B3A52A7A", "source": "KUGOU", "title": "晴天",
+                     "authors": [{"title": "周杰伦"}], "duration": 269,
+                     "cover": {"img": "http://img/q.jpg"},
+                     "extra": {"copyrightId": "MIGU-CP-123"}}
         calls = []
 
         async def fake_apply(item, intent, **kw):
@@ -623,6 +626,31 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("B3A52A7A", item["id"])
         self.assertEqual("晴天", item["name"])
         self.assertEqual("kugou", item["source"])
+        self.assertEqual("周杰伦", item["artist"])          # authors[0].title 还原
+        self.assertEqual("http://img/q.jpg", item["cover"])  # cover.img 还原
+        self.assertEqual("MIGU-CP-123", item["extra"]["copyrightId"])  # §2.77-58 咪咕取链
+
+    async def test_fav_add_idempotent_second_add_is_noop(self):
+        """票01 验收③幂等：二次 FAVADD 命中收藏表 → 传 song_id 走 add（added=0→noop），
+        不重新 ensure_song、不产生重复收藏。"""
+        from core.music import cch_np
+        hit = {"song_id": 4199, "title": "晴天", "source": "kugou"}
+        calls = []
+
+        async def fake_apply(item, intent, **kw):
+            calls.append((intent, kw.get("song_id")))
+            return {"action": "noop"}  # Songloft added=0
+
+        with mock.patch("core.music.songloft_api.lookup_favorite_by_rawid",
+                        new_callable=mock.AsyncMock, return_value=hit), \
+             mock.patch("core.music.cch_history.get_by_rawid",
+                        new_callable=mock.AsyncMock) as hist, \
+             mock.patch.object(cch_np, "apply_favorite", fake_apply), \
+             mock.patch("core.music.cch_click.logger"):
+            await cch_click._fav_collect({"source": "FAVADD", "rid": "B3A52A7A"})
+            await cch_click._fav_collect({"source": "FAVADD", "rid": "B3A52A7A"})
+        self.assertEqual([(True, 4199), (True, 4199)], calls)
+        hist.assert_not_awaited()  # 已在收藏表 → 不走历史 ensure_song
 
     async def test_fav_add_no_history_still_skips(self):
         """守门：新歌既不在收藏表也不在历史 → fail-open skip（不臆造 item）。"""

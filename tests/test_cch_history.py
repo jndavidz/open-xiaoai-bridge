@@ -69,6 +69,14 @@ class CchHistoryIdentityTest(unittest.TestCase):
         self.assertEqual("http://img/r.jpg", fav_item["cover"])
         self.assertEqual(319, fav_item["duration_s"])
 
+        # §2.77-58：extra.copyrightId 透传（咪咕 by-id 取链所需）
+        with_cp = {"rawId": "MIGU1", "source": "migu", "title": "夜来香",
+                   "extra": {"copyrightId": "MIGU-CP-789"}}
+        cp_item = cch_history.item_for_favorite_from_history(with_cp)
+        self.assertEqual("MIGU-CP-789", cp_item["extra"]["copyrightId"])
+        no_cp = cch_history.item_for_favorite_from_history({"rawId": "X", "source": "kwqq", "title": "Y"})
+        self.assertNotIn("extra", no_cp)
+
     def test_get_by_rawid_case_insensitive_and_missing(self):
         items = [{"rawId": "ABC123", "source": "KUGOU", "title": "X"}]
         self.assertEqual("ABC123", cch_history.get_by_rawid_from_items(items, "abc123")["rawId"])
