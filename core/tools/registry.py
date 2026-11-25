@@ -124,8 +124,8 @@ async def execute_tool(name: str, arguments_json: str | None = None) -> str:
             # 用于区分「歌名 single」vs「歌手 batch」——实测后作为可观测性保留。
             logger.info(
                 f"[Tool] song_request action={args.get('action')} "
-                f"query={args.get('query')!r} artist={args.get('artist')!r} "
-                f"target={args.get('target')!r}", module="Registry")
+                f"song={args.get('song')!r} artist={args.get('artist')!r} "
+                f"query={args.get('query')!r} target={args.get('target')!r}", module="Registry")
         if risk in ("b", "c"):
             return await execute_guarded(
                 mod,
