@@ -40,10 +40,16 @@ def note(item: dict) -> None:
     asyncio.ensure_future(_push())
 
 
-def history_item_schema(items: list) -> list:
+def history_item_schema(items: list, fav_rids: set | None = None) -> list:
     """bridge item 列表 → 原厂播放历史 item schema（纯函数可单测）。
     与收藏 schema 同构，差异：playFrom=playHistory + firstType/secondType；
-    id 用 rawId（字符串 hash，非数字也保留——原厂 UI 主要按 rawId 点播）。"""
+    id 用 rawId（字符串 hash，非数字也保留——原厂 UI 主要按 rawId 点播）。
+
+    票 01h：collect 字段（历史 tab 红心）必须由收藏真相源校准——
+    传 fav_rids（收藏表 rawID 集合，大小写不敏感）时，按唯一身份覆盖 item 自带的
+    collect 死快照；不传则保留旧行为（item 自带 collect），向后兼容。
+    """
+    norm_fav = {str(x).strip().lower() for x in (fav_rids or set())}
     out = []
     for pos, it in enumerate(items or []):
         name = str(it.get("name") or it.get("title") or "").strip()
@@ -58,11 +64,13 @@ def history_item_schema(items: list) -> list:
             duration = int(float(it.get("duration_s") or it.get("duration") or 0))
         except (TypeError, ValueError):
             duration = 0
+        # 收藏态：有真相源集合按 rawID 校准（红心反映真实收藏），否则沿用 item 自带
+        collect = (rid.lower() in norm_fav) if fav_rids is not None else bool(it.get("collect"))
         from core.music.cch_schema import native_item_schema
         out.append(native_item_schema(
             sid=0, raw_id=rid, source=str(it.get("source") or "kwqq"),
             title=name, artist=artist, album=album, cover=cover,
-            duration=duration, pos=pos, collect=bool(it.get("collect")),
+            duration=duration, pos=pos, collect=collect,
             play_from="playHistory", history_extras=True, is_audition=False))
     return out
 
@@ -173,11 +181,50 @@ async def get_by_pos(pos) -> dict | None:
     return await _get_from_truth(pos, get_by_pos_from_items)
 
 
+async def load_favorite_rawids() -> set[str]:
+    """从收藏真相源（Songloft 收藏歌单）取 rawID 集合，供历史红心校准。
+    读失败降级空集（历史红心全显示未收藏）——fail-open，不影响历史列表本身。"""
+    import aiohttp
+
+    from core.music import songloft_api
+
+    try:
+        async with aiohttp.ClientSession() as http:
+            pl = await songloft_api.favorites_playlist_id(http=http)
+            songs = await songloft_api.playlist_songs(pl, http=http)
+    except Exception as exc:  # noqa: BLE001 - 收藏读失败不阻塞历史写入
+        logger.debug(f"[CchHistory] load_favorite_rawids failed: {type(exc).__name__}",
+                     module="CchHistory")
+        return set()
+    import json as _json
+
+    out = set()
+    for s in songs or []:
+        if not isinstance(s, dict):
+            continue
+        rid = ""
+        try:
+            sd = s.get("source_data")
+            if isinstance(sd, str) and sd:
+                parsed = _json.loads(sd)
+                if isinstance(parsed, dict):
+                    rid = str(parsed.get("i") or "").strip()
+        except (ValueError, TypeError):
+            pass
+        if not rid:
+            dk = str(s.get("dedup_key") or "").strip()
+            rid = dk[5:] if dk.startswith("kwqq_") else dk  # dedup_key = kwqq_<rawID>
+        if rid and rid != "0":
+            out.add(rid.lower())
+    return out
+
+
 async def _push() -> None:
-    """完整历史 → 原厂 schema → 9102 historyfile 全量写设备文件。"""
+    """完整历史 → 原厂 schema（按收藏真相源校准红心）→ 9102 historyfile 全量写设备文件。"""
     from core.music import cch_cast
 
-    items = history_item_schema(list(_items))
+    fav_rids = await load_favorite_rawids()
+    items = history_item_schema(list(_items), fav_rids=fav_rids)
     ok, payload = await cch_cast.musicctl("historyfile", {"items": items})
-    logger.info(f"[CchHistory] push n={len(items)} ok={ok} status={str(payload)[:120]}",
-                module="CchHistory")
+    logger.info(f"[CchHistory] push n={len(items)} fav={len(fav_rids)} ok={ok} "
+                f"status={str(payload)[:120]}", module="CchHistory")

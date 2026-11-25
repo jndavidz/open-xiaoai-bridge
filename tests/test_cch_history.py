@@ -82,6 +82,28 @@ class CchHistoryIdentityTest(unittest.TestCase):
         self.assertEqual("ABC123", cch_history.get_by_rawid_from_items(items, "abc123")["rawId"])
         self.assertIsNone(cch_history.get_by_rawid_from_items(items, "NOPE"))
 
+    def test_history_schema_collect_reflects_favorites(self):
+        """票01h：历史红心必须反映收藏态——按收藏 rawID 集合校准 collect。"""
+        items = [
+            {"name": "晴天", "id": "B3A52A7A", "source": "kugou", "artist": "周杰伦"},
+            {"name": "荒原", "id": "C9A56582", "source": "kugou", "artist": "任素汐"},
+        ]
+        fav_rids = {"B3A52A7A"}  # 只有晴天已收藏
+        out = cch_history.history_item_schema(items, fav_rids=fav_rids)
+        self.assertTrue(out[0]["collect"], "晴天在收藏表 → collect=True")
+        self.assertFalse(out[1]["collect"], "荒原不在收藏表 → collect=False")
+
+    def test_history_schema_collect_case_insensitive_rawid(self):
+        items = [{"name": "晴天", "id": "B3A52A7A", "source": "kugou"}]
+        out = cch_history.history_item_schema(items, fav_rids={"b3a52a7a"})
+        self.assertTrue(out[0]["collect"], "收藏 rawID 大小写不敏感")
+
+    def test_history_schema_collect_default_legacy(self):
+        """向后兼容：不传 fav_rids 时保留 item 自带 collect（旧行为）。"""
+        items = [{"name": "X", "id": "ID1", "source": "kugou", "collect": True}]
+        out = cch_history.history_item_schema(items)
+        self.assertTrue(out[0]["collect"])
+
     def test_history_item_schema_via_public_seam(self):
         """history schema 输出经公共 cch_schema 生成，关键字段保持原厂形态。"""
         item = cch_history.history_item_schema([{

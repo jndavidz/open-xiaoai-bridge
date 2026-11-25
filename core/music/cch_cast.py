@@ -366,6 +366,12 @@ async def push_favorites(playlist_id=None) -> tuple[bool, dict]:
     ok, payload = await musicctl("favfile", {"items": items})
     logger.info(f"[CchCast] favfile n={len(items)} playlist={pl} ok={ok} status={payload}",
                 module="CchCast")
+    # 票 01h：收藏变化后同步刷新历史 tab 红心（历史 item 的 collect 由收藏真相源校准）。
+    # fire-and-forget，失败不影响收藏写入本身（fail-open）。
+    if ok:
+        from core.music import cch_history
+
+        asyncio.ensure_future(cch_history._push())
     return ok, {"n": len(items), "playlist_id": pl, "ok": ok, "detail": payload}
 
 
