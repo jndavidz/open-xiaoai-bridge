@@ -353,16 +353,22 @@ class FetchLayerTest(unittest.TestCase):
 class CollectForPlayTest(unittest.TestCase):
     """票 02 集成：_collect_for_play 意图→分类搜索 + 去重 + 回退（mock 模块边界）。"""
 
-    def test_artist_only_uses_music_search_with_artist_name(self):
+    def test_artist_only_uses_two_step_artist_search(self):
         import asyncio
         from unittest import mock
         captured = {}
-        async def fake_browse(keywords, stype, *, http=None):
-            captured["kw"], captured["type"] = keywords, stype
+        async def fake_browse(keywords, stype, *, http=None, raw=False):
+            captured["kw"], captured["type"], captured["raw"] = keywords, stype, raw
+            return [{"id": "AR1", "name": "任素汐", "source": "kugou"}]  # 歌手对象
+        async def fake_works(aid, source, *, http=None):
+            captured["aid"], captured["source"] = aid, source
             return [{"id": "ID1", "name": "思念", "artist": "任素汐", "source": "kugou"}]
-        with mock.patch("core.music.songloft_api.browse_search", fake_browse):
+        with mock.patch("core.music.songloft_api.browse_search", fake_browse), \
+             mock.patch("core.music.songloft_api.artist_works", fake_works):
             items = asyncio.run(song_request._collect_for_play("", "任素汐", {}))
-        self.assertEqual(("任素汐", "music"), (captured["kw"], captured["type"]))
+        self.assertEqual(("任素汐", "artist", True),
+                         (captured["kw"], captured["type"], captured["raw"]))
+        self.assertEqual(("AR1", "kugou"), (captured["aid"], captured["source"]))
         self.assertEqual(["思念"], [i["name"] for i in items])
 
     def test_song_plus_artist_filters_version(self):

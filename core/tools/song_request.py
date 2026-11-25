@@ -306,10 +306,24 @@ async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
 
     keywords, stype = songloft_api.search_params_for_intent(song, artist)
     if keywords:
+        items = []
         try:
             import aiohttp
             async with aiohttp.ClientSession() as http:
-                items = await songloft_api.browse_search(keywords, stype, http=http)
+                if stype == "artist":
+                    # 真正分类检索两步：歌手名 → 歌手对象(raw) → 该歌手作品曲目
+                    singers = await songloft_api.browse_search(
+                        keywords, "artist", raw=True, http=http)
+                    if singers:
+                        pick = singers[0]
+                        items = await songloft_api.artist_works(
+                            str(pick.get("id") or ""), str(pick.get("source") or "netease"),
+                            http=http)
+                        logger.info(f"cch artist_works id={pick.get('id')} "
+                                    f"source={pick.get('source')} n={len(items)}",
+                                    module="SongRequest")
+                else:
+                    items = await songloft_api.browse_search(keywords, "music", http=http)
             if items:
                 # 票 03：分类搜索结果同样去变体+同名去重（与回退路径口径一致）
                 items = _dedupe_items(_drop_query_variants(items, keywords))
@@ -321,11 +335,11 @@ async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
                         logger.debug("cch browse_search artist filter empty, fallback",
                                      module="SongRequest")
                         return await _managed_collect(song or keywords, args.get("source"), artist=artist)
-                logger.info(f"cch browse_search type={stype} keywords={keywords!r} n={len(items)}",
+                logger.info(f"cch classified search type={stype} keywords={keywords!r} n={len(items)}",
                             module="SongRequest")
                 return items
         except Exception as exc:  # noqa: BLE001 - 分类搜索失败回退普通搜索
-            logger.warning(f"cch browse_search failed: {type(exc).__name__}, fallback",
+            logger.warning(f"cch classified search failed: {type(exc).__name__}, fallback",
                            module="SongRequest")
     fallback = await _managed_collect(keywords or song, args.get("source"), artist=artist)
     if fallback and artist:

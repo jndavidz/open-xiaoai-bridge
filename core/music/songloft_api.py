@@ -164,23 +164,25 @@ def search_params_for_intent(song: str, artist: str) -> tuple[str, str]:
     """点播意图 (song, artist) → 分类搜索参数 (keywords, type)（纯函数，可单测）。
 
     用户裁决 2026-11-25：LLM 只给语义字段，bridge 决定搜索参数。
-    - 仅 artist → 用歌手名做 type=music 搜索（实测普通搜索返回该歌手曲目，
-      to_item 只需要 source_data.s/i；type=artist 返回的是歌手对象 {id,name,avatar}
-      无 source_data，会被 to_item 过滤空——2026-11-25 真机 VERIFIED 否决）
+    - 仅 artist → type=artist（返回歌手对象 → 调用方用 artist_works 取该歌手曲目）
     - 仅 song 或两者都有 → type=music（单曲搜索，artist 作版本过滤由调用方处理）
     """
     song = str(song or "").strip()
     artist = str(artist or "").strip()
+    if artist and not song:
+        return artist, "artist"   # 真正分类：歌手对象 → artist_works 取曲目
     return song or artist, "music"
 
 
 async def browse_search(keywords: str, search_type: str, *, page: int = 1,
-                        limit: int = 20, http: aiohttp.ClientSession) -> list[dict]:
+                        limit: int = 20, raw: bool = False,
+                        http: aiohttp.ClientSession) -> list[dict]:
     """Songloft 插件层分类搜索（与 App 同源，非直连门面）——票 02。
 
     POST /api/v1/jsplugin/kwqq/browse/search {keywords, type, page, limit}
     type ∈ music|album|artist|sheet|mv（kwqq main.js BROWSE_ROUTES VERIFIED）。
-    返回 items 经 to_item 映射为 bridge item；失败抛 SongloftError（调用方回退 /api/search）。
+    type=artist 返回歌手对象 {id,name,source,avatar}（无 source_data）→ raw=True 原样返回；
+    其它类型经 to_item 映射为 bridge item。失败抛 SongloftError（调用方回退 /api/search）。
     """
     body = {"keywords": str(keywords or "").strip(),
             "type": str(search_type or "music").strip().lower(),
@@ -188,6 +190,24 @@ async def browse_search(keywords: str, search_type: str, *, page: int = 1,
     if not body["keywords"]:
         return []
     data = await _request(http, "POST", f"{_PLUGIN_PATH}/browse/search", json_body=body)
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
+    if raw:
+        return [r for r in items if isinstance(r, dict)]
+    return [_i for _i in (to_item(r) for r in items if isinstance(r, dict))
+            if _i["source"] and _i["id"]]
+
+
+async def artist_works(artist_id: str, source: str, *, page: int = 1,
+                      limit: int = 30, http: aiohttp.ClientSession) -> list[dict]:
+    """歌手作品（真正分类检索第二步）：插件 /artist/works {id,source,type:music}。
+    返回该歌手曲目（经 itemToTrack，带 source_data），to_item 映射为 bridge item。"""
+    body = {"id": str(artist_id or "").strip(), "source": str(source or "netease").strip().lower(),
+            "type": "music", "page": max(1, int(page)), "limit": max(1, min(50, int(limit)))}
+    if not body["id"]:
+        return []
+    data = await _request(http, "POST", f"{_PLUGIN_PATH}/artist/works", json_body=body)
     items = data.get("items")
     if not isinstance(items, list):
         return []
