@@ -132,21 +132,13 @@ async def on_np_event(kind: str, extras: dict, device_ts: str = "") -> dict:
     return {"action": "recorded", "state": state_str or code}
 
 
-async def _cast_entry(idx: int, item: dict) -> dict:
-    """按 (source,id) 重新取票 + cast 单曲（advance 与 stopped replay 共用的唯一下行 seam）。
+async def _prepare_cast(idx: int, item: dict) -> tuple[str, dict]:
+    """按 (source,id) 取票 + meta + renderData（advance/replay/recast 共用的准备链）。
 
-    返回 {ok, detail}；不改 _cch_state.entry（由调用方决定推进还是重播），不撤票。
+    返回 (ticket_url, render_data)；下行策略（m5 / cast_native / prepare_playback）
+    由各调用方决定——准备链收敛，执行链保持各自语义。
     """
-    from core.music.cch_cast import (
-        build_render_data,
-        cast_native,
-        host_cmd,
-        host_token_deploy,
-        kwqq_meta,
-        m5_enabled,
-        resolve_ticket_url,
-        wait_np_play,
-    )
+    from core.music.cch_cast import build_render_data, kwqq_meta, resolve_ticket_url
     from core.tools import song_request as sr
 
     ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
@@ -155,7 +147,23 @@ async def _cast_entry(idx: int, item: dict) -> dict:
         ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
         entry=str(item.get("id") or f"cch-{idx}"))
     meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
-    render_data = build_render_data(ticket_url, item, meta)
+    return ticket_url, build_render_data(ticket_url, item, meta)
+
+
+async def _cast_entry(idx: int, item: dict) -> dict:
+    """按 (source,id) 准备 + cast 单曲（advance 与 stopped replay 共用）。
+
+    返回 {ok, detail}；不改 _cch_state.entry（由调用方决定推进还是重播），不撤票。
+    """
+    from core.music.cch_cast import (
+        cast_native,
+        host_cmd,
+        host_token_deploy,
+        m5_enabled,
+        wait_np_play,
+    )
+
+    ticket_url, render_data = await _prepare_cast(idx, item)
     if m5_enabled():
         await host_token_deploy()
         ok, status = await host_cmd("play", url=ticket_url)
@@ -302,21 +310,9 @@ async def _recast_current() -> dict:
         return {"action": "recast_skipped", "reason": "no current item"}
     item = items[idx]
     try:
-        from core.music.cch_cast import (
-            build_render_data,
-            cast_native,
-            kwqq_meta,
-            prepare_playback,
-            resolve_ticket_url,
-        )
+        from core.music.cch_cast import cast_native, prepare_playback
 
-        ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
-               "extra": item.get("extra") or {}}
-        ticket_url = await resolve_ticket_url(
-            ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
-            entry=str(item.get("id") or f"cch-{idx}"))
-        meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
-        render_data = build_render_data(ticket_url, item, meta)
+        _, render_data = await _prepare_cast(idx, item)
         await prepare_playback()  # 预清残留 + 条件重注册（facts §2.48）
         ok, detail = await cast_native(render_data)
         return {"action": "recast", "ok": ok, "detail": detail}

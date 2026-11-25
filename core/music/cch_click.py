@@ -273,6 +273,12 @@ async def _playtoggle(ev: dict) -> None:
     ok, detail = await cch_cast.host_cmd("toggle")
     logger.info(f"[CchClick] playtoggle -> host_cmd(toggle) ok={ok} detail={detail}",
                 module="CchClick")
+    if not ok and "NEED_M5" in str(detail):
+        # 兜底（review 竞态项）：bridge 重启 / bootstrap 跳过历史 finish → snapshot 空
+        # → 判 playing 走 toggle，但 native 实例已死返回 NEED_M5 → 回退重播当前曲。
+        result = await cch_np.replay_current()
+        logger.info(f"[CchClick] playtoggle NEED_M5 -> replay_current {result}",
+                    module="CchClick")
 
 
 def _accept_event(ev: dict) -> None:

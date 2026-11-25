@@ -554,6 +554,29 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(replay_calls), "stopped 态应重播当前曲")
         self.assertEqual([], toggle_calls, "stopped 态不应走 toggle（对死实例无效）")
 
+    async def test_playtoggle_need_m5_falls_back_to_replay(self):
+        """票 06 review：bridge 重启/bootstrap 跳过历史 finish → snapshot 空 →
+        判 playing 走 toggle，但 native 实例已死返回 NEED_M5 → 回退重播当前曲。"""
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+
+        replay_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed", "ok": True}
+
+        async def fake_toggle(cmd):
+            return False, "NEED_M5"
+
+        with mock.patch.object(cch_np_mod, "snapshot",
+                               lambda: {"state": {"extras": {}}}), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay), \
+             mock.patch("core.music.cch_cast.host_cmd", fake_toggle):
+            await cch_click._playtoggle({"source": "PLAYTOGGLE"})
+
+        self.assertEqual(1, len(replay_calls), "NEED_M5（死实例）必须回退重播")
+
     async def test_playtoggle_in_playing_state_still_toggles(self):
         """非 stopped 态保持原语义（M5 原子 toggle）。"""
         from unittest import mock
