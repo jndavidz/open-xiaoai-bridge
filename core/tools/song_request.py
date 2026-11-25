@@ -425,29 +425,55 @@ async def _run_cch(action: str, args: dict) -> str:
             item = {"id": raw_id, "source": src, "name": query,
                     "artist": str(args.get("artist") or ""), "extra": {}}
             # §2.77-58：真相源补齐 source_data.c（咪咕 /song/url 必需 copyrightId）。
-            # rawID 直构丢掉搜索项的 extra → migu 404（本轮真机回归）；收藏记录自带 c，
-            # 按 rawID 从 Songloft 收藏歌单取回，不依赖搜索、对任何需 extra 的源通用。
+            # §2.77-59：同时补 cover/album/artist —— FAVCLICK 直构 item 只有 id/source/name/artist，
+            # 之后点红心收藏时 _current_from_cch_queue 取这条无 cover 的 item 写 Songloft，
+            # 导致收藏 tab 无封面（2026-11-25 用户实测恰似你的温柔/kuwo）。语音点播走门面
+            # 搜索结果带 cover 原图，不受影响——仅 FAVCLICK 路径有此缺口。
             try:
                 from core.music import songloft_api
                 async with aiohttp.ClientSession() as http:
                     pl_id = await songloft_api.favorites_playlist_id(http=http)
                     songs = await songloft_api.playlist_songs(pl_id, http=http)
-                for s in songs:
-                    sd_raw = s.get("source_data")
-                    if not isinstance(sd_raw, str) or not sd_raw:
-                        continue
-                    try:
-                        sd = json.loads(sd_raw)
-                    except (ValueError, TypeError):
-                        continue
-                    if str(sd.get("i") or "") != raw_id:
-                        continue
-                    if sd.get("c"):
-                        item["extra"]["copyrightId"] = str(sd["c"])
-                    break
+                    fav_song = None
+                    for s in songs:
+                        sd_raw = s.get("source_data")
+                        if not isinstance(sd_raw, str) or not sd_raw:
+                            continue
+                        try:
+                            sd = json.loads(sd_raw)
+                        except (ValueError, TypeError):
+                            continue
+                        if str(sd.get("i") or "") != raw_id:
+                            continue
+                        if sd.get("c"):
+                            item["extra"]["copyrightId"] = str(sd["c"])
+                        fav_song = s
+                        break
+                    # 封面/专辑/歌手：从门面按 rawID 精确匹配（收藏记录 title 作搜索词，
+                    # 避开显示层「歌名-《专辑》-平台」组合串），只接受 http(s) 原图。
+                    search_kw = str((fav_song or {}).get("title") or query or "")
+                    sep = search_kw.find("-《")
+                    if sep > 0:
+                        search_kw = search_kw[:sep].strip()
+                    if search_kw:
+                        res = await songloft_api.search(search_kw, http=http)
+                        rows = res if isinstance(res, list) else (res.get("results") or [])
+                        for r in rows:
+                            if str(r.get("id") or "") != raw_id:
+                                continue
+                            cover = str(r.get("cover") or "").strip()
+                            if cover.startswith("http://") or cover.startswith("https://"):
+                                item["cover"] = cover
+                            if not str(item.get("album") or "").strip() and r.get("album"):
+                                item["album"] = str(r.get("album"))
+                            if not str(item.get("artist") or "").strip():
+                                artist = r.get("artist") or r.get("singer")
+                                if artist:
+                                    item["artist"] = str(artist)
+                            break
             except Exception as exc:  # noqa: BLE001 - 补齐失败不阻塞点播（fail-open）
-                logger.warning(f"[SongRequest] cch rawID extra lookup failed: {type(exc).__name__}",
-                               module="SongRequest")
+                logger.warning(f"[SongRequest] cch rawID metadata lookup failed: "
+                               f"{type(exc).__name__}", module="SongRequest")
             items = [item]
             logger.info(f"[SongRequest] cch rawID direct: id={raw_id} src={src} name={query!r} "
                         f"copyright={item['extra'].get('copyrightId') or ''}",

@@ -132,6 +132,74 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["build_item"]["extra"].get("copyrightId"), "6005663JF5A")
         self.assertEqual(calls["build_item"]["source"], "migu")
 
+    async def test_raw_id_enriches_cover_album_artist(self):
+        """§2.77-59：FAVCLICK rawID 直构从门面按 rawID 精确匹配补 cover/album/artist。
+        否则点红心收藏时写 Songloft 的 item 无 cover → 收藏 tab 无封面（恰似你的温柔/kuwo）。"""
+        calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
+        songs = [{"id": 4199, "title": "恰似你的温柔", "source_data": json.dumps({
+            "s": "kuwo", "i": "671381931"})}]
+        facade = [
+            {"id": "671381931", "name": "恰似你的温柔", "artist": "邓丽君",
+             "album": "华语经典好歌珍藏",
+             "cover": "https://img4.kuwo.cn/star/albumcover/xxx.jpg", "source": "kuwo"},
+            {"id": "OTHER", "name": "恰似你的温柔", "artist": "蔡琴",
+             "cover": "https://wrong.jpg", "source": "kugou"},
+        ]
+
+        async def fake_pick(http, source, it):
+            return "http://good"
+
+        async def fake_resolve(ref, *a, **kw):
+            return "http://ticket"
+
+        host_cmd = AsyncMock(return_value=(True, "OK"))
+        with ExitStack() as stack:
+            self._setup(stack, items=[], pick=fake_pick,
+                        resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
+            stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
+            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
+                                      AsyncMock(return_value=1)))
+            stack.enter_context(patch("core.music.songloft_api.playlist_songs",
+                                      AsyncMock(return_value=songs)))
+            stack.enter_context(patch("core.music.songloft_api.search",
+                                      AsyncMock(return_value=facade)))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            await sr._run_cch("play", {
+                "query": "恰似你的温柔", "raw_id": "671381931", "source": "kuwo"})
+
+        it = calls["build_item"]
+        self.assertIn("img4.kuwo.cn", it.get("cover", ""), "封面取门面原图（按 rawID 精确匹配）")
+        self.assertEqual(it.get("album"), "华语经典好歌珍藏")
+        self.assertEqual(it.get("artist"), "邓丽君")
+
+    async def test_raw_id_cover_fail_open(self):
+        """门面搜索失败 → cover 为空但不崩、点播照常（fail-open）。"""
+        calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
+
+        async def fake_pick(http, source, it):
+            return "http://good"
+
+        async def fake_resolve(ref, *a, **kw):
+            return "http://ticket"
+
+        host_cmd = AsyncMock(return_value=(True, "OK"))
+        with ExitStack() as stack:
+            self._setup(stack, items=[], pick=fake_pick,
+                        resolve=fake_resolve, host_cmd=host_cmd, calls=calls)
+            stack.enter_context(patch.object(sr, "_managed_collect", AsyncMock()))
+            stack.enter_context(patch("core.music.songloft_api.favorites_playlist_id",
+                                      AsyncMock(return_value=1)))
+            stack.enter_context(patch("core.music.songloft_api.playlist_songs",
+                                      AsyncMock(return_value=[])))
+            stack.enter_context(patch("core.music.songloft_api.search",
+                                      AsyncMock(side_effect=RuntimeError("facade down"))))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            out = await sr._run_cch("play", {
+                "query": "恰似你的温柔", "raw_id": "671381931", "source": "kuwo"})
+
+        self.assertIn("已在 CCH 上为你播放", out)
+        self.assertFalse(calls["build_item"].get("cover"))
+
     async def test_raw_id_copyright_fail_open(self):
         """Songloft 收藏读取失败 → copyright 空但不崩、点播照常（fail-open，不退化）。"""
         calls = {"build_item": None, "speak": [], "pick": [], "resolve": []}
