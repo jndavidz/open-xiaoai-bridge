@@ -10,6 +10,22 @@ import unittest
 from core.music import songloft_api
 
 
+class SongRawidTest(unittest.TestCase):
+    """票 10h：song_rawid 是收藏 rawID 提取的单一实现（favorite schema + 历史红心校准共用）。"""
+
+    def test_from_source_data(self):
+        s = {"source_data": json.dumps({"s": "kugou", "i": "B3A52A7A"})}
+        self.assertEqual("B3A52A7A", songloft_api.song_rawid(s))
+
+    def test_from_dedup_key_strips_prefix(self):
+        self.assertEqual("B3A52A7A", songloft_api.song_rawid({"dedup_key": "kwqq_B3A52A7A"}))
+
+    def test_invalid_returns_empty(self):
+        self.assertEqual("", songloft_api.song_rawid({"dedup_key": "kwqq_0"}))
+        self.assertEqual("", songloft_api.song_rawid({}))
+        self.assertEqual("", songloft_api.song_rawid(None))
+
+
 class ToItemTest(unittest.TestCase):
     def test_maps_plugin_result_to_facade_item(self):
         item = songloft_api.to_item({

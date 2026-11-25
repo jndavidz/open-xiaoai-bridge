@@ -181,41 +181,37 @@ async def get_by_pos(pos) -> dict | None:
     return await _get_from_truth(pos, get_by_pos_from_items)
 
 
-async def load_favorite_rawids() -> set[str]:
-    """从收藏真相源（Songloft 收藏歌单）取 rawID 集合，供历史红心校准。
-    读失败降级空集（历史红心全显示未收藏）——fail-open，不影响历史列表本身。"""
-    import aiohttp
+# 上次成功读到的收藏 rawID 集合（票 10h）：Songloft 临时读失败时保留上次值，
+# 避免降级空集把已收藏曲红心全抹成空心（假阴性）。None = 从未成功读过。
+_last_fav_rids: set[str] | None = None
 
+
+async def load_favorite_rawids() -> set[str] | None:
+    """从收藏真相源（Songloft 收藏歌单）取 rawID 集合，供历史红心校准。
+
+    返回 None 表示"未知"（读失败且无历史缓存）→ _push 不校准 collect，保留 item 自带值；
+    读失败但有上次成功缓存 → 返回上次集合（宁可短暂陈旧，不做假阴性全灭）。
+    """
     from core.music import songloft_api
 
+    global _last_fav_rids
     try:
+        import aiohttp
+
         async with aiohttp.ClientSession() as http:
             pl = await songloft_api.favorites_playlist_id(http=http)
             songs = await songloft_api.playlist_songs(pl, http=http)
-    except Exception as exc:  # noqa: BLE001 - 收藏读失败不阻塞历史写入
-        logger.debug(f"[CchHistory] load_favorite_rawids failed: {type(exc).__name__}",
-                     module="CchHistory")
-        return set()
-    import json as _json
+    except Exception as exc:  # noqa: BLE001 - 收藏读失败：用上次缓存，不假阴性全灭
+        logger.debug(f"[CchHistory] load_favorite_rawids failed, use last cache: "
+                     f"{type(exc).__name__}", module="CchHistory")
+        return _last_fav_rids
 
     out = set()
     for s in songs or []:
-        if not isinstance(s, dict):
-            continue
-        rid = ""
-        try:
-            sd = s.get("source_data")
-            if isinstance(sd, str) and sd:
-                parsed = _json.loads(sd)
-                if isinstance(parsed, dict):
-                    rid = str(parsed.get("i") or "").strip()
-        except (ValueError, TypeError):
-            pass
-        if not rid:
-            dk = str(s.get("dedup_key") or "").strip()
-            rid = dk[5:] if dk.startswith("kwqq_") else dk  # dedup_key = kwqq_<rawID>
-        if rid and rid != "0":
+        rid = songloft_api.song_rawid(s)
+        if rid:
             out.add(rid.lower())
+    _last_fav_rids = out
     return out
 
 

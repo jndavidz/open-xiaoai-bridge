@@ -400,6 +400,30 @@ def _fav_authors(artist: str, source: str) -> list:
              "authorTypes": [{"name": "SINGER"}], "cover": None}]
 
 
+def song_rawid(song: dict) -> str:
+    """从 Songloft 歌曲对象提取 rawID（唯一身份）——favorite_item_schema 与
+    历史红心校准（cch_history.load_favorite_rawids）共用，避免两处解析口径漂移。
+
+    source_data.i 为真值；缺失时回退 dedup_key（格式 kwqq_<rawID>，去前缀）。
+    无有效 id → 空串（调用方按需跳过）。
+    """
+    if not isinstance(song, dict):
+        return ""
+    rid = ""
+    try:
+        sd = song.get("source_data")
+        if isinstance(sd, str) and sd:
+            parsed = json.loads(sd)
+            if isinstance(parsed, dict):
+                rid = str(parsed.get("i") or "").strip()
+    except (ValueError, TypeError):
+        pass
+    if not rid:
+        dk = str(song.get("dedup_key") or "").strip()
+        rid = dk[5:] if dk.startswith("kwqq_") else dk
+    return rid if rid and rid != "0" else ""
+
+
 def favorite_item_schema(songs: list) -> list:
     """Songloft 歌曲对象 → 原厂「我的收藏」item schema（票 25，纯函数可单测）。
 
@@ -430,7 +454,9 @@ def favorite_item_schema(songs: list) -> list:
         except (ValueError, TypeError):
             pass
         if not raw_id:
-            raw_id = str(song.get("dedup_key") or "").strip()
+            # 票 10h：统一走 song_rawid（source_data.i 或 dedup_key 去 kwqq_ 前缀），
+            # 与历史红心校准口径一致——避免收藏 tab rawId 带前缀、历史按裸 ID 匹配。
+            raw_id = song_rawid(song)
         if not raw_id:
             continue    # 无原始 id 无法逐曲点播，跳过
         try:

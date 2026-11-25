@@ -104,6 +104,28 @@ class CchHistoryIdentityTest(unittest.TestCase):
         out = cch_history.history_item_schema(items)
         self.assertTrue(out[0]["collect"])
 
+    def test_history_schema_collect_flips_to_false_when_unfavorited(self):
+        """验收①：取消收藏后（rawID 不在集合）collect 从 True 翻转为 False。"""
+        items = [{"name": "晴天", "id": "B3A52A7A", "source": "kugou", "collect": True}]
+        # 收藏表已无该曲（空集合）→ collect=False
+        out = cch_history.history_item_schema(items, fav_rids=set())
+        self.assertFalse(out[0]["collect"], "取消收藏后红心应变空心")
+
+    def test_load_favorite_rawids_keeps_last_cache_on_read_failure(self):
+        """Spec review：Songloft 读失败时保留上次成功集合，不假阴性全灭红心。"""
+        import asyncio
+        from unittest import mock
+
+        prev = cch_history._last_fav_rids
+        try:
+            cch_history._last_fav_rids = {"b3a52a7a"}
+            with mock.patch("core.music.songloft_api.favorites_playlist_id",
+                            new_callable=mock.AsyncMock, side_effect=RuntimeError("down")):
+                got = asyncio.run(cch_history.load_favorite_rawids())
+            self.assertEqual({"b3a52a7a"}, got, "读失败应返回上次缓存而非空集")
+        finally:
+            cch_history._last_fav_rids = prev
+
     def test_history_item_schema_via_public_seam(self):
         """history schema 输出经公共 cch_schema 生成，关键字段保持原厂形态。"""
         item = cch_history.history_item_schema([{
