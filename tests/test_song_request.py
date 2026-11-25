@@ -341,6 +341,59 @@ class FetchLayerTest(unittest.TestCase):
         self.assertEqual(body, self._fetch(_FakeSession(_FakeResp(body=body))))
 
 
+class CollectForPlayTest(unittest.TestCase):
+    """票 02 集成：_collect_for_play 意图→分类搜索 + 去重 + 回退（mock 模块边界）。"""
+
+    def test_artist_only_uses_artist_search(self):
+        import asyncio
+        from unittest import mock
+        captured = {}
+        async def fake_browse(keywords, stype, *, http=None):
+            captured["kw"], captured["type"] = keywords, stype
+            return [{"id": "ID1", "name": "思念", "artist": "任素汐", "source": "kugou"}]
+        with mock.patch("core.music.songloft_api.browse_search", fake_browse):
+            items = asyncio.run(song_request._collect_for_play("", "任素汐", {}))
+        self.assertEqual(("任素汐", "artist"), (captured["kw"], captured["type"]))
+        self.assertEqual(["思念"], [i["name"] for i in items])
+
+    def test_song_plus_artist_filters_version(self):
+        import asyncio
+        from unittest import mock
+        async def fake_browse(keywords, stype, *, http=None):
+            return [
+                {"id": "ID1", "name": "青花瓷", "artist": "周杰伦", "source": "kugou"},
+                {"id": "ID2", "name": "青花瓷", "artist": "其他歌手", "source": "kugou"},
+            ]
+        with mock.patch("core.music.songloft_api.browse_search", fake_browse):
+            items = asyncio.run(song_request._collect_for_play("青花瓷", "周杰伦", {}))
+        self.assertEqual(["青花瓷"], [i["name"] for i in items])
+        self.assertEqual("周杰伦", items[0]["artist"], "双字段须按歌手过滤版本")
+
+    def test_dedup_variants_from_browse(self):
+        import asyncio
+        from unittest import mock
+        async def fake_browse(keywords, stype, *, http=None):
+            return [
+                {"id": "ID1", "name": "晴天", "artist": "周杰伦", "source": "kugou"},
+                {"id": "ID2", "name": "晴天 (Live)", "artist": "周杰伦", "source": "kugou"},
+            ]
+        with mock.patch("core.music.songloft_api.browse_search", fake_browse):
+            items = asyncio.run(song_request._collect_for_play("晴天", "", {}))
+        self.assertEqual(1, len(items), "变体须去重为 1 首")
+
+    def test_fallback_when_browse_fails(self):
+        import asyncio
+        from unittest import mock
+        async def fake_browse(keywords, stype, *, http=None):
+            raise RuntimeError("plugin down")
+        async def fake_managed(query, source, *, artist="", album=False):
+            return [{"id": "ID1", "name": " fallback曲", "artist": "周杰伦", "source": "kugou"}]
+        with mock.patch("core.music.songloft_api.browse_search", fake_browse), \
+             mock.patch.object(song_request, "_managed_collect", fake_managed):
+            items = asyncio.run(song_request._collect_for_play("晴天", "周杰伦", {}))
+        self.assertEqual(1, len(items), "分类搜索失败须回退普通搜索")
+
+
 class PlayPathTest(unittest.TestCase):
     """要点 3/4/6：两跳搜歌、announce 起播、完成回读、源策略与 ekey 忽略。"""
 

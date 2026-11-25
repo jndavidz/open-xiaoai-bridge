@@ -510,26 +510,6 @@ class CollectFavoriteTest(CchNpTestBase):
 class PlaybackModeTest(unittest.TestCase):
     """票 11：单曲/批量判定 + 五模式下一首选择（纯函数，public seam）。"""
 
-    def test_classify_single_when_results_are_same_song(self):
-        # 实测：搜「青花瓷」去重后全是同一首（含变体）→ single
-        items = [{"name": "青花瓷"}, {"name": "青花瓷 (Live)"}, {"name": "青花瓷(伴奏)"}]
-        self.assertEqual("single", cch_np.classify_play_intent(items))
-
-    def test_classify_batch_when_results_are_different_songs(self):
-        # 实测：搜「任素汐」去重后是不同歌 → batch
-        items = [{"name": "思念"}, {"name": "传奇"}, {"name": "贝加尔湖畔"}]
-        self.assertEqual("batch", cch_np.classify_play_intent(items))
-
-    def test_classify_single_when_exact_title_plus_variant(self):
-        # 用户复现：「恰似你的温柔」三首 → 归一后同一首 → single
-        items = [{"name": "恰似你的温柔"}, {"name": "恰似你的温柔 (Live)"},
-                 {"name": "恰似你的温柔(伴奏)"}]
-        self.assertEqual("single", cch_np.classify_play_intent(items))
-
-    def test_classify_empty_conservative(self):
-        self.assertEqual("batch", cch_np.classify_play_intent([]))
-        self.assertEqual("batch", cch_np.classify_play_intent(None))
-
     def test_choose_next_normal_sequential(self):
         self.assertEqual(1, cch_np.choose_next("normal", 3, 0, set()))
         self.assertEqual(2, cch_np.choose_next("normal", 3, 1, set()))

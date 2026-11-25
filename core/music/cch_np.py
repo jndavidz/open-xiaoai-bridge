@@ -56,35 +56,6 @@ def current_play_mode() -> str:
     return _current_play_mode
 
 
-def classify_play_intent(items: list) -> str:
-    """判定点播意图（票 11，2026-11-25 实测定案）：基于 bridge 去重后的搜索结果特征。
-
-    背景（真机/Songloft 日志 VERIFIED）：
-    - Songloft 聚合搜索无论歌名还是歌手都返回 26–30 项；
-    - bridge `_dedupe_items` 按归一化歌名去重后：**单曲**「青花瓷」只剩 1–2 项且歌名
-      全是「青花瓷」（同曲版本被去重）；**歌手**「任素汐」剩约 10 项且歌名各不相同
-      （思念/传奇/…）。这就是用户说的「单曲搜索结果明显少」。
-    ⇒ 判据 = 去重后结果的**歌名同质度**：所有项歌名归一后相同/仅 variant 差异 → single；
-      歌名各不相同 → batch。不依赖 query 文本（实测 LLM 填纯名字，无法区分）。
-    """
-    import re
-
-    def norm(name: str) -> str:
-        t = re.sub(r"[\(（\[【].*?[\)）\]】]", "", str(name or "").strip().lower())
-        t = re.sub(r"live|伴奏|remix|cover|翻自|翻唱|demo", "", t)
-        return re.sub(r"[\s\-_·.,，。!！?？'\"、]+", "", t)
-
-    titles = [norm(it.get("name") or it.get("title") or "")
-              for it in (items or []) if isinstance(it, dict)]
-    titles = [t for t in titles if t]
-    if not titles:
-        return "batch"           # 无结果 → 保守批量（不臆断单曲）
-    distinct = set(titles)
-    if len(distinct) == 1:
-        return "single"          # 去重后全是同一首（同曲版本）→ 单曲点播
-    return "batch"               # 多首不同歌 → 歌手批量
-
-
 def choose_next(mode: str, queue_len: int, idx: int, played: set[int],
                  *, rng: random.Random | None = None) -> int | None:
     """五模式下一首选择（纯函数，可单测）。返回 None = 停止不推进。

@@ -305,17 +305,31 @@ async def _collect_for_play(song: str, artist: str, args: dict) -> list[dict]:
             async with aiohttp.ClientSession() as http:
                 items = await songloft_api.browse_search(keywords, stype, http=http)
             if items:
+                # 票 03：分类搜索结果同样去变体+同名去重（与回退路径口径一致）
+                items = _dedupe_items(_drop_query_variants(items, keywords))
                 if stype == "music" and artist:
                     # 双字段：按歌手过滤版本（只认主歌手命中的项）
                     items = [it for it in items
                              if artist in str(it.get("artist") or it.get("singer") or "")]
-                logger.info(f"[SongRequest] cch browse_search type={stype} keywords={keywords!r} n={len(items)}",
+                    if not items:  # 艺名表述不一致 → 回退普通搜索，不直接失败
+                        logger.debug("cch browse_search artist filter empty, fallback",
+                                     module="SongRequest")
+                        return await _managed_collect(song or keywords, args.get("source"), artist=artist)
+                logger.info(f"cch browse_search type={stype} keywords={keywords!r} n={len(items)}",
                             module="SongRequest")
                 return items
         except Exception as exc:  # noqa: BLE001 - 分类搜索失败回退普通搜索
-            logger.warning(f"[SongRequest] cch browse_search failed: {type(exc).__name__}, fallback",
+            logger.warning(f"cch browse_search failed: {type(exc).__name__}, fallback",
                            module="SongRequest")
-    return await _managed_collect(keywords or song, args.get("source"), artist=artist)
+    fallback = await _managed_collect(keywords or song, args.get("source"), artist=artist)
+    if fallback and artist:
+        # 回退路径 artist 不参与搜索，按歌手再过滤（与分类搜索口径一致）；
+        # 过滤后全空则保留原结果（fail-open，不臆断用户要 0 首）。
+        by_artist = [it for it in fallback
+                     if artist in str(it.get("artist") or it.get("singer") or "")]
+        if by_artist:
+            fallback = by_artist
+    return fallback
 
 
 async def _managed_collect(query: str, requested_source, *, artist: str = "",
@@ -770,7 +784,9 @@ async def _run_cch(action: str, args: dict) -> str:
         # 票 11：play_mode = 点播意图（single 特定歌 / 批量走播控页模式）+ played 重置
         from core.music import cch_np as _np
 
-        _intent = _np.classify_play_intent(items)  # 基于去重后结果同质度判定（实测定案）
+        # 意图单一真相源 = LLM 的 song/artist（不再从结果反推）：
+        #   有 artist（歌手批量）→ batch；仅 song（指定曲目）→ single。
+        _intent = "batch" if artist else "single"
         _cch_state.update({"entry": 0, "items": items, "no_advance": False,
                            "play_intent": _intent, "played": []})
         # 播控页四档状态不在此快照——由 cch_np.current_play_mode() 实时读（单一真相源），
