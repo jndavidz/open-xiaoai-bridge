@@ -597,6 +597,45 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
             await cch_click._fav_collect({"source": "FAVADD", "rid": "671381931"})
         self.assertIn(("apply", True, 4199), calls)
 
+    async def test_fav_add_new_song_via_history_not_favorites(self):
+        """票01 根因守门：FAVADD 新歌不在收藏表 → 从历史反查 item 走 ensure_song，
+        不再因 lookup_favorite_by_rawid 返回 None 而 skip。"""
+        from core.music import cch_np
+        hist_item = {"rawId": "B3A52A7A", "source": "kugou", "title": "晴天",
+                     "artist": "周杰伦", "duration": 269, "cover": {"img": "http://img/q.jpg"}}
+        calls = []
+
+        async def fake_apply(item, intent, **kw):
+            calls.append(("apply", intent, kw.get("song_id"), item))
+            return {"action": "added"}
+
+        with mock.patch("core.music.songloft_api.lookup_favorite_by_rawid",
+                        new_callable=mock.AsyncMock, return_value=None), \
+             mock.patch("core.music.cch_history.get_by_rawid",
+                        new_callable=mock.AsyncMock, return_value=hist_item), \
+             mock.patch.object(cch_np, "apply_favorite", fake_apply), \
+             mock.patch("core.music.cch_click.logger"):
+            await cch_click._fav_collect({"source": "FAVADD", "rid": "B3A52A7A"})
+        self.assertEqual(1, len(calls), "FAVADD 新歌不得 skip，必须走 apply_favorite")
+        _, intent, song_id, item = calls[0]
+        self.assertTrue(intent)
+        self.assertIsNone(song_id, "新歌须走 ensure_song（不传 song_id）")
+        self.assertEqual("B3A52A7A", item["id"])
+        self.assertEqual("晴天", item["name"])
+        self.assertEqual("kugou", item["source"])
+
+    async def test_fav_add_no_history_still_skips(self):
+        """守门：新歌既不在收藏表也不在历史 → fail-open skip（不臆造 item）。"""
+        from core.music import cch_np
+        with mock.patch("core.music.songloft_api.lookup_favorite_by_rawid",
+                        new_callable=mock.AsyncMock, return_value=None), \
+             mock.patch("core.music.cch_history.get_by_rawid",
+                        new_callable=mock.AsyncMock, return_value=None), \
+             mock.patch.object(cch_np, "apply_favorite", new_callable=mock.AsyncMock) as apply, \
+             mock.patch("core.music.cch_click.logger"):
+            await cch_click._fav_collect({"source": "FAVADD", "rid": "UNKNOWN"})
+        apply.assert_not_awaited()
+
     async def test_fav_routes_without_pointplay(self):
         """守门：FAVADD/FAVREMOVE 在 _accept_event 里直接走 _fav_collect，不进点播去抖链。"""
         with mock.patch.object(cch_click, "_fav_collect", new_callable=mock.AsyncMock) as fav, \

@@ -43,6 +43,37 @@ class CchHistoryIdentityTest(unittest.TestCase):
         hit = cch_history.get_by_pos_from_items(self.ITEMS, "2")
         self.assertEqual("60091900", hit["rawId"])
 
+    def test_get_by_rawid_from_items(self):
+        """票01：FAVADD 从历史真相源按 rawID 反查完整 item（供 ensure_song 重建收藏）。"""
+        items = [
+            {"rawId": "347BDED5", "source": "KUGOU", "title": "屋顶",
+             "authors": [{"title": "温岚"}], "duration": 319,
+             "cover": {"img": "http://img/r.jpg"}},
+            {"rawId": "8C655F57", "source": "KUGOU", "title": "亲爱的你啊",
+             "authors": [{"title": "任素汐"}]},
+        ]
+        hit = cch_history.get_by_rawid_from_items(items, "8C655F57")
+        self.assertEqual("8C655F57", hit["rawId"])
+        self.assertEqual("亲爱的你啊", hit["title"])
+        self.assertEqual("温岚", items[0]["authors"][0]["title"])  # 反查返回原始 item
+        self.assertEqual("任素汐", hit["authors"][0]["title"])
+        self.assertNotIn("cover", hit)  # 该 item 无 cover
+
+        # 还原成 ensure_song 格式（票 01 FAVADD 用）——用带 cover 的首项
+        with_cover = cch_history.get_by_rawid_from_items(items, "347BDED5")
+        fav_item = cch_history.item_for_favorite_from_history(with_cover)
+        self.assertEqual("347BDED5", fav_item["id"])
+        self.assertEqual("屋顶", fav_item["name"])
+        self.assertEqual("kugou", fav_item["source"])
+        self.assertEqual("温岚", fav_item["artist"])
+        self.assertEqual("http://img/r.jpg", fav_item["cover"])
+        self.assertEqual(319, fav_item["duration_s"])
+
+    def test_get_by_rawid_case_insensitive_and_missing(self):
+        items = [{"rawId": "ABC123", "source": "KUGOU", "title": "X"}]
+        self.assertEqual("ABC123", cch_history.get_by_rawid_from_items(items, "abc123")["rawId"])
+        self.assertIsNone(cch_history.get_by_rawid_from_items(items, "NOPE"))
+
     def test_history_item_schema_via_public_seam(self):
         """history schema 输出经公共 cch_schema 生成，关键字段保持原厂形态。"""
         item = cch_history.history_item_schema([{

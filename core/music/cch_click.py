@@ -154,14 +154,20 @@ async def _heart_collect(ev: dict) -> None:
 
 
 async def _fav_collect(ev: dict) -> None:
-    """收藏 tab 红心点击（2026-11-25）：source=FAVADD/FAVREMOVE + rid=rawID。
+    """红心点击收藏写入（收藏 tab + 播放历史 tab，2026-11-25）：FAVADD/FAVREMOVE + rid=rawID。
 
     原厂 CollectRequest 走云端 modify，但我方收藏在 Songloft（不在原厂账号），
     云端回执 data.success=false → UI 乐观变🤍但实际没动。tap_hook 从 add-param
-    抓 operation/rawId/source 写 spool，这里按 rawID 在 Songloft 收藏歌单找到 song_id，
-    调 add/remove_from_favorites 真正改我方收藏（真相源），再 push 设备。
+    抓 operation/rawId/source 写 spool，这里按唯一身份改我方收藏（真相源），再 push 设备。
+
+    票 01 根因修复：两条分支的数据源必须分开——
+    - FAVREMOVE（取消收藏）：目标曲必在收藏表 → lookup_favorite_by_rawid 拿 song_id，
+      传 song_id 跳过 ensure_song（避免 upsert 出新 id）。
+    - FAVADD（新增收藏）：目标曲**本就不在收藏表**（否则不会点收藏）→ 不能用收藏表反查；
+      从历史真相源按 rawID 取元数据，还原成 ensure_song item，走 apply_favorite 不带
+      song_id（内部 ensure_song 幂等建曲后入单）。两者都不在 → fail-open skip（不臆造 item）。
     """
-    from core.music import songloft_api, cch_np
+    from core.music import songloft_api, cch_np, cch_history
 
     src = str(ev.get("source") or "")
     rid = str(ev.get("rid") or "").strip()
@@ -169,14 +175,36 @@ async def _fav_collect(ev: dict) -> None:
     if not rid:
         logger.warning("[CchClick] FAVADD/REMOVE missing rid, skip", module="CchClick")
         return
-    # 按 rawID 反查 song_id（单一接口），然后走 cch_np.apply_favorite 统一写入口
-    hit = await songloft_api.lookup_favorite_by_rawid(rid)
-    if not hit or not hit["song_id"]:
-        logger.info(f"[CchClick] FAV {src} rid={rid} not in favorites, skip", module="CchClick")
+
+    if not intent:
+        # 取消收藏：歌在收藏表，按 rawID 拿 song_id（不 upsert）
+        hit = await songloft_api.lookup_favorite_by_rawid(rid)
+        if not hit or not hit["song_id"]:
+            logger.info(f"[CchClick] FAVREMOVE rid={rid} not in favorites, skip",
+                        module="CchClick")
+            return
+        result = await cch_np.apply_favorite(hit, False, song_id=hit["song_id"])
+        logger.info(f"[CchClick] FAVREMOVE rid={rid} song={hit['song_id']} -> "
+                    f"{result.get('action')}", module="CchClick")
         return
-    result = await cch_np.apply_favorite(hit, intent, song_id=hit["song_id"])
-    logger.info(f"[CchClick] FAV {src} rid={rid} song={hit['song_id']} -> "
-                f"{result.get('action')}", module="CchClick")
+
+    # 新增收藏：先试收藏表（幂等——已在表里说明已收藏，避免重复 upsert）；
+    # 不在则从历史真相源还原 item 走 ensure_song。
+    hit = await songloft_api.lookup_favorite_by_rawid(rid)
+    if hit and hit.get("song_id"):
+        result = await cch_np.apply_favorite(hit, True, song_id=hit["song_id"])
+        logger.info(f"[CchClick] FAVADD rid={rid} already in favorites -> "
+                    f"{result.get('action')}", module="CchClick")
+        return
+    hist = await cch_history.get_by_rawid(rid)
+    if not hist:
+        logger.info(f"[CchClick] FAVADD rid={rid} not in history either, skip",
+                    module="CchClick")
+        return
+    item = cch_history.item_for_favorite_from_history(hist)
+    result = await cch_np.apply_favorite(item, True)
+    logger.info(f"[CchClick] FAVADD rid={rid} via history -> {result.get('action')}",
+                module="CchClick")
 
 
 async def _histpos_play(ev: dict) -> None:

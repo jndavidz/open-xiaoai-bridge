@@ -92,6 +92,69 @@ def get_by_pos_from_items(items: list, pos) -> dict | None:
     return _extract_identity(items[idx])
 
 
+def get_by_rawid_from_items(items: list, raw_id) -> dict | None:
+    """纯函数：按 rawID 从历史 items 反查完整 item（大小写不敏感，可单测）。
+
+    票 01：FAVADD 新增收藏时，目标曲不在收藏表、需从历史真相源拿元数据走
+    ensure_song 重建；返回原厂 schema item（含 cover/authors/duration），
+    由调用方还原成 ensure_song 格式。无匹配/无身份 → None（fail-open）。
+    """
+    want = str(raw_id or "").strip().lower()
+    if not want:
+        return None
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        rid = str(it.get("rawId") or it.get("id") or "").strip().lower()
+        if rid and rid == want:
+            return it
+    return None
+
+
+def item_for_favorite_from_history(hit: dict) -> dict:
+    """原厂历史 schema item → ensure_song 吃的 item（纯函数，可单测）。
+
+    还原字段：rawId→id、title→name、source→source、authors[0].title→artist、
+    cover.img→cover、duration→duration_s。albumItem 仅收藏 tab 有，历史 tab
+    缺省无，album 可空（ensure_song 不强求）。
+    """
+    out = {
+        "id": str(hit.get("rawId") or hit.get("id") or "").strip(),
+        "name": str(hit.get("title") or hit.get("name") or "").strip(),
+        "source": str(hit.get("source") or "").strip().lower(),
+    }
+    authors = hit.get("authors") or []
+    if isinstance(authors, list) and authors and isinstance(authors[0], dict):
+        out["artist"] = str(authors[0].get("title") or "").strip()
+    cover = hit.get("cover")
+    if isinstance(cover, dict):
+        out["cover"] = str(cover.get("img") or "").strip()
+    try:
+        out["duration_s"] = float(hit.get("duration") or 0)
+    except (TypeError, ValueError):
+        out["duration_s"] = 0
+    album_item = hit.get("albumItem")
+    if isinstance(album_item, dict):
+        out["album"] = str(album_item.get("title") or "").strip()
+    return out
+
+
+async def get_by_rawid(raw_id) -> dict | None:
+    """按 rawID 从历史真相源取完整 item（票 01：FAVADD 重建收藏用）。
+    与 get_by_pos 同构：先设备 play_history.json 回读，内存 deque fallback。"""
+    from core.music import cch_cast
+
+    try:
+        ok, payload = await cch_cast.musicctl("historyfile", {})
+        if ok and isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            hit = get_by_rawid_from_items(payload["items"], raw_id)
+            if hit:
+                return hit
+    except Exception:  # noqa: BLE001 - 设备回读失败降级内存
+        pass
+    return get_by_rawid_from_items(list(_items), raw_id)
+
+
 async def get_by_pos(pos) -> dict | None:
     """按显示索引 pos 取历史条目唯一身份。真相源 = 设备 play_history.json
     （经 9102 historyfile read 回读），bridge 内存 deque 仅作 fallback——
