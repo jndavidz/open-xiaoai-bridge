@@ -85,11 +85,15 @@ def choose_next(mode: str, queue_len: int, idx: int, played: set[int],
 
 
 def np_enabled() -> bool:
-    from core.tools import song_request as sr
+    """换代编排开关 = cch_np_enabled 单一权威（票 02/11 真机修正）。
 
+    旧实现额外要求 sr._cfg("np_enabled", False)——生产配置里根本没有这个 key
+    （配置写的是 cch_np_enabled），恒 False → 曲终只记录不换代（recorded_only），
+    「播一首就停」根因之一。cch_cast.np_enabled() 已读 cch_np_enabled，直接复用即可。
+    """
     from core.music.cch_cast import np_enabled as cast_np_enabled
 
-    return cast_np_enabled() and bool(sr._cfg("np_enabled", False))
+    return cast_np_enabled()
 
 
 def snapshot() -> dict:

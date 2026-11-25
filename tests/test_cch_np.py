@@ -507,6 +507,25 @@ class CollectFavoriteTest(CchNpTestBase):
         self.assertEqual([2], seen["remove"])
 
 
+class NpEnabledGateTest(unittest.TestCase):
+    """票 02/11：换代编排开关必须与 cch_np_enabled 一致（真机 recorded_only 根因）。"""
+
+    def test_np_enabled_follows_cch_np_enabled(self):
+        from unittest import mock
+        from core.music import cch_cast
+        # cch_np_enabled=True（生产配置）→ 编排应开；旧代码额外要求不存在的 np_enabled key → 恒关
+        with mock.patch.object(cch_cast, "np_enabled", lambda: True), \
+             mock.patch("core.tools.song_request._cfg", lambda k, d=None: d):
+            self.assertTrue(cch_np.np_enabled(),
+                            "cch_np_enabled=True 时换代编排必须开（否则曲终只记录不换代）")
+
+    def test_np_enabled_off_when_cast_off(self):
+        from unittest import mock
+        from core.music import cch_cast
+        with mock.patch.object(cch_cast, "np_enabled", lambda: False):
+            self.assertFalse(cch_np.np_enabled())
+
+
 class PlaybackModeTest(unittest.TestCase):
     """票 11：单曲/批量判定 + 五模式下一首选择（纯函数，public seam）。"""
 
