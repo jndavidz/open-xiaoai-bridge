@@ -526,6 +526,69 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cch_np.", src, "禁止桥侧读状态")
         self.assertNotIn("current_song", src, "禁止桥侧读状态")
 
+    # ---- 收藏 tab 红心点击（2026-11-25 FAVADD/FAVREMOVE）----
+
+    async def test_fav_remove_by_rawid(self):
+        """FAVREMOVE 按 rawID 在收藏歌单找到 song_id → remove_from_favorites + push。"""
+        songs = [{"id": 4199, "title": "恰似你的温柔",
+                  "source_data": '{"s":"kuwo","i":"671381931"}'},
+                 {"id": 4086, "title": "胡广生",
+                  "source_data": '{"s":"kugou","i":"8C655F"}'}]
+        calls = []
+
+        async def fake_remove(sid, **kw):
+            calls.append(("remove", sid))
+
+        async def fake_push():
+            calls.append(("push",))
+            return True, "ok"
+
+        with mock.patch("core.music.songloft_api.favorites_playlist_id",
+                        new_callable=mock.AsyncMock, return_value=1), \
+             mock.patch("core.music.songloft_api.playlist_songs",
+                        new_callable=mock.AsyncMock, return_value=songs), \
+             mock.patch("core.music.songloft_api.remove_from_favorites", fake_remove), \
+             mock.patch("core.music.cch_cast.push_favorites", fake_push), \
+             mock.patch("core.music.cch_click.logger"):
+            await cch_click._fav_collect({"source": "FAVREMOVE", "rid": "671381931"})
+        self.assertIn(("remove", 4199), calls)
+        self.assertIn(("push",), calls)
+
+    async def test_fav_add_by_rawid(self):
+        """FAVADD 按 rawID 找到 song_id → add_from_favorites + push。"""
+        songs = [{"id": 4199, "title": "恰似你的温柔",
+                  "source_data": '{"s":"kuwo","i":"671381931"}'}]
+        calls = []
+
+        async def fake_add(sid, **kw):
+            calls.append(("add", sid))
+
+        async def fake_push():
+            calls.append(("push",))
+            return True, "ok"
+
+        with mock.patch("core.music.songloft_api.favorites_playlist_id",
+                        new_callable=mock.AsyncMock, return_value=1), \
+             mock.patch("core.music.songloft_api.playlist_songs",
+                        new_callable=mock.AsyncMock, return_value=songs), \
+             mock.patch("core.music.songloft_api.add_to_favorites", fake_add), \
+             mock.patch("core.music.cch_cast.push_favorites", fake_push), \
+             mock.patch("core.music.cch_click.logger"):
+            await cch_click._fav_collect({"source": "FAVADD", "rid": "671381931"})
+        self.assertIn(("add", 4199), calls)
+
+    async def test_fav_routes_without_pointplay(self):
+        """守门：FAVADD/FAVREMOVE 在 _accept_event 里直接走 _fav_collect，不进点播去抖链。"""
+        with mock.patch.object(cch_click, "_fav_collect", new_callable=mock.AsyncMock) as fav, \
+             mock.patch.object(cch_click, "_play_event", new_callable=mock.AsyncMock) as play, \
+             mock.patch("core.music.cch_click.logger"):
+            cch_click._accept_event({"source": "FAVREMOVE", "rid": "671381931"})
+            cch_click._accept_event({"source": "FAVADD", "rid": "8C655F"})
+            await asyncio.sleep(0)
+        fav.assert_awaited()
+        self.assertEqual(fav.await_count, 2)
+        play.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

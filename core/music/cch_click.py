@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections import deque
@@ -153,6 +154,57 @@ async def _heart_collect(ev: dict) -> None:
     logger.info(f"[CchClick] HEART {result.get('action')} intent={intent}", module="CchClick")
 
 
+async def _fav_collect(ev: dict) -> None:
+    """收藏 tab 红心点击（2026-11-25）：source=FAVADD/FAVREMOVE + rid=rawID。
+
+    原厂 CollectRequest 走云端 modify，但我方收藏在 Songloft（不在原厂账号），
+    云端回执 data.success=false → UI 乐观变🤍但实际没动。tap_hook 从 add-param
+    抓 operation/rawId/source 写 spool，这里按 rawID 在 Songloft 收藏歌单找到 song_id，
+    调 add/remove_from_favorites 真正改我方收藏（真相源），再 push 设备。
+    """
+    from core.music import songloft_api, cch_cast
+
+    src = str(ev.get("source") or "")
+    rid = str(ev.get("rid") or "").strip()
+    intent = src == "FAVADD"
+    if not rid:
+        logger.warning("[CchClick] FAVADD/REMOVE missing rid, skip", module="CchClick")
+        return
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as http:
+            pl_id = await songloft_api.favorites_playlist_id(http=http)
+            songs = await songloft_api.playlist_songs(pl_id, http=http)
+            song_id = None
+            for s in songs:
+                sd_raw = s.get("source_data")
+                if not isinstance(sd_raw, str) or not sd_raw:
+                    continue
+                try:
+                    sd = json.loads(sd_raw)
+                except (ValueError, TypeError):
+                    continue
+                if str(sd.get("i") or "") == rid:
+                    song_id = int(s["id"])
+                    break
+            if song_id is None:
+                # 不在收藏列表（如 ADD 一首新歌）：从门面按 rawID 查不到就直接跳过，
+                # 收藏 tab 的红心只应对已收藏曲做 REMOVE；ADD 通常是误触/云端曲。
+                logger.info(f"[CchClick] FAV {src} rid={rid} not in favorites, skip",
+                            module="CchClick")
+                return
+            if intent:
+                await songloft_api.add_to_favorites(song_id, http=http)
+            else:
+                await songloft_api.remove_from_favorites(song_id, http=http)
+        await cch_cast.push_favorites()
+        logger.info(f"[CchClick] FAV {src} rid={rid} song={song_id} -> push done",
+                    module="CchClick")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[CchClick] FAV {src} failed: {type(exc).__name__}: {exc}",
+                       module="CchClick")
+
+
 async def _playtoggle(ev: dict) -> None:
     """屏上播放/暂停键（source=PLAYTOGGLE）：设备侧原子 toggle，桥侧零状态读取。
 
@@ -186,6 +238,14 @@ def _accept_event(ev: dict) -> None:
     if source.startswith("HEART"):
         logger.info(f"[CchClick] HEART recv src={source} -> collect_favorite", module="CchClick")
         asyncio.create_task(_heart_collect(ev))
+        return
+    # 收藏 tab 红心点击（2026-11-25）：tap_hook 抓 CollectRequest add-param 写
+    # FAVADD/FAVREMOVE + rid=rawID。原厂云端 modify 失败（data.success=false）UI 假变🤍，
+    # 这里按 rawID 真正改 Songloft 收藏（我方真相源）+ push 设备。
+    if source in ("FAVADD", "FAVREMOVE"):
+        logger.info(f"[CchClick] {source} recv rid={ev.get('rid')} -> fav_collect",
+                    module="CchClick")
+        asyncio.create_task(_fav_collect(ev))
         return
     # 屏上播放/暂停键（§2.77 四问题①）：tap_hook 抓 playOrPause error → PLAYTOGGLE spool。
     # 读实时播放态反向切（speaker 控制通道），不走点播去抖链。
