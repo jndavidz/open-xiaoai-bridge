@@ -528,6 +528,25 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
                 cch_click._pending_task.cancel()
 
 
+    async def test_curplay_click_skips_dedupe_after_same_song_voice(self):
+        """票 12：语音点播占窗后点当前播放 tab 同名曲，CLICK 不被 dedupe 误杀
+        （review 抓的入口/_play_event 矛盾守门）。"""
+        played = []
+
+        async def fake_run(args):
+            played.append(args.get("query"))
+            return "ok"
+
+        with mock.patch.object(cch_click, "_cfg", lambda k, d=None: 0.05), \
+             mock.patch("core.tools.song_request.run", fake_run):
+            cch_click.note_recent_play("喜月", "任素汐")  # 近期语音点播占窗
+            cch_click._accept_event({"name": "喜月 - 任素汐", "artist": "任素汐",
+                                     "source": "CLICK", "rid": "7D6B", "album": "KWQQ"})
+            self.assertIsNotNone(cch_click._pending_task,
+                                 "CLICK 不应被同名语音点播 dedupe 误杀")
+            if cch_click._pending_task is not None:
+                cch_click._pending_task.cancel()
+
     async def test_favclick_skips_dedupe_after_same_song_voice(self):
         """§2.77-45：语音点歌后 8s 内点同名收藏曲，FAVCLICK 不被 dedupe 误杀。"""
         played = []

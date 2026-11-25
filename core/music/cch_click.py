@@ -337,9 +337,9 @@ def _accept_event(ev: dict) -> None:
         logger.info(f"[CchClick] recv name={name} src={source} action=drop(voice-guard)",
                     module="CchClick")
         return
-    # FAVCLICK 是用户最新点击意图（spool 无 artist，dedupe 退化 name 单键会误杀同名语音
-    # 点歌），跳过 dedupe；云端回声由上方 favclick-guard 挡，不会双链竞速。
-    if source == "FAVCLICK":
+    # FAVCLICK/CLICK 都是用户最新点击意图，跳过 dedupe——否则同名语音点播占窗
+    # 8s 内点红心/当前播放条目会被误杀；云端回声由上方 favclick-guard 挡。
+    if source in ("FAVCLICK", "CLICK"):
         reason = ""
     else:
         reason = dedupe(name, str(ev.get("artist") or ""))
@@ -407,11 +407,11 @@ async def _play_event(ev: dict) -> None:
             name = await _fav_name_by_rawid(raw_id) or name
         name = clean_fav_name(name)
         if raw_id and platform:
-            logger.info(f"[CchClick] FAVCLICK rawID={raw_id} src={platform} "
+            logger.info(f"[CchClick] {source} rawID={raw_id} src={platform} "
                         f"name={name!r}", module="CchClick")
         else:
             # 旧 so / 解析异常：无真相源字段，回退按歌名重搜（fail-open，不比修复前差）
-            logger.warning("[CchClick] FAVCLICK missing rawID/source, fallback search",
+            logger.warning(f"[CchClick] {source} missing rawID/source, fallback search",
                            module="CchClick")
     # FAVCLICK 是用户最新点击意图（无 artist，dedupe 退化会误杀同名语音点播）——跳过
     # 二次 dedupe，与入口一致；云端回声由 favclick-guard 挡。
