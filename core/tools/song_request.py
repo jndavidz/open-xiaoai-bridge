@@ -183,6 +183,12 @@ def intent_fields(args: dict) -> tuple[str, str]:
     return song, artist
 
 
+def play_intent_for(song: str, artist: str) -> str:
+    """点播意图（纯函数，可单测）：有 song（指定曲目，含双字段）→ single；
+    仅 artist（歌手批量，如「任素汐的歌」）→ batch。"""
+    return "single" if str(song or "").strip() else "batch"
+
+
 def validate(args: dict) -> str | None:
     """参数校验：action 白名单 + play/album 必带 song/query/artist 之一。"""
     action = str((args or {}).get("action") or "").strip().lower()
@@ -785,8 +791,9 @@ async def _run_cch(action: str, args: dict) -> str:
         from core.music import cch_np as _np
 
         # 意图单一真相源 = LLM 的 song/artist（不再从结果反推）：
-        #   有 artist（歌手批量）→ batch；仅 song（指定曲目）→ single。
-        _intent = "batch" if artist else "single"
+        #   有 song（指定曲目，含「周杰伦的青花瓷」双字段）→ single；
+        #   仅 artist（歌手批量，如「任素汐的歌」）→ batch。
+        _intent = play_intent_for(song, artist)
         _cch_state.update({"entry": 0, "items": items, "no_advance": False,
                            "play_intent": _intent, "played": []})
         # 播控页四档状态不在此快照——由 cch_np.current_play_mode() 实时读（单一真相源），

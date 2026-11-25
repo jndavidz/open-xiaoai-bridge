@@ -152,6 +152,15 @@ class RegistryContractTest(unittest.TestCase):
         # 内部调用 cch_click 用 query=name
         self.assertEqual(("晴天", ""), song_request.intent_fields({"query": "晴天"}))
 
+    def test_play_intent_single_when_song_present_even_with_artist(self):
+        # 「播放周杰伦的青花瓷」双字段 → single（指定曲目只播一次）
+        self.assertEqual("single", song_request.play_intent_for("青花瓷", "周杰伦"))
+        self.assertEqual("single", song_request.play_intent_for("青花瓷", ""))
+
+    def test_play_intent_batch_when_artist_only(self):
+        # 「播放任素汐的歌」仅 artist → batch
+        self.assertEqual("batch", song_request.play_intent_for("", "任素汐"))
+
     def test_validate_accepts_song_without_query(self):
         self.assertIsNone(song_request.validate({"action": "play", "song": "青花瓷"}))
 
