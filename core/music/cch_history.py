@@ -83,6 +83,48 @@ def history_item_schema(items: list) -> list:
     return out
 
 
+def _extract_identity(it: dict) -> dict | None:
+    """从历史 item 提取唯一身份 (rawID, source) + 展示字段。"""
+    rid = str(it.get("rawId") or it.get("id") or "").strip()
+    src = str(it.get("source") or "").strip().lower()
+    name = str(it.get("title") or it.get("name") or "").strip()
+    if not rid or not src:
+        return None
+    authors = it.get("authors") or []
+    artist = ""
+    if isinstance(authors, list) and authors and isinstance(authors[0], dict):
+        artist = str(authors[0].get("title") or "").strip()
+    return {"rawId": rid, "source": src, "name": name, "artist": artist}
+
+
+def get_by_pos_from_items(items: list, pos) -> dict | None:
+    """纯函数：按显示索引 pos 从历史 items 反查身份（可单测）。"""
+    try:
+        idx = int(pos)
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(items) or not isinstance(items[idx], dict):
+        return None
+    return _extract_identity(items[idx])
+
+
+async def get_by_pos(pos) -> dict | None:
+    """按显示索引 pos 取历史条目唯一身份。真相源 = 设备 play_history.json
+    （经 9102 historyfile read 回读），bridge 内存 deque 仅作 fallback——
+    重启后内存丢但设备文件在，点击反查不受影响。"""
+    from core.music import cch_cast
+
+    try:
+        ok, payload = await cch_cast.musicctl("historyfile", {})
+        if ok and isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            hit = get_by_pos_from_items(payload["items"], pos)
+            if hit:
+                return hit
+    except Exception:  # noqa: BLE001 - 设备回读失败降级内存
+        pass
+    return get_by_pos_from_items(list(_items), pos)
+
+
 async def _push() -> None:
     """完整历史 → 原厂 schema → 9102 historyfile 全量写设备文件。"""
     from core.music import cch_cast

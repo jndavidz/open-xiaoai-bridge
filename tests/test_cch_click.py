@@ -249,6 +249,39 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("migu", seen.get("source"), "平台 lower 后透传")
         self.assertEqual("夜来香", seen.get("query"), "纯歌名仅用于播报/兜底")
 
+    async def test_histpos_resolves_truth_source_by_pos(self):
+        """HISTPOS(pos) → cch_history 反查 (rawID, source, name) → rawID 直构点播。
+        架构统一：显示索引只是定位，歌曲身份永远是 (source, rawID)，不用歌名搜索。"""
+        from core.music import cch_history
+
+        seen = {}
+
+        async def fake_run(args):
+            seen.update(args)
+            return "ok"
+
+        truth = {"rawId": "671381931", "source": "kuwo", "name": "恰似你的温柔", "artist": "邓丽君"}
+        with mock.patch.object(cch_history, "get_by_pos", new_callable=mock.AsyncMock,
+                               return_value=truth), \
+             mock.patch("core.tools.song_request.run", fake_run), \
+             mock.patch("core.music.cch_cast.push_favorites", new_callable=mock.AsyncMock):
+            await cch_click._histpos_play({"source": "HISTPOS", "rid": "4", "name": "histpos"})
+
+        self.assertEqual("671381931", seen.get("raw_id"), "按 rawID 直构，不用歌名")
+        self.assertEqual("kuwo", seen.get("source"))
+        self.assertEqual("恰似你的温柔", seen.get("query"), "歌名仅作播报")
+
+    async def test_histpos_past_end_skips(self):
+        """pos 越界 → 反查失败 → 不点播（fail-closed）。"""
+        from core.music import cch_history
+
+        with mock.patch.object(cch_history, "get_by_pos", new_callable=mock.AsyncMock,
+                               return_value=None), \
+             mock.patch("core.tools.song_request.run", new_callable=mock.AsyncMock) as run, \
+             mock.patch("core.music.cch_cast.push_favorites", new_callable=mock.AsyncMock):
+            await cch_click._histpos_play({"source": "HISTPOS", "rid": "99", "name": "histpos"})
+        run.assert_not_awaited()
+
     async def test_favclick_without_rawid_falls_back(self):
         """旧 so / 解析异常无真相源字段 → 回退按歌名重搜（fail-open，不比修复前差）。"""
         seen = {}

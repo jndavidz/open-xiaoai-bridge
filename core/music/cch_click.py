@@ -205,6 +205,64 @@ async def _fav_collect(ev: dict) -> None:
                        module="CchClick")
 
 
+async def _histpos_play(ev: dict) -> None:
+    """HISTPOS 点击 → 反查真相源 → 复用 FAVCLICK rawID 直构点播路径。"""
+    global _recent_favclick_ts
+    resolved = await _histpos_to_ev(ev)
+    if resolved is None:
+        return
+    _recent_favclick_ts = time.time()   # 复用 favclick-guard 抑制云端错歌回声
+    await _play_event(resolved)
+
+
+async def _fav_name_by_rawid(raw_id: str) -> str:
+    """按 rawID 从 Songloft 收藏歌单反查 display title（仅用于播报/兜底，
+    点播身份始终是 rawID+source）。查不到返回空串，不影响点播。"""
+    try:
+        import aiohttp
+        from core.music import songloft_api
+        async with aiohttp.ClientSession() as http:
+            pl = await songloft_api.favorites_playlist_id(http=http)
+            songs = await songloft_api.playlist_songs(pl, http=http)
+        for s in songs:
+            sd_raw = s.get("source_data")
+            if not isinstance(sd_raw, str) or not sd_raw:
+                continue
+            try:
+                sd = json.loads(sd_raw)
+            except (ValueError, TypeError):
+                continue
+            if str(sd.get("i") or "") == raw_id:
+                return str(s.get("title") or sd.get("n") or "")
+    except Exception:  # noqa: BLE001 - 仅播报名，fail-open
+        pass
+    return ""
+
+
+async def _histpos_to_ev(ev: dict) -> dict | None:
+    """历史 tab 点击（source=HISTPOS，rid=显示 pos）→ 从真相源 cch_history 按 pos
+    反查 (rawID, source, name)，转成 FAVCLICK 同款 ev（rawID 直构点播）。
+    歌曲唯一身份 = (source, rawID)，不依赖歌名搜索、不依赖 native ring pos 偏移。
+    """
+    from core.music import cch_history
+
+    pos = ev.get("rid")
+    hit = await cch_history.get_by_pos(pos)
+    if not hit:
+        logger.info(f"[CchClick] HISTPOS pos={pos} not in history truth source, skip",
+                    module="CchClick")
+        return None
+    out = dict(ev)
+    out["name"] = hit["name"] or "histpos"
+    out["artist"] = hit["artist"]
+    out["rid"] = hit["rawId"]
+    out["album"] = hit["source"]
+    out["source"] = "FAVCLICK"   # 复用已验证的 rawID 直构路径 + favclick-guard
+    logger.info(f"[CchClick] HISTPOS pos={pos} -> rawID={hit['rawId']} "
+                f"src={hit['source']} name={hit['name']!r}", module="CchClick")
+    return out
+
+
 async def _playtoggle(ev: dict) -> None:
     """屏上播放/暂停键（source=PLAYTOGGLE）：设备侧原子 toggle，桥侧零状态读取。
 
@@ -246,6 +304,12 @@ def _accept_event(ev: dict) -> None:
         logger.info(f"[CchClick] {source} recv rid={ev.get('rid')} -> fav_collect",
                     module="CchClick")
         asyncio.create_task(_fav_collect(ev))
+        return
+    # 播放历史 tab 点击（架构统一）：tap_hook 只上报显示 pos（HISTPOS），
+    # 这里从真相源 cch_history 按 pos 反查 (rawID, source, name)，转 FAVCLICK 同款
+    # rawID 直构点播（不依赖歌名搜索 / native ring pos 偏移）。反查失败即跳过。
+    if source == "HISTPOS":
+        asyncio.create_task(_histpos_play(ev))
         return
     # 屏上播放/暂停键（§2.77 四问题①）：tap_hook 抓 playOrPause error → PLAYTOGGLE spool。
     # 读实时播放态反向切（speaker 控制通道），不走点播去抖链。
@@ -347,6 +411,10 @@ async def _play_event(ev: dict) -> None:
         # （平台角标正确、命中收藏原始版本、同名曲靠 rawID 区分）。
         raw_id = str(ev.get("rid") or "").strip()
         platform = str(ev.get("album") or "").strip().lower()
+        # name 仅用于播报/兜底：native 不再 ring resolve（哨兵），按 rawID 从
+        # favorites.json 真相源反查 display title；查不到保留原值，不影响点播。
+        if raw_id and name in ("favclick", "histpos", ""):
+            name = await _fav_name_by_rawid(raw_id) or name
         name = clean_fav_name(name)
         if raw_id and platform:
             logger.info(f"[CchClick] FAVCLICK rawID={raw_id} src={platform} "
