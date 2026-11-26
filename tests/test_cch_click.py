@@ -811,5 +811,61 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         play.assert_not_awaited()
 
 
+class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
+    """F1：设备 freeze 只上报事实；恢复由策略面按活跃 entry 裁决。
+
+    stop 会清空 _cch_state.items ⇒ 冻结事件不再复活旧曲；票据撤销/过期由
+    replay_current 的取票失败自然 fail-closed。
+    """
+
+    def setUp(self):
+        cch_click._recent_freeze_ts = 0.0
+
+    async def test_freeze_with_active_entry_recovers(self):
+        import asyncio
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+        from core.tools import song_request as sr
+
+        replay_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed", "ok": True}
+
+        state = {"items": [{"id": "X", "source": "kwqq"}], "entry": 0}
+        with mock.patch.object(sr, "_cch_state", state), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay):
+            await cch_click._freeze_recover({"source": "FREEZE", "name": "FREEZE"})
+        self.assertEqual(1, len(replay_calls), "活跃 entry 冻结应走唯一重播 seam")
+
+    async def test_freeze_after_stop_does_not_recover(self):
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+        from core.tools import song_request as sr
+
+        replay_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed"}
+
+        # _do_stop 会清 items/current —— 冻结事件不能把已停的曲拉回来
+        with mock.patch.object(sr, "_cch_state", {"items": [], "entry": -1}), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay):
+            await cch_click._freeze_recover({"source": "FREEZE", "name": "FREEZE"})
+        self.assertEqual([], replay_calls, "stop 后旧 play/自愈不得复活")
+
+    async def test_accept_event_routes_freeze_to_recovery(self):
+        import asyncio
+        from unittest import mock
+
+        with mock.patch.object(cch_click, "_freeze_recover",
+                               new_callable=mock.AsyncMock) as rec:
+            cch_click._accept_event({"source": "FREEZE", "name": "FREEZE", "rid": "12:340"})
+            await asyncio.sleep(0)
+        rec.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,8 @@ _FAVCLICK_GUARD_S = 3.0
 # 两条 PLAYTOGGLE spool；1s 内重复直接丢弃，防并发 toggle 两次翻转回原状。
 _recent_playtoggle_ts: float = 0.0
 _PLAYTOGGLE_DEBOUNCE_S = 1.0
+_recent_freeze_ts: float = 0.0
+_FREEZE_DEBOUNCE_S = 5.0  # 设备每 play 会话只上报一次；桥侧再去抖防重复恢复
 
 
 def note_voice_input() -> None:
@@ -283,6 +285,31 @@ async def _playtoggle(ev: dict) -> None:
                     module="CchClick")
 
 
+async def _freeze_recover(ev: dict) -> None:
+    """F1：设备冻结事实 → 策略面裁决 → 命中才恢复。
+
+    设备侧 assistTick 不再自行 stop+replay（只上报 FREEZE spool 事件）。恢复资格
+    由策略面按活跃 entry 裁决：`_do_stop` 清空 items ⇒ stop 后不复活；票据撤销/
+    过期由 replay_current 重新取票失败自然 fail-closed。重复事件在 5s 内去抖。
+    """
+    global _recent_freeze_ts
+    now = time.time()
+    if now - _recent_freeze_ts < _FREEZE_DEBOUNCE_S:
+        logger.info("[CchClick] FREEZE drop(debounce)", module="CchClick")
+        return
+    _recent_freeze_ts = now
+    from core.music import cch_np
+    from core.tools import song_request as sr
+
+    items = sr._cch_state.get("items") or []
+    idx = int(sr._cch_state.get("entry", 0) or 0)
+    if not items or idx >= len(items):
+        logger.info("[CchClick] FREEZE no active entry -> no recover", module="CchClick")
+        return
+    result = await cch_np.replay_current()
+    logger.info(f"[CchClick] FREEZE -> replay_current {result}", module="CchClick")
+
+
 def _accept_event(ev: dict) -> None:
     """事件入口（worker 拉取循环调用，同步）：源准入 → 去重 → 去抖 last-tap-wins。
 
@@ -326,7 +353,13 @@ def _accept_event(ev: dict) -> None:
         logger.info("[CchClick] PLAYTOGGLE recv -> playtoggle", module="CchClick")
         asyncio.create_task(_playtoggle(ev))
         return
-    # 源准入：HEART / PLAYTOGGLE 已在上面 return；其余 source 都走 dedupe 判定。
+    # 设备冻结事实（F1）：设备只上报，恢复由策略面裁决；早分支 return 不进点播去抖链。
+    if source == "FREEZE":
+        logger.info(f"[CchClick] FREEZE recv rid={ev.get('rid')} -> freeze_recover",
+                    module="CchClick")
+        asyncio.create_task(_freeze_recover(ev))
+        return
+    # 源准入：HEART / PLAYTOGGLE / FREEZE 已在上面 return；其余 source 都走 dedupe 判定。
     #  HIST = 历史 tab（title+createList join）；CLICK = tap_hook 抓的 PlayByIndex+ContentPlay
     #  （gate 漏拦时才有 App 日志，属冗余）；NE/KG/KWQQ... = cp_hook 在 :core 拦截云端
     #  ContentPlay 时提取（2026-11-23 VERIFIED：用户点当前播放列表时稳定上报，bridge 点播
