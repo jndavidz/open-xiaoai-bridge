@@ -691,7 +691,9 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         import inspect
 
         src = inspect.getsource(cch_click._playtoggle)
-        self.assertIn("report(\"toggle\"", src, "必须路由到 session 裁决")
+        # cd09771 起统一走 dispatch（登记在途任务、可被新意图取消）；
+        # dispatch 内部即 report("toggle")，仍是「路由到 session 裁决」薄壳。
+        self.assertIn("dispatch(\"toggle\"", src, "必须路由到 session 裁决")
         self.assertNotIn("host_cmd", src, "设备命令不留在调用方")
         self.assertNotIn("get_speaker", src, "禁止 LX06 speaker（设备实时态）")
         self.assertNotIn("current_song", src, "禁止桥侧读设备当前曲文件")
