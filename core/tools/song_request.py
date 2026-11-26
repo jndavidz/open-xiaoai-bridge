@@ -767,10 +767,14 @@ async def _run_cch(action: str, args: dict) -> str:
                 # 歌词 + 显示补投（A3/A1）：公共 seam，与换代链共用——
                 # 同平台精确（音源 id）→ Songloft 跨源回搜 → 设备本地 httpd；
                 # 换代时若不重注入，设备会沿用上一首 lrc（2026-11-26 用户报）。
+                # 🔴 顺序纪律（真机 17:24 回归）：先补纯显示（曲名/封面），再等歌词。
+                # attach_lyric 最多 15s，若 LLM tool 在等待期超时取消，后置显示会让
+                # 音频已切新曲而 UI/歌词停留旧曲。先显示后歌词，取消也可接受。
                 from core.music.cch_cast import attach_lyric, render_display
 
+                await render_display(render_data)
                 render_data = await attach_lyric(item, render_data)
-                # 纯 VIEW intent renderData，不带播控副作用
+                # 纯 VIEW intent renderData，不带播控副作用；二次补投带歌词版本
                 await render_display(render_data)
             else:
                 # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；

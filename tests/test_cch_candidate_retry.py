@@ -351,6 +351,40 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CCH 音源暂不可用", out)
         self.assertIn("kwqq resolve timeout", out, "须把真实失败原因透出，避免误判为 VerifyMP3")
 
+    async def test_display_rendered_before_lyric_wait(self):
+        """真机回归（17:24）：LLM tool 超时取消 attach_lyric 后，
+        显示补投必须已经发生，否则音频切新曲但歌词/标题停留旧曲。"""
+        import asyncio
+
+        items = [{"id": "X", "name": "x", "artist": "a", "source": "kugou"}]
+        calls = {"build_item": None, "speak": [], "pick": [], "order": []}
+
+        async def fake_pick(http, source, it):
+            return "http://good"
+
+        async def fake_resolve(*a, **kw):
+            return "http://ticket"
+
+        async def fake_attach(item, rd):
+            calls["order"].append("attach")
+            return rd
+
+        async def fake_render(rd):
+            calls["order"].append("render")
+            return True
+
+        with ExitStack() as stack:
+            self._setup(stack, items=items, pick=fake_pick,
+                        resolve=fake_resolve,
+                        host_cmd=AsyncMock(return_value=(True, "OK")), calls=calls)
+            stack.enter_context(patch.object(cch_cast, "attach_lyric", fake_attach))
+            stack.enter_context(patch.object(cch_cast, "render_display", fake_render))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            await sr._run_cch("play", {"query": "x"})
+
+        self.assertEqual("render", calls["order"][0],
+                         "显示补投须在歌词等待之前，避免 tool 取消后 UI 停留旧曲")
+
     async def test_candidate_cap_eight(self):
         """候选遍历上限前 8 个（13 个候选时不得全量串行尝试）。"""
         # 不同歌手版本（换候选场景）：去重键 (歌手,歌名) 保留全部 13 首
