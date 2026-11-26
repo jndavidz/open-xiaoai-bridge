@@ -633,6 +633,11 @@ async def host_cmd(cmd: str, url: str = None, extra: str = None,
     import asyncio
     import uuid
     cmd_id = uuid.uuid4().hex[:12]
+    # 观测影子旁路（默认关）：记录 cmd_id↔命令，供 STATE 关联留证；
+    # 影子失败不影响主链（模块内已吞异常）。
+    from core.music import cch_observation_shadow
+    cch_observation_shadow.record_dispatch(
+        cmd, cmd_id, url=url or "")
     token = host_derived_key()
     if not token:
         return False, "NO_TOKEN"   # 缺 BRIDGE_TOKEN：在客户端前置拒绝，不发明文空 key
