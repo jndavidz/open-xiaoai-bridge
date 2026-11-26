@@ -254,75 +254,19 @@ async def _histpos_to_ev(ev: dict) -> dict | None:
 
 
 async def _playtoggle(ev: dict) -> None:
-    """屏上播放/暂停键（source=PLAYTOGGLE）：播放态原子 toggle，曲终停止态重播当前曲。
+    """屏上播放/暂停键：薄壳，只把事件报给 renderer session 裁决。"""
+    from core.music.playback_session import for_renderer
 
-    原厂 playOrPause 因内核无我方数据源失败（tap_hook 抓 error 上报）。播放/暂停态走
-    M5 in-process 通道（cch_cast.host_cmd("toggle") = isPlaying ? pause : resume）。
-
-    票 06：曲终停止态（np STATE finish/stop，native 实例已死）toggle→resume 无效 ——
-    改为按内存队列当前 entry 重新取票 + cast（cch_np.replay_current，与换代共用
-    _cast_entry seam），不推进队列、不改 entry。
-    """
-    from core.music import cch_cast, cch_np
-
-    st = (cch_np.snapshot().get("state") or {}).get("extras") or {}
-    # 只认自然曲终 finish（audioStatus:1）。stop（audioStatus:8）= 点播打断旧歌，
-    # 若开重播窗会触发 replay 与新点播竞速（2026-11-26 用户报「切旧歌再切回」）。
-    if str(st.get("statusStr") or "").lower() == "finish":
-        result = await cch_np.replay_current()
-        logger.info(f"[CchClick] playtoggle stopped -> replay_current {result}",
-                    module="CchClick")
-        return
-    # 设备侧 M5 原子 toggle（HostBootstrap.dispatch "toggle" = isPlaying ? pause : resume），
-    # 桥侧零状态读取。
-    ok, detail = await cch_cast.host_cmd("toggle")
-    logger.info(f"[CchClick] playtoggle -> host_cmd(toggle) ok={ok} detail={detail}",
-                module="CchClick")
-    if not ok and "NEED_M5" in str(detail):
-        # 兜底（review 竞态项）：bridge 重启 / bootstrap 跳过历史 finish → snapshot 空
-        # → 判 playing 走 toggle，但 native 实例已死返回 NEED_M5 → 回退重播当前曲。
-        result = await cch_np.replay_current()
-        logger.info(f"[CchClick] playtoggle NEED_M5 -> replay_current {result}",
-                    module="CchClick")
+    result = await for_renderer("cch").report("toggle", ev=ev)
+    logger.info(f"[CchClick] PLAYTOGGLE -> {result.get('action')}", module="CchClick")
 
 
 async def _freeze_recover(ev: dict) -> None:
-    """F1：设备冻结事实 → 策略面裁决 → 命中才恢复。
+    """设备冻结事实：薄壳，只把事件报给 renderer session 裁决（受控态/去抖/执行）。"""
+    from core.music.playback_session import for_renderer
 
-    设备侧 assistTick 不再自行 stop+replay（只上报 FREEZE spool 事件）。恢复资格
-    由策略面按 (source, rawID, epoch) + 活跃 entry 裁决：`_do_stop` 清空 items ⇒
-    stop 后不复活；票据撤销/过期由 replay_current 取票失败自然 fail-closed；
-    TTS/对话持焦期间不下发（旧恢复资格已失效）。去抖按身份分桶，跨曲互不抑制。
-    """
-    global _recent_freeze
-    from core.music import cch_np, focus_bridge
-    from core.tools import song_request as sr
-
-    # 架构收敛：受控判据收进观测 seam（事务进行中 / TTS focus 持有中）。
-    # 取代散落的 focus / pipeline / voice 三道门——观测层只处理无人接管的
-    # 真实冻结，点播与对话各自负责自己的恢复资格。
-    from core.music import playback_observation as obs
-    if obs.suppressed():
-        logger.info("[CchClick] FREEZE suppressed(controlled by transaction/focus)",
-                    module="CchClick")
-        return
-    items = sr._cch_state.get("items") or []
-    idx = int(sr._cch_state.get("entry", 0) or 0)
-    if not items or idx >= len(items):
-        logger.info("[CchClick] FREEZE no active entry -> no recover", module="CchClick")
-        return
-    entry = items[idx]
-    rid = str(entry.get("id") or entry.get("rawId") or "")
-    source = str(entry.get("source") or "")
-    epoch = sr._cch_state.get("epoch", getattr(sr, "_generation", 0))
-    key = (source, rid, epoch)  # 同一 (渲染端, 曲目, 代次) 只产生一次恢复副作用
-    now = time.time()
-    if now - _recent_freeze.get(key, 0.0) < _FREEZE_DEBOUNCE_S:
-        logger.info(f"[CchClick] FREEZE drop(debounce) key={key}", module="CchClick")
-        return
-    _recent_freeze[key] = now
-    result = await cch_np.replay_current()
-    logger.info(f"[CchClick] FREEZE {key} -> replay_current {result}", module="CchClick")
+    result = await for_renderer("cch").report("freeze", ev=ev)
+    logger.info(f"[CchClick] FREEZE -> {result.get('action')}", module="CchClick")
 
 
 def _accept_event(ev: dict) -> None:

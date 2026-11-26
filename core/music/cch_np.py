@@ -129,7 +129,9 @@ async def on_np_event(kind: str, extras: dict, device_ts: str = "") -> dict:
     # TTS 抢占 / 手动停止——2026-11-26 用户报「批量点播首曲几秒切到第二首」，
     # 真机证实是点播后 TTS 播报产生的 stop 误触发了换代。
     if state_str == "finish" and code == "1":
-        return await _advance_if_finished()
+        from core.music.playback_session import for_renderer
+
+        return await for_renderer("cch").report("track_finish")
     if state_str == "stop":
         return {"action": "stop_recorded"}
     if state_str == "suspend":
@@ -399,7 +401,10 @@ async def _resume_if_pre_active() -> dict:
         return {"action": "resume_skipped", "reason": "no queue"}
     if _latest_state_str() == "play":
         return {"action": "already_playing"}
-    result = await resume_after_tts()
+    # 统一经 session 裁决：PREPARING/SILENCED 期间不恢复旧曲
+    from core.music.playback_session import for_renderer
+
+    result = await for_renderer("cch").report("tts_resume")
     logger.info(f"[CchNp] tts resume action={result.get('action')}", module="CchNp")
     return result
 

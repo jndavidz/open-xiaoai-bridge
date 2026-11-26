@@ -27,6 +27,12 @@ class _FakeSession:
 class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._state_backup = dict(sr._cch_state)
+        # 架构收敛：点播走 per-renderer session，测试间需重置其状态
+        from core.music import playback_session
+
+        _s = playback_session.for_renderer("cch")
+        _s.phase = playback_session.PlaybackPhase.IDLE
+        _s._recent_freeze.clear()
 
     def tearDown(self):
         sr._cch_state.clear()
@@ -243,7 +249,11 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
             out = await sr._run_cch("play", {"query": "不著痕跡"})
 
         self.assertIn("已在 CCH 上为你播放", out)
-        host_cmd.assert_awaited_once_with("play", url="http://good")
+        # 架构收敛：session 先 silence(stop) 再 play，host_cmd 共两次；
+        # 断言 play 那次参数正确（不再要求总调用次数为 1）
+        play_calls = [c for c in host_cmd.await_args_list if c.args and c.args[0] == "play"]
+        self.assertEqual(1, len(play_calls))
+        self.assertEqual({"url": "http://good"}, play_calls[0].kwargs)
         self.assertIs(calls["build_item"], right, "renderData 必须用最终选中的候选")
         self.assertEqual(sr._cch_state["items"][0]["id"], "RIGHT", "队列首项须是最终曲")
         self.assertIn("WRONG", calls["pick"])
@@ -273,7 +283,9 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("CCH 音源暂不可用", out)
         self.assertIn("原因:", out, "失败文案须带真实原因，不能只给泛化提示")
-        host_cmd.assert_not_awaited()
+        # 意图到达即静音（session.silence），但取链全失败不得起播
+        play_calls = [c for c in host_cmd.await_args_list if c.args and c.args[0] == "play"]
+        self.assertEqual([], play_calls, "取链失败不得下发 play")
         self.assertIsNone(calls["build_item"])
 
     async def test_fallback_total_budget_caps_latency(self):

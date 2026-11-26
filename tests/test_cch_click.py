@@ -39,6 +39,11 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         cch_click._recent_voice_ts = 0.0
         cch_click._recent_favclick_ts = 0.0
         cch_click._recent_playtoggle_ts = 0.0
+        from core.music import playback_session
+
+        _s = playback_session.for_renderer("cch")
+        _s.phase = playback_session.PlaybackPhase.PLAYING
+        _s._recent_freeze.clear()
         cch_click._pending_ev = None
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
@@ -680,18 +685,15 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
         self.assertEqual(pt.await_count, 1, "两条 spool 只触发一次 _playtoggle")
 
-    def test_playtoggle_uses_host_cmd_toggle(self):
-        """守门：playing 态只发 host_cmd("toggle")；禁读设备实时态（get_speaker /
-        current_song，防双链竞速）。票 06 起允许读 bridge 自己的编排内存态
-        cch_np.snapshot()（worker 上报的 np 事件记录，非设备探测）判 stopped 态，
-        并走 replay_current 重播——这是与换代共用的唯一重播 seam。"""
+    def test_playtoggle_is_thin_shell(self):
+        """守门：_playtoggle 是薄壳，只把事件报给 session（逻辑集中在一处）。"""
         import inspect
+
         src = inspect.getsource(cch_click._playtoggle)
-        self.assertIn('host_cmd("toggle")', src, "playing 态必须调 host_cmd('toggle')")
+        self.assertIn("report(\"toggle\"", src, "必须路由到 session 裁决")
+        self.assertNotIn("host_cmd", src, "设备命令不留在调用方")
         self.assertNotIn("get_speaker", src, "禁止 LX06 speaker（设备实时态）")
         self.assertNotIn("current_song", src, "禁止桥侧读设备当前曲文件")
-        self.assertIn("cch_np.snapshot()", src, "stopped 判据来自 bridge 编排态")
-        self.assertIn("cch_np.replay_current()", src, "stopped 态走唯一重播 seam")
 
     # ---- 收藏 tab 红心点击（2026-11-25 FAVADD/FAVREMOVE）----
 
@@ -819,126 +821,35 @@ class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
     """
 
     def setUp(self):
-        cch_click._recent_freeze.clear()
-        cch_click._recent_voice_ts = 0.0
+        from core.music import playback_session
 
-    async def test_freeze_with_active_entry_recovers(self):
-        import asyncio
+        _s = playback_session.for_renderer("cch")
+        _s.phase = playback_session.PlaybackPhase.PLAYING
+        _s._recent_freeze.clear()
+        _s.entry = "OLD"
+        _s.epoch = 0
+
+    async def test_freeze_routes_to_session_recovery(self):
+        """薄壳验证：_freeze_recover 只把事件报给 session。"""
         from unittest import mock
-        from core.music import cch_np as cch_np_mod
-        from core.tools import song_request as sr
+        from core.music import playback_session
 
-        replay_calls = []
-
-        async def fake_replay():
-            replay_calls.append(True)
-            return {"action": "replayed", "ok": True}
-
-        state = {"items": [{"id": "X", "source": "kwqq"}], "entry": 0}
-        with mock.patch.object(sr, "_cch_state", state), \
-             mock.patch.object(cch_np_mod, "replay_current", fake_replay):
+        with mock.patch.object(playback_session.for_renderer("cch"), "report",
+                               new_callable=mock.AsyncMock) as rep:
             await cch_click._freeze_recover({"source": "FREEZE", "name": "FREEZE"})
-        self.assertEqual(1, len(replay_calls), "活跃 entry 冻结应走唯一重播 seam")
+        rep.assert_awaited_once()
+        self.assertEqual("freeze", rep.call_args.args[0])
 
-    async def test_freeze_after_stop_does_not_recover(self):
+    async def test_playtoggle_routes_to_session_recovery(self):
+        """薄壳验证：_playtoggle 只把事件报给 session。"""
         from unittest import mock
-        from core.music import cch_np as cch_np_mod
-        from core.tools import song_request as sr
+        from core.music import playback_session
 
-        replay_calls = []
-
-        async def fake_replay():
-            replay_calls.append(True)
-            return {"action": "replayed"}
-
-        # _do_stop 会清 items/current —— 冻结事件不能把已停的曲拉回来
-        with mock.patch.object(sr, "_cch_state", {"items": [], "entry": -1}), \
-             mock.patch.object(cch_np_mod, "replay_current", fake_replay):
-            await cch_click._freeze_recover({"source": "FREEZE", "name": "FREEZE"})
-        self.assertEqual([], replay_calls, "stop 后旧 play/自愈不得复活")
-
-    async def test_freeze_debounce_is_per_entry(self):
-        """全局单戳会跨会话误抑制：不同 (source, rawID, epoch) 必须各自去抖。"""
-        from unittest import mock
-        from core.music import cch_np as cch_np_mod
-        from core.tools import song_request as sr
-
-        replay_calls = []
-
-        async def fake_replay():
-            replay_calls.append(True)
-            return {"action": "replayed"}
-
-        state = {"items": [{"id": "A", "source": "kwqq"}], "entry": 0, "epoch": 1}
-        with mock.patch.object(sr, "_cch_state", state), \
-             mock.patch.object(cch_np_mod, "replay_current", fake_replay):
-            await cch_click._freeze_recover({"source": "FREEZE"})
-            state["items"] = [{"id": "B", "source": "kugou"}]
-            state["epoch"] = 2
-            await cch_click._freeze_recover({"source": "FREEZE"})
-        self.assertEqual(2, len(replay_calls), "不同 entry/epoch 的冻结各自独立")
-
-    async def test_freeze_suppressed_while_tts_focus_held(self):
-        """TTS/对话持焦期间不恢复——用户 pause/stop/next 后旧资格立即失效。"""
-        from unittest import mock
-        from core.music import cch_np as cch_np_mod
-        from core.tools import song_request as sr
-
-        replay_calls = []
-
-        async def fake_replay():
-            replay_calls.append(True)
-            return {"action": "replayed"}
-
-        state = {"items": [{"id": "A", "source": "kwqq"}], "entry": 0}
-        with mock.patch.object(sr, "_cch_state", state), \
-             mock.patch.object(cch_np_mod, "replay_current", fake_replay), \
-             mock.patch("core.music.focus_bridge.focus_holding", lambda: True):
-            await cch_click._freeze_recover({"source": "FREEZE"})
-        self.assertEqual([], replay_calls, "focus 持有时不得恢复")
-
-    async def test_freeze_suppressed_during_transaction(self):
-        """架构判据：点播事务活跃时观测层报受控，FREEZE 不得 replay 旧曲。"""
-        from unittest import mock
-        from core.music import cch_np as cch_np_mod
-        from core.music import playback_observation as obs
-        from core.tools import song_request as sr
-
-        replay_calls = []
-
-        async def fake_replay():
-            replay_calls.append(True)
-            return {"action": "replayed"}
-
-        state = {"items": [{"id": "OLD", "source": "kugou"}], "entry": 0}
-        obs.begin("NEW")  # 模拟点播事务进行中
-        try:
-            with mock.patch.object(sr, "_cch_state", state), \
-                 mock.patch.object(cch_np_mod, "replay_current", fake_replay):
-                await cch_click._freeze_recover({"source": "FREEZE"})
-        finally:
-            obs.end()
-        self.assertEqual([], replay_calls, "事务活跃期 FREEZE 不得 replay 旧曲")
-
-    async def test_freeze_suppressed_when_focus_held(self):
-        """TTS focus 持有中由对话机制负责恢复，观测层不介入。"""
-        from unittest import mock
-        from core.music import cch_np as cch_np_mod
-        from core.music import focus_bridge
-        from core.tools import song_request as sr
-
-        replay_calls = []
-
-        async def fake_replay():
-            replay_calls.append(True)
-            return {"action": "replayed"}
-
-        state = {"items": [{"id": "OLD", "source": "kugou"}], "entry": 0}
-        with mock.patch.object(sr, "_cch_state", state), \
-             mock.patch.object(cch_np_mod, "replay_current", fake_replay), \
-             mock.patch.object(focus_bridge, "focus_holding", lambda: True):
-            await cch_click._freeze_recover({"source": "FREEZE"})
-        self.assertEqual([], replay_calls, "focus 持有时 FREEZE 不得恢复旧曲")
+        with mock.patch.object(playback_session.for_renderer("cch"), "report",
+                               new_callable=mock.AsyncMock) as rep:
+            await cch_click._playtoggle({"source": "PLAYTOGGLE"})
+        rep.assert_awaited_once()
+        self.assertEqual("toggle", rep.call_args.args[0])
 
     async def test_accept_event_routes_freeze_to_recovery(self):
         import asyncio

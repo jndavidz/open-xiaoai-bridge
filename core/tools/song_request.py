@@ -506,19 +506,18 @@ async def _run_cch(action: str, args: dict) -> str:
                 logger.info(f"[SongRequest] artist from utterance fallback: {artist!r}",
                             module="SongRequest")
         if action == "play":
-            # 事务边界从「意图到达」开始（架构收敛）：FREEZE observer 在整个
-            # 取链窗口内都必须看到受控态——真机 10:12:15 FREEZE 早于 10:12:21
-            # 取票完成，若 begin 排在起播时，旧曲会被 replay 抢回并与新点播打架。
-            from core.music import playback_observation as _obs
+            # 架构收敛：意图到达即进入 session 的 SILENCED（一次 stop），
+            # 随后 PREPARING 保持静默——取链/TTS 期间的 FREEZE/TOGGLE/
+            # TTS_RESUME 全部由 session 状态挡住，不再各自加闸门。
+            from core.music.playback_session import for_renderer
 
-            _obs.begin(str(args.get("raw_id") or args.get("song") or "pending"))
-            # 立即暂停（用户 2026-11-21）：派生 key 有 10 分钟缓存；stop 走「连发+回执」，
-            # 广播有间歇丢失，单发一次不够（否则旧曲会在播报前继续响）。
+            _session = for_renderer("cch")
             try:
                 await _ensure_host_key()
-                await _robust_stop()
+                await _session.silence()
+                _session.prepare()
             except Exception as exc:  # noqa: BLE001 - 早停失败不阻塞后续
-                logger.warning(f"[SongRequest] cch early stop failed: {type(exc).__name__}",
+                logger.warning(f"[SongRequest] cch silence failed: {type(exc).__name__}",
                                module="SongRequest")
         raw_id = str(args.get("raw_id") or "").strip()
         if raw_id and action == "play":
@@ -761,15 +760,14 @@ async def _run_cch(action: str, args: dict) -> str:
                     items = [item] + [it for it in items if it is not item]
                 if ann_task is not None:
                     await ann_task
-                # 架构收敛：设备起播 + 所有权 + 呈现 + 投影收进唯一提交点。
-                # 命令回执 TIMEOUT 不再等于失败——由设备 STATE play 观测裁决。
-                from core.music.playback_commit import commit_playback
+                # session 状态机：PREPARING → PLAYING（起播/观测/提交/单次呈现）
+                from core.music.playback_session import PreparedPlayback
 
-                result = await commit_playback(
+                prepared = PreparedPlayback(
                     play_url=play_url, item=item, items=items, meta=meta,
                     bg_url=bg_url, intent=play_intent_for(song, artist))
-                if not result.ok:
-                    return result.detail
+                if not await _session.play(prepared):
+                    return "CCH 点播失败（未观测到起播）"
             else:
                 # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；
                 # cast_native 已带 renderData+play，无需二次 play。
@@ -783,11 +781,14 @@ async def _run_cch(action: str, args: dict) -> str:
                     return "CCH 点播未起播（NEED_M5：死实例，待 M5 刷机）"
                 if not ok:
                     return f"CCH 点播失败（9102 /cmd：{detail}）"
-                from core.music.playback_commit import finalize_playback
+                from core.music.playback_session import PreparedPlayback
 
-                result = await finalize_playback(
+                prepared = PreparedPlayback(
                     play_url=ticket_url, item=item, items=items, meta=meta,
                     bg_url=bg_url, intent=play_intent_for(song, artist))
+                await _session.silence()
+                _session.prepare()
+                await _session.play(prepared)
         except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
             return f"CCH 点播失败：{type(exc).__name__}"
