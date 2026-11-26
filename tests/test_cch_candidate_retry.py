@@ -385,6 +385,43 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("render", calls["order"][0],
                          "显示补投须在歌词等待之前，避免 tool 取消后 UI 停留旧曲")
 
+    async def test_queue_state_committed_before_lyric_wait(self):
+        """真机回归：LLM tool 在歌词等待期取消后队列必须已切到新结果，
+        否则新曲播完 advance 回旧队列（用户观察到切回「小城」）。"""
+        import asyncio
+
+        items = [{"id": "NEW", "name": "风吹麦浪", "artist": "李健", "source": "kugou"}]
+        calls = {"build_item": None, "speak": [], "pick": [], "render": []}
+
+        async def fake_pick(http, source, it):
+            return "http://good"
+
+        async def fake_resolve(*a, **kw):
+            return "http://ticket"
+
+        async def fake_attach(item, rd):
+            raise asyncio.CancelledError()  # 模拟 LLM tool 超时取消
+
+        async def fake_render(rd):
+            calls["render"].append(rd)
+            return True
+
+        with ExitStack() as stack:
+            self._setup(stack, items=items, pick=fake_pick,
+                        resolve=fake_resolve,
+                        host_cmd=AsyncMock(return_value=(True, "OK")), calls=calls)
+            stack.enter_context(patch.object(cch_cast, "attach_lyric", fake_attach))
+            stack.enter_context(patch.object(cch_cast, "render_display", fake_render))
+            sr._cch_state.update({"entry": 1,
+                                  "items": [{"id": "OLD", "name": "当世界年纪小", "source": "kugou"}]})
+            with self.assertRaises(asyncio.CancelledError):
+                await sr._run_cch("play", {"query": "风吹麦浪",
+                                           "song": "风吹麦浪", "artist": "李健"})
+
+        self.assertEqual(["NEW"], [it["id"] for it in sr._cch_state["items"]],
+                         "队列须在歌词等待前切换到新搜索结果")
+        self.assertEqual(0, sr._cch_state["entry"])
+
     async def test_candidate_cap_eight(self):
         """候选遍历上限前 8 个（13 个候选时不得全量串行尝试）。"""
         # 不同歌手版本（换候选场景）：去重键 (歌手,歌名) 保留全部 13 首

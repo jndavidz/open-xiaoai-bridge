@@ -764,6 +764,13 @@ async def _run_cch(action: str, args: dict) -> str:
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
+                # 🔴 队列所有权先提交（真机 17:24 回归）：LLM tool 可能在歌词 15s
+                # 等待期超时取消；若状态更新排在后面，音频已切新曲而 _cch_state 仍
+                # 指向旧队列，播完就 advance 回旧曲（用户观察到切回「小城」）。
+                # 指定曲 single / 歌手批量 batch 的意图神据是 LLM 参数，不用结果反推。
+                _intent = play_intent_for(song, artist)
+                _cch_state.update({"entry": 0, "items": items, "no_advance": False,
+                                   "play_intent": _intent, "played": []})
                 # 歌词 + 显示补投（A3/A1）：公共 seam，与换代链共用——
                 # 同平台精确（音源 id）→ Songloft 跨源回搜 → 设备本地 httpd；
                 # 换代时若不重注入，设备会沿用上一首 lrc（2026-11-26 用户报）。
@@ -789,6 +796,9 @@ async def _run_cch(action: str, args: dict) -> str:
                     return "CCH 点播未起播（NEED_M5：死实例，待 M5 刷机）"
                 if not ok:
                     return f"CCH 点播失败（9102 /cmd：{detail}）"
+                _intent = play_intent_for(song, artist)
+                _cch_state.update({"entry": 0, "items": items, "no_advance": False,
+                                   "play_intent": _intent, "played": []})
         except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
             return f"CCH 点播失败：{type(exc).__name__}"
@@ -800,6 +810,8 @@ async def _run_cch(action: str, args: dict) -> str:
         # 意图单一真相源 = LLM 的 song/artist（不再从结果反推）：
         #   有 song（指定曲目，含「周杰伦的青花瓷」双字段）→ single；
         #   仅 artist（歌手批量，如「任素汐的歌」）→ batch。
+        # 队列快照已在起播成功后立即提交（见 M5 / cast 两轨的 _cch_state.update）；
+        # 此处仅幂等重述，确保活实例轨（cast_native 分支）也有一致状态。
         _intent = play_intent_for(song, artist)
         _cch_state.update({"entry": 0, "items": items, "no_advance": False,
                            "play_intent": _intent, "played": []})
