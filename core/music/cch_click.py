@@ -301,6 +301,16 @@ async def _freeze_recover(ev: dict) -> None:
     if focus_bridge.focus_holding():
         logger.info("[CchClick] FREEZE suppressed(focus held)", module="CchClick")
         return
+    # 真机回归（17:13）：语音点播期间 TTS 暂停让设备误判冻结；此时 bridge
+    # 的 _cch_state 还指向旧队列，replay 会把旧曲拉回覆盖新点播。语音窗与
+    # 对话管线任一活跃即放弃恢复资格（与 focus 读口正交，点歌是单轮不 hold）。
+    from core.utils import pipeline
+    if pipeline.state() != pipeline.PipelineState.IDLE:
+        logger.info("[CchClick] FREEZE suppressed(turn active)", module="CchClick")
+        return
+    if time.time() - _recent_voice_ts < _VOICE_GUARD_S:
+        logger.info("[CchClick] FREEZE suppressed(voice window)", module="CchClick")
+        return
     items = sr._cch_state.get("items") or []
     idx = int(sr._cch_state.get("entry", 0) or 0)
     if not items or idx >= len(items):

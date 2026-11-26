@@ -820,6 +820,7 @@ class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         cch_click._recent_freeze.clear()
+        cch_click._recent_voice_ts = 0.0
 
     async def test_freeze_with_active_entry_recovers(self):
         import asyncio
@@ -895,6 +896,46 @@ class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
              mock.patch("core.music.focus_bridge.focus_holding", lambda: True):
             await cch_click._freeze_recover({"source": "FREEZE"})
         self.assertEqual([], replay_calls, "focus 持有时不得恢复")
+
+    async def test_freeze_suppressed_during_voice_turn(self):
+        """真机回归（17:13）：语音点播期间 TTS 暂停造成 FREEZE，
+        不能 replay 旧 entry 覆盖新点播。近期语音输入 12s 内一律抑制。"""
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+        from core.tools import song_request as sr
+
+        replay_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed"}
+
+        state = {"items": [{"id": "OLD", "source": "kugou"}], "entry": 0}
+        cch_click.note_voice_input()  # 模拟 /api/external/text 刚收到"播放李健的风吹麦浪"
+        with mock.patch.object(sr, "_cch_state", state), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay):
+            await cch_click._freeze_recover({"source": "FREEZE"})
+        self.assertEqual([], replay_calls, "语音点播窗内 FREEZE 不得 replay 旧曲")
+
+    async def test_freeze_suppressed_when_pipeline_active(self):
+        """对话管线非 IDLE（listening/processing/speaking）时同样抑制。"""
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+        from core.tools import song_request as sr
+        from core.utils import pipeline
+
+        replay_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed"}
+
+        state = {"items": [{"id": "OLD", "source": "kugou"}], "entry": 0}
+        with mock.patch.object(sr, "_cch_state", state), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay), \
+             mock.patch.object(pipeline, "state", lambda: pipeline.PipelineState.PROCESSING):
+            await cch_click._freeze_recover({"source": "FREEZE"})
+        self.assertEqual([], replay_calls, "对话进行中 FREEZE 不得恢复旧曲")
 
     async def test_accept_event_routes_freeze_to_recovery(self):
         import asyncio
