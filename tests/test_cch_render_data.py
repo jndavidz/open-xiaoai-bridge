@@ -26,6 +26,12 @@ class LyricInjectionTest(unittest.TestCase):
         out = cch_cast.inject_lyric({"audioName": "x"}, "id2")
         self.assertEqual("http://127.0.0.1:18081/id2.lrc", out["lyricUrl"])
 
+    def test_prepare_background_empty_cover(self):
+        """换代背景虚化：无封面时回退空串（build_render_data 回落 cover），不抛。"""
+        import asyncio
+        self.assertEqual("", asyncio.run(cch_cast.prepare_background("")))
+        self.assertEqual("", asyncio.run(cch_cast.prepare_background(None)))
+
 
 class RenderDataTest(unittest.TestCase):
     def test_background_image_follows_cover(self):

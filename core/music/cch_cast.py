@@ -251,6 +251,26 @@ def inject_lyric(render_data: dict, song_id: str) -> dict:
     return out
 
 
+async def prepare_background(cover: str) -> str:
+    """封面 → 服务端虚化（含自适应黑罩）→ 只读 URL（点播/换代共用）。
+
+    失败回退空串，由 build_render_data 回落清晰封面（2026-11-26 用户报
+    「换代后全屏背景没虚化」——旧换代链未生成 bg_url）。
+    """
+    if not cover:
+        return ""
+    try:
+        import aiohttp
+
+        from core.music import bg_cache
+
+        async with aiohttp.ClientSession() as http:
+            return str(await bg_cache.ensure(cover, base=bg_base(), http=http) or "")
+    except Exception as exc:  # noqa: BLE001 - 背景失败不阻塞播放
+        logger.warning(f"[CchCast] bg blur failed: {type(exc).__name__}", module="CchCast")
+        return ""
+
+
 async def attach_lyric(item: dict, render_data: dict) -> dict:
     """取词 → 写设备 → 注入 renderData（点播与换代共用；失败不抛、不阻塞播放）。
 

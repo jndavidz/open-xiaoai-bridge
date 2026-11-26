@@ -612,19 +612,11 @@ async def _run_cch(action: str, args: dict) -> str:
 
         try:
             meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
-            # 虚化背景图（与播报并行）：封面 → 服务端高斯模糊 → 缓存 → 公开 URL
-            bg_url = ""
-            try:
-                from core.music import bg_cache
-                from core.music.cch_cast import bg_base
+            # 虚化背景图（与播报并行）：公共 seam，与换代链共用
+            from core.music.cch_cast import prepare_background
 
-                async with aiohttp.ClientSession() as http:
-                    bg_url = await bg_cache.ensure(
-                        str(meta.get("cover") or item.get("cover") or ""),
-                        base=bg_base(), http=http)
-            except Exception as exc:  # noqa: BLE001 - 背景失败回退封面
-                logger.warning(f"[SongRequest] bg blur failed: {type(exc).__name__}",
-                               module="SongRequest")
+            bg_url = await prepare_background(
+                str(meta.get("cover") or item.get("cover") or ""))
             if m5_enabled():
                 # M5 轨：songloft 票据为主（多源统一门面 + 可撤销 + 代次闸门 +
                 # 凭据隔离；poll 404 已加 re-prepare 自愈）。票据链失败/预览 ⇒
@@ -690,18 +682,10 @@ async def _run_cch(action: str, args: dict) -> str:
                     if _meta is None:
                         _meta = await kwqq_meta(_ref["id"], _ref.get("source") or "kuwo")
                     if _bg_url is None:
-                        _bg_url = ""
-                        try:
-                            from core.music import bg_cache
-                            from core.music.cch_cast import bg_base
+                        from core.music.cch_cast import prepare_background
 
-                            async with aiohttp.ClientSession() as http:
-                                _bg_url = await bg_cache.ensure(
-                                    str(_meta.get("cover") or it.get("cover") or ""),
-                                    base=bg_base(), http=http)
-                        except Exception as exc:  # noqa: BLE001 - 背景失败回退封面
-                            logger.warning(f"[SongRequest] bg blur failed: {type(exc).__name__}",
-                                           module="SongRequest")
+                        _bg_url = await prepare_background(
+                            str(_meta.get("cover") or it.get("cover") or ""))
                     return _play_url, _ref, _entry, _meta, _bg_url
 
                 picked = None

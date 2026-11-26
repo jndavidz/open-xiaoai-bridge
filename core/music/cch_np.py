@@ -138,7 +138,9 @@ async def _prepare_cast(idx: int, item: dict) -> tuple[str, dict]:
     返回 (ticket_url, render_data)；下行策略（m5 / cast_native / prepare_playback）
     由各调用方决定——准备链收敛，执行链保持各自语义。
     """
-    from core.music.cch_cast import build_render_data, kwqq_meta, resolve_ticket_url
+    from core.music.cch_cast import (
+        build_render_data, kwqq_meta, prepare_background, resolve_ticket_url,
+    )
     from core.tools import song_request as sr
 
     ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
@@ -147,7 +149,10 @@ async def _prepare_cast(idx: int, item: dict) -> tuple[str, dict]:
         ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
         entry=str(item.get("id") or f"cch-{idx}"))
     meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
-    return ticket_url, build_render_data(ticket_url, item, meta)
+    # 换代也要重算虚化背景（2026-11-26 用户报「切歌后全屏背景没虚化」）：
+    # 点播链原本有 bg_cache.ensure，换代链缺 ⇒ build_render_data 回落清晰封面。
+    bg_url = await prepare_background(str(meta.get("cover") or item.get("cover") or ""))
+    return ticket_url, build_render_data(ticket_url, item, meta, background_image=bg_url)
 
 
 async def _cast_entry(idx: int, item: dict) -> dict:

@@ -35,7 +35,8 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
         sr._cch_state.update({"entry": 0, "items": []})
         self._saved = {}
         for name in ("resolve_ticket_url", "kwqq_meta", "build_render_data",
-                     "cast_native", "cast_native_simple", "revoke", "speak"):
+                     "cast_native", "cast_native_simple", "revoke", "speak",
+                     "prepare_background"):
             self._saved[name] = getattr(cch_cast, name)
 
     def tearDown(self):
@@ -59,8 +60,9 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
             return {"name": f"歌{song_id}", "singer": "歌手", "album": "专辑",
                     "cover": "http://cover", "duration": 180, "id": song_id}
 
-        def fake_build(ticket_url, item, meta):
-            return {"audioUrl": ticket_url, "audioName": meta.get("name", "")}
+        def fake_build(ticket_url, item, meta, background_image=""):
+            return {"audioUrl": ticket_url, "audioName": meta.get("name", ""),
+                    "backgroundImage": background_image}
 
         async def fake_cast(render_data):
             rec["cast"].append(render_data)
@@ -78,6 +80,10 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
             rec["speak"].append(len(text or ""))
             return True, "http 200"
 
+        async def fake_bg(cover):
+            return ""  # 虚化背景网络调用在单测里不触发
+
+        cch_cast.prepare_background = fake_bg
         cch_cast.resolve_ticket_url = fake_resolve
         cch_cast.kwqq_meta = fake_meta
         cch_cast.build_render_data = fake_build
