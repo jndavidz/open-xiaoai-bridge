@@ -133,18 +133,19 @@ class PlaybackSession:
                         )
             return False
         my_seq = self.intent_seq  # 代次快照：观测期间若新意图到达则 seq 变，作废本次提交
-        ok, status = await cch_cast.host_cmd(
-            "play", url=prepared.play_url, retry_once=False)
-        # 显示层立即投：不等 18s 观测窗（map.md ab13cb1 历史教训——架构收敛时
-        # 把 render 挪到 observe_play 之后，真机显示层滞后 10s）。音轨已由 hostcmd
-        # 起播，显示层与实际音轨同源，观测只用于所有权提交裁决。
+        # F2 定案（spec.md:84）：回执 TIMEOUT 时设备实际已起播，回执不作真相源。
+        # play 完全不等回执、不重发（重发=重复起播 763160e；等回执=5s 阻塞显示层），
+        # 起播真相只由 observe_play 裁决（观测契约为状态机前置条件）。
+        await cch_cast.host_cmd(
+            "play", url=prepared.play_url, retry_once=False, wait_ack=False)
+        # 显示层立即投：不等 18s 观测窗（恢复 ab13cb1 被架构收敛丢失的语义）。
         await self._render_display(prepared)
         confirmed = await obs.observe_play(since_ts=self.observation_since())
         if my_seq != self.intent_seq:
             logger.info("[PlaybackSession] play superseded by newer intent (seq changed)")
             return False
-        if not confirmed and not ok:
-            logger.warning(f"[PlaybackSession] play failed status={status}",
+        if not confirmed:
+            logger.warning("[PlaybackSession] play failed (no fresh STATE play)",
                            )
             self.phase = PlaybackPhase.IDLE
             return False

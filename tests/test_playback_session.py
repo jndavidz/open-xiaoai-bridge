@@ -142,6 +142,26 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok, "陈旧 play 不得提交（epoch 已变）")
         self.assertNotEqual("NEW", self.session.entry, "旧曲不得覆盖新意图")
 
+    async def test_play_trusts_only_observation_not_receipt(self):
+        """F2 定案：回执不作真相源——play 不等回执，观测不到即 fail-closed。"""
+        calls = []
+
+        async def fake_host_cmd(cmd, **kw):
+            calls.append((cmd, kw))
+            return True, "SENT"
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd", fake_host_cmd))
+            stack.enter_context(patch.object(playback_observation, "observe_play",
+                                             AsyncMock(return_value=False)))
+            await self.session.silence()
+            self.session.prepare()
+            ok = await self.session.play(_prepared())
+
+        self.assertFalse(ok, "回执 SENT 不算起播——观测不到必须 fail-closed")
+        self.assertFalse(calls[-1][1].get("wait_ack", True),
+                         "play 不得等回执（F2：回执不作真相源）")
+
     async def test_render_display_precedes_observation_wait(self):
         """显示层必须在 18s 观测等待之前投——map.md ab13cb1 历史教训，
         架构收敛时把 render 挪到 observe_play 之后导致 10s 显示层滞后。"""
