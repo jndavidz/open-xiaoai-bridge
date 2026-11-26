@@ -144,6 +144,30 @@ class AcquireExternalTextTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, text), ("ok", "hi"))
 
 
+class CchPreemptiveSilenceTest(unittest.IsolatedAsyncioTestCase):
+    """CCH ASR 入口预告静音：覆盖 ASR→LLM tool 决策窗口（真机 ~1.4s）。"""
+
+    async def test_cch_source_sends_fire_and_forget_pause(self):
+        from core.external_conversation import _preempt_cch_silence
+
+        with mock.patch("core.music.cch_cast.host_cmd",
+                        new_callable=mock.AsyncMock,
+                        return_value=(True, "SENT")) as hc:
+            ok = await _preempt_cch_silence("cch-screen")
+        self.assertTrue(ok)
+        hc.assert_awaited_once_with("pause", wait_ack=False)
+
+    async def test_non_cch_source_is_noop(self):
+        """LX06 原生语音不误伤——只 CCH source 静音。"""
+        from core.external_conversation import _preempt_cch_silence
+
+        with mock.patch("core.music.cch_cast.host_cmd",
+                        new_callable=mock.AsyncMock) as hc:
+            ok = await _preempt_cch_silence("lx06-asr")
+        self.assertFalse(ok)
+        hc.assert_not_awaited()
+
+
 class ConversationLoopDispatchTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         conversation_pipeline.reset_pipeline()

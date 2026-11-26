@@ -75,6 +75,24 @@ from core.utils.logger import logger
 from core.utils import turn_trace
 
 
+async def _preempt_cch_silence(source: str) -> bool:
+    """CCH 语音轮 ASR 入口预告静音（fire-and-forget pause）。
+
+    真机证据（2026-11-26）：用户说完→external/text 到达（14:24:40.449）到
+    LLM tool 决策（14:24:41.842）有 ~1.4s，旧曲在这段继续响。pause 提前到
+    ASR 入口（此处）即可按住，后续 tool 的 song_request.silence() 为幂等重复。
+
+    仅 cch 前缀 source 静音（LX06 原生语音不误伤）；问答轮音乐保持暂停
+    亦符合用户预期（2026-11-26 裁决）。
+    """
+    if "cch" not in str(source or "").lower():
+        return False
+    from core.music import cch_cast
+
+    ok, _ = await cch_cast.host_cmd("pause", wait_ack=False)
+    return bool(ok)
+
+
 class ExternalConversationController:
     """Manages multi-turn conversation for an external backend."""
 
@@ -333,6 +351,9 @@ class ExternalConversationController:
         _asr_source = str(req.get("source") or "").lower()
         set_playback_target("cch" if "cch" in _asr_source else "lx06",
                             text=str(req.get("text") or ""))
+        # ASR 入口预告静音：覆盖 ASR→LLM tool 决策窗口（真机 ~1.4s 旧曲残留）。
+        # fire-and-forget，不阻断对话；后续点播 tool 的 silence 为幂等重复。
+        await _preempt_cch_silence(_asr_source)
         try:
             result = await self._run_one_turn()
             # 单轮语义：continue 也结束会话（外部轮无下一轮）。
