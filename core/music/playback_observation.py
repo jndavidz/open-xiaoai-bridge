@@ -15,7 +15,13 @@ from core.music import cch_np
 from core.utils.logger import logger
 
 
-async def observe_play(timeout_s: float = 3.0, poll_s: float = 0.15,
+# 观测源 = cch_music_worker 的 15s 轮询（NP_POLL_S），STATE play 上报天然滞后 0–15s。
+# 观测窗必须覆盖一个完整 poll 周期 + 余量，否则成功起播会被误判为失败
+# （2026-11-26 真机：bridge 3s 判 TIMEOUT，worker 2s 后才上报 play）。
+OBSERVE_WINDOW_S = 18.0
+
+
+async def observe_play(timeout_s: float = OBSERVE_WINDOW_S, poll_s: float = 0.15,
                        since_ts: float | None = None) -> bool:
     """有界等待设备侧新鲜 play 观测；拿不到返回 False（fail-closed）。
 

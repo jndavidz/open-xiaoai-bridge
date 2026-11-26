@@ -94,6 +94,16 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
                          "恢复成功后必须可继续接受换代事件")
         self.assertFalse(self.session.controlled())
 
+    async def test_observation_window_covers_worker_poll_cycle(self):
+        """观测窗必须 >= worker 一个 poll 周期（15s）+ 余量——STATE 上报天然滞后。"""
+        import inspect
+        from core.music import playback_observation as obs
+
+        sig = inspect.signature(obs.observe_play)
+        default = sig.parameters["timeout_s"].default
+        self.assertGreaterEqual(default, 15.0,
+                                "worker poll=15s，3s 窗会把成功起播误判为失败")
+
     async def test_play_uses_fresh_observation_window(self):
         """观测必须带 since_ts：上一首遗留的 play 不得确认本次起播。"""
         with ExitStack() as stack:

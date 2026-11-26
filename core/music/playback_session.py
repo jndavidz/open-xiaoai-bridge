@@ -130,8 +130,7 @@ class PlaybackSession:
             return False
         ok, status = await cch_cast.host_cmd(
             "play", url=prepared.play_url, retry_once=False)
-        confirmed = await obs.observe_play(timeout_s=3.0,
-                                           since_ts=self.observation_since())
+        confirmed = await obs.observe_play(since_ts=self.observation_since())
         if not confirmed and not ok:
             logger.warning(f"[PlaybackSession] play failed status={status}",
                            )

@@ -222,8 +222,7 @@ async def _cast_entry(idx: int, item: dict, *, fallback_direct: bool = False) ->
         from core.music import playback_observation as obs
         from core.music.playback_session import for_renderer
 
-        if await obs.observe_play(timeout_s=3.0,
-                                  since_ts=for_renderer("cch").observation_since()):
+        if await obs.observe_play(since_ts=for_renderer("cch").observation_since()):
             ok, status = True, "observed"
         detail = status
         # 换代/重播必须刷新歌词与显示层（2026-11-26 用户报「歌词对不上声音」）：
