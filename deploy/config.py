@@ -80,8 +80,10 @@ DIRECT_COMMANDS = {
     # --- 调试 ---
     "测试模式": ["桥接正常，家庭中枢在线"],
     # --- HIFI 场景（HA script 内部：WOL 唤醒 NUC -> LMS 播放 -> 完成后经 :9092 播报）---
-    "音乐模式": ["正在准备客厅音响", ha_script("hifi_mode")],
-    "高保真模式": ["正在准备客厅音响", ha_script("hifi_mode")],
+    # 域标注（P4/05b）：仅明确单域的指令标注；music_* 是 HA 侧跨 NUC/LX06/CCH
+    # 三分支路由，不标单一域（保持空＝路由结果由 HA 脚本自身决定）。
+    "音乐模式": ["正在准备客厅音响", ha_script("hifi_mode", playback_domain="hifi")],
+    "高保真模式": ["正在准备客厅音响", ha_script("hifi_mode", playback_domain="hifi")],
     # --- 音乐播放控制（对应 HA script，内部调 Music Assistant / LMS）---
     "停止音乐": [ha_script("music_stop")],
     "暂停音乐": [ha_script("music_stop")],
@@ -107,8 +109,8 @@ DIRECT_COMMANDS = {
     # --- CCH 屏端点（A4-a，C-6 执行面）：LX06 免唤醒与 CCH 2b 外部轮共用本表
     # （外部轮路由 = core/external_conversation.py _run_one_turn 表命中执行）；
     # HA script 写 input_text.cch_banner → 面板横幅轮询切页
-    "打开相册": [ha_script("cch_show_album")],
-    "开启高保真": ["正在准备客厅音响", ha_script("hifi_mode")],
+    "打开相册": [ha_script("cch_show_album", playback_domain="cch")],
+    "开启高保真": ["正在准备客厅音响", ha_script("hifi_mode", playback_domain="hifi")],
 }
 
 

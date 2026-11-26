@@ -29,7 +29,15 @@ async def run_steps(speaker, steps):
             ):
                 await speaker.play(text=step)
         elif isinstance(step, tuple) and step[0] == "ha":
-            await hass.hass_action(step[1], step[2], step[3] if len(step) > 3 else None)
+            domain_tag = step[4] if len(step) > 4 else ""
+            if domain_tag:
+                # 新形态：域作为关键字透传（hass 日志记录，可追溯播放域）。
+                await hass.hass_action(step[1], step[2],
+                                       step[3] if len(step) > 3 else None,
+                                       playback_domain=domain_tag)
+            else:
+                # 旧形态（无域标注）：保持原调用签名，行为不变。
+                await hass.hass_action(step[1], step[2], step[3] if len(step) > 3 else None)
         elif callable(step):
             await step(speaker)
     if steps and not any(isinstance(step, str) for step in steps) and ack_enabled():

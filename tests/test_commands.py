@@ -116,6 +116,23 @@ class FakeKWS:
 
 
 class RunStepsContractTest(unittest.TestCase):
+    def test_playback_domain_propagates_to_hass_log(self) -> None:
+        """HA 动作带 playback_domain 时执行器必须透传（P4/05b 日志可追）。"""
+        from core.commands import actions
+        from core.commands import hass as hass_mod
+
+        speaker = FakeSpeaker()
+        got: dict = {}
+        async def _fake(domain, service, data=None, *, playback_domain=None):
+            got["domain"] = playback_domain
+            return 200
+
+        step = actions.ha_script("music_next", playback_domain="lx06")
+        self.assertEqual("lx06", step[4], "构造器应把域写进元组第 5 位")
+        with mock.patch.object(hass_mod, "hass_action", _fake):
+            _run(run_steps(speaker, [step]))
+        self.assertEqual("lx06", got.get("domain"), "执行器须透传域到 hass 层")
+
     def test_mixed_step_types_run_in_declared_order(self) -> None:
         speaker = FakeSpeaker()
         ha_calls: list[tuple] = []
@@ -673,6 +690,15 @@ class DeployConfigDataContractTest(unittest.TestCase):
                         or callable(step)
                     )
                     self.assertTrue(ok, f"{key} 含执行器不认识的步骤类型: {type(step)}")
+
+    def test_playback_domain_tags_are_valid(self) -> None:
+        """域标注只能取 hifi/lx06/cch/空；music_* 跨域路由不强行标单域。"""
+        for table in (self.deploy.DIRECT_COMMANDS, self.deploy.XIAOAI_COMMANDS):
+            for key, steps in table.items():
+                for step in steps:
+                    if isinstance(step, tuple) and step[:1] == ("ha",) and len(step) > 4:
+                        self.assertIn(step[4], ("", "hifi", "lx06", "cch"),
+                                      f"{key} 域标注非法: {step[4]!r}")
 
     def test_hooks_delegate_to_core_router(self) -> None:
         # 路由钩子 = 数据绑定层：函数体里不允许出现执行逻辑（announce/hass/run 等）

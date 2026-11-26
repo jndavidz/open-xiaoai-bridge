@@ -7,14 +7,18 @@
 from core.commands import hass
 
 
-def ha_script(name: str):
-    """一行声明调用一个 HA script（如 hifi_mode / music_stop / music_next）。"""
-    return ("ha", "script", "turn_on", {"entity_id": f"script.{name}"})
+def ha_script(name: str, *, playback_domain: str = ""):
+    """一行声明调用一个 HA script（如 hifi_mode / music_stop / music_next）。
+
+    `playback_domain` 标注该动作归属的播放域（hifi / lx06 / cch），
+    仅用于可观测性（hass 日志），不改变执行语义（P4/05b）。
+    """
+    return ("ha", "script", "turn_on", {"entity_id": f"script.{name}"}, playback_domain)
 
 
-def ha_switch(entity_id: str):
+def ha_switch(entity_id: str, *, playback_domain: str = ""):
     """一行声明打开一个 HA switch（如 WOL 网络唤醒开关 switch.nuc_hifi_wol）。"""
-    return ("ha", "switch", "turn_on", {"entity_id": entity_id})
+    return ("ha", "switch", "turn_on", {"entity_id": entity_id}, playback_domain)
 
 
 # ---------- 网络层原子控制：KODI 启动（经 HA androidtv 集成走 ADB） ----------
