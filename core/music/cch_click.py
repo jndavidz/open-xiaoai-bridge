@@ -263,7 +263,9 @@ async def _playtoggle(ev: dict) -> None:
     from core.music import cch_cast, cch_np
 
     st = (cch_np.snapshot().get("state") or {}).get("extras") or {}
-    if str(st.get("statusStr") or "").lower() in ("finish", "stop"):
+    # 只认自然曲终 finish（audioStatus:1）。stop（audioStatus:8）= 点播打断旧歌，
+    # 若开重播窗会触发 replay 与新点播竞速（2026-11-26 用户报「切旧歌再切回」）。
+    if str(st.get("statusStr") or "").lower() == "finish":
         result = await cch_np.replay_current()
         logger.info(f"[CchClick] playtoggle stopped -> replay_current {result}",
                     module="CchClick")
