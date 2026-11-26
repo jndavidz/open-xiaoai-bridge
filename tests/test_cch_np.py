@@ -112,6 +112,44 @@ class ReplayCurrentTest(CchNpTestBase):
         self.assertEqual(1, len(rec["cast"]), "重新 cast 当前曲一次")
         self.assertEqual(1, sr._cch_state.get("entry"), "entry 不推进（与 advance 区别）")
 
+    async def test_cast_entry_refreshes_lyric_and_display_on_m5(self):
+        """换代/重播（m5 轨）必须刷新歌词+显示层，否则设备沿用上一首 lrc
+        （2026-11-26 用户报「歌词对不上声音」）。"""
+        from unittest import mock
+        rec = self.fake_downlink()
+        sr._cch_state.update({"entry": 0, "items": [
+            {"source": "kwqq", "id": "s1", "name": "一"},
+        ]})
+        calls = []
+
+        async def fake_attach(item, rd):
+            calls.append("attach")
+            return {**rd, "lyricUrl": "http://127.0.0.1:18081/s1.lrc"}
+
+        async def fake_display(rd):
+            calls.append("display")
+            self.assertIn("lyricUrl", rd)
+            return True
+
+        async def fake_m5():
+            return True
+
+        async def fake_token():
+            return True
+
+        async def fake_play(cmd, **kwargs):
+            return True, "OK"
+
+        with mock.patch.object(cch_cast, "m5_enabled", fake_m5), \
+             mock.patch.object(cch_cast, "host_token_deploy", fake_token), \
+             mock.patch.object(cch_cast, "host_cmd", fake_play), \
+             mock.patch.object(cch_cast, "attach_lyric", fake_attach), \
+             mock.patch.object(cch_cast, "render_display", fake_display):
+            result = await cch_np.replay_current()
+
+        self.assertEqual(["attach", "display"], calls, "歌词注入先于显示补投")
+        self.assertTrue(result["ok"])
+
     async def test_replay_current_no_items(self):
         rec = self.fake_downlink()
         result = await cch_np.replay_current()

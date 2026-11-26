@@ -751,53 +751,14 @@ async def _run_cch(action: str, args: dict) -> str:
                 ok, status = await host_cmd("play", url=play_url)
                 if not ok:
                     return f"CCH 点播失败（M5：{status}）"
-                # 歌词通道（A3，票 23 后按用户口径改序）：同平台精确（按音源 id，不硬指定酷我）
-                # → Songloft 跨源回搜（兜底）→ 设备本地 httpd。CCH 恒行级 LRC。
-                try:
-                    lrc = ""
-                    lrc_via = ""
-                    async with aiohttp.ClientSession() as http:
-                        try:
-                            lr = await _api(http, f"/{ref['source'] or 'kuwo'}/lyric",
-                                            {"id": ref["id"]})
-                            lrc = str((lr or {}).get("lyric") or "") if isinstance(lr, dict) else ""
-                            lrc_via = "same-platform"
-                        except Exception:  # noqa: BLE001 - 同平台失败回落跨源回搜
-                            pass
-                        if not _lyric_has_content(lrc):
-                            # 同平台歌词缺失或空壳（只有「作词/作曲」元数据行）→ 跨源回搜。
-                            # 注意：即使跨源结果更短也不覆盖同平台的有效歌词。
-                            _cross = ""
-                            try:
-                                from core.music import songloft_api
+                # 歌词 + 显示补投（A3/A1）：公共 seam，与换代链共用——
+                # 同平台精确（音源 id）→ Songloft 跨源回搜 → 设备本地 httpd；
+                # 换代时若不重注入，设备会沿用上一首 lrc（2026-11-26 用户报）。
+                from core.music.cch_cast import attach_lyric, render_display
 
-                                ly = await songloft_api.lyric(
-                                    str(item.get("name") or ""),
-                                    str(item.get("artist") or item.get("singer") or ""),
-                                    http=http)
-                                _cross = songloft_api.pick_lrc(ly)
-                            except Exception:  # noqa: BLE001 - 跨源失败则保留原歌词
-                                pass
-                            if _lyric_has_content(_cross):
-                                lrc = _cross
-                                lrc_via = "songloft-cross"
-                            elif not lrc:
-                                lrc = _cross   # 原歌词完全空：即便跨源也非时间戳格式，聊胜于无
-                    logger.info(f"[SongRequest] cch lyric via={lrc_via} len={len(lrc)}",
-                                module="SongRequest")
-                    if lrc:
-                        lok, _ = await musicctl("lyric", {"id": ref["id"], "lrc": lrc})
-                        if lok:
-                            lurl = f"http://127.0.0.1:18081/{ref['id']}.lrc"
-                            render_data["lyricUrl"] = lurl
-                            ext = json.loads(render_data.get("audioExt") or "{}")
-                            ext["lyric"] = lurl
-                            render_data["audioExt"] = json.dumps(ext, ensure_ascii=False)
-                except Exception:  # noqa: BLE001 - 歌词失败不阻塞播放
-                    pass
-                # 显示补投（A1 路径）：纯 VIEW intent renderData，不带播控副作用
-                await musicctl("render", {"renderData": json.dumps(
-                    render_data, ensure_ascii=False)})
+                render_data = await attach_lyric(item, render_data)
+                # 纯 VIEW intent renderData，不带播控副作用
+                await render_display(render_data)
             else:
                 # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；
                 # 事后验证 cast_need_m5（8s 保守值，P95 基线待采）

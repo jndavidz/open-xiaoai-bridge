@@ -6,6 +6,27 @@ import unittest
 from core.music import cch_cast
 
 
+class LyricInjectionTest(unittest.TestCase):
+    """换代歌词错位（2026-11-26 用户报）：换代必须把新曲 lrc URL 注入 renderData，
+    否则设备沿用旧歌词——注入不得破坏 audioExt 既有字段。"""
+
+    def test_inject_lyric_sets_both_fields(self):
+        import json
+        rd = {"audioName": "喜月 - 任素汐", "audioExt": json.dumps(
+            {"request_id": "bridge-abc", "audioAnchor": "任素汐"}, ensure_ascii=False)}
+        out = cch_cast.inject_lyric(rd, "raw-123")
+        self.assertEqual("http://127.0.0.1:18081/raw-123.lrc", out["lyricUrl"])
+        ext = json.loads(out["audioExt"])
+        self.assertEqual("http://127.0.0.1:18081/raw-123.lrc", ext["lyric"])
+        self.assertEqual("bridge-abc", ext["request_id"], "audioExt 既有字段不丢")
+        self.assertEqual("任素汐", ext["audioAnchor"])
+        self.assertEqual("喜月 - 任素汐", rd["audioName"], "原 renderData 不被原地改写")
+
+    def test_inject_lyric_with_empty_ext(self):
+        out = cch_cast.inject_lyric({"audioName": "x"}, "id2")
+        self.assertEqual("http://127.0.0.1:18081/id2.lrc", out["lyricUrl"])
+
+
 class RenderDataTest(unittest.TestCase):
     def test_background_image_follows_cover(self):
         rd = cch_cast.build_render_data(

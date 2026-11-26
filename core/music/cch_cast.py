@@ -231,6 +231,90 @@ def tts_token() -> str:
     return token
 
 
+def inject_lyric(render_data: dict, song_id: str) -> dict:
+    """把本曲 lrc URL 注入 renderData（纯函数，不原地改写入参）。
+
+    换代（cch_np._cast_entry）必须重新注入：设备显示层只在收到 renderData 时更新
+    歌词/封面，否则换曲后沿用上一首的 lrc（2026-11-26 用户报「歌词对不上声音」）。
+    """
+    url = f"http://127.0.0.1:18081/{song_id}.lrc"
+    out = dict(render_data)
+    out["lyricUrl"] = url
+    try:
+        ext = json.loads(out.get("audioExt") or "{}")
+        if not isinstance(ext, dict):
+            ext = {}
+    except (TypeError, ValueError):
+        ext = {}
+    ext["lyric"] = url
+    out["audioExt"] = json.dumps(ext, ensure_ascii=False)
+    return out
+
+
+async def attach_lyric(item: dict, render_data: dict) -> dict:
+    """取词 → 写设备 → 注入 renderData（点播与换代共用；失败不抛、不阻塞播放）。
+
+    同平台精确（按音源 id，不硬指定平台）→ Songloft 跨源回搜兜底，只认带时间轴
+    的有效 lrc（_lyric_has_content），避免空壳覆盖旧歌词。
+    """
+    import aiohttp
+
+    sid = str(item.get("id") or "")
+    if not sid:
+        return render_data
+    lrc = ""
+    try:
+        from core.tools.song_request import _lyric_has_content  # 延迟 import 破循环
+
+        base = str(_cfg("api_base", "http://10.10.10.2:3003")).rstrip("/")
+        async with aiohttp.ClientSession() as http:
+            try:
+                async with http.get(
+                    f"{base}/{str(item.get('source') or 'kuwo').lower()}/lyric",
+                    params={"id": sid}, timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        if isinstance(body, dict) and body.get("code") == 200:
+                            lrc = str((body.get("data") or {}).get("lyric") or "")
+            except Exception:  # noqa: BLE001 - 同平台失败回落跨源
+                pass
+            if not _lyric_has_content(lrc):
+                cross = ""
+                try:
+                    from core.music import songloft_api
+
+                    ly = await songloft_api.lyric(
+                        str(item.get("name") or ""),
+                        str(item.get("artist") or item.get("singer") or ""), http=http)
+                    cross = songloft_api.pick_lrc(ly)
+                except Exception:  # noqa: BLE001 - 跨源失败保留原值
+                    pass
+                if _lyric_has_content(cross):
+                    lrc = cross
+                elif not lrc:
+                    lrc = cross
+        if lrc:
+            ok, _ = await musicctl("lyric", {"id": sid, "lrc": lrc})
+            if ok:
+                render_data = inject_lyric(render_data, sid)
+                logger.info(f"[CchCast] lyric attached id={sid} len={len(lrc)}", module="CchCast")
+    except Exception as exc:  # noqa: BLE001 - 歌词失败不阻塞播放
+        logger.warning(f"[CchCast] lyric err: {type(exc).__name__}", module="CchCast")
+    return render_data
+
+
+async def render_display(render_data: dict) -> bool:
+    """显示补投：纯 VIEW intent renderData（不带播控副作用），刷新歌词/封面。"""
+    try:
+        ok, _ = await musicctl("render", {"renderData": json.dumps(
+            render_data, ensure_ascii=False)})
+        return bool(ok)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[CchCast] render_display err: {type(exc).__name__}", module="CchCast")
+        return False
+
+
 async def kwqq_meta(song_id: str, source: str = "kuwo") -> dict:
     """门面曲目元数据（envelope 契约）。失败返回空 dict（renderData 退化用 id）。
 

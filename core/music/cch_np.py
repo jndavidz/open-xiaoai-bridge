@@ -156,10 +156,12 @@ async def _cast_entry(idx: int, item: dict) -> dict:
     返回 {ok, detail}；不改 _cch_state.entry（由调用方决定推进还是重播），不撤票。
     """
     from core.music.cch_cast import (
+        attach_lyric,
         cast_native,
         host_cmd,
         host_token_deploy,
         m5_enabled,
+        render_display,
         wait_np_play,
     )
 
@@ -168,6 +170,11 @@ async def _cast_entry(idx: int, item: dict) -> dict:
         await host_token_deploy()
         ok, status = await host_cmd("play", url=ticket_url)
         detail = status
+        # 换代/重播必须刷新歌词与显示层（2026-11-26 用户报「歌词对不上声音」）：
+        # m5 轨 host_cmd 只传 URL、不带 renderData，设备显示层会沿用上一首的 lrc/封面。
+        # 歌词注入先于显示补投，顺序错误会让本曲 lyricUrl 不进 render。
+        render_data = await attach_lyric(item, render_data)
+        await render_display(render_data)
     else:
         # 活实例轨：曲末实例死 ⇒ cast 大概率无声；事后验证 NEED_M5 感知
         ok, detail = await cast_native(render_data)
