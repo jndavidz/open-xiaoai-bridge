@@ -610,11 +610,15 @@ async def host_token_deploy() -> tuple[bool, dict]:
 
 
 async def host_cmd(cmd: str, url: str = None, extra: str = None,
-                   timeout_s: float = 5.0) -> tuple[bool, str]:
+                   timeout_s: float = 5.0, *, retry_once: bool = True) -> tuple[bool, str]:
     """M5 控制通道命令（broadcast fire-and-forget + last_result cmd_id 回读）。
 
     返回 (ok, status)：status = OK / NEED_M5 / AUTH_FAILED / INVALID_CMD / TIMEOUT。
     cmd_id 不匹配 = 广播丢失或处理中；匹配但 AUTH_FAILED = token 不匹配。
+
+    `retry_once` 默认 True（广播间歇丢失兜底，2026-11-20 实测）。**play 传 False**：
+    真机 2026-11-26 证实回执 TIMEOUT 后重发会让设备重复起播（pid 7342143→7342144）；
+    起播真相由 observe_play 裁决，不靠回执重发保证送达。
     """
     import asyncio
     import uuid
@@ -645,6 +649,8 @@ async def host_cmd(cmd: str, url: str = None, extra: str = None,
                 if st in result:
                     return False, "NEED_M5" if st == "NOT_REGISTERED" else st
             return False, "NEED_M5"
+    if not retry_once:
+        return False, "TIMEOUT"
     # broadcast fire-and-forget 间歇丢（rc=0 但 receiver 无 recv，2026-11-20 实测）⇒ 重发一次
     ok, _ = await musicctl("hostcmd", body)
     if not ok:

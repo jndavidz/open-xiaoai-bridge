@@ -128,7 +128,8 @@ class PlaybackSession:
             logger.info(f"[PlaybackSession] play skipped phase={self.phase.value}",
                         )
             return False
-        ok, status = await cch_cast.host_cmd("play", url=prepared.play_url)
+        ok, status = await cch_cast.host_cmd(
+            "play", url=prepared.play_url, retry_once=False)
         confirmed = await obs.observe_play(timeout_s=3.0,
                                            since_ts=self.observation_since())
         if not confirmed and not ok:
