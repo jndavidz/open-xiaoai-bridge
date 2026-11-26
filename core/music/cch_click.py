@@ -74,10 +74,7 @@ _play_lock = asyncio.Lock()
 _BRACKET_RE = re.compile(r"[（(][^）)]*[）)]\s*$")
 
 
-def _cfg(key, default=None):
-    from core.tools import song_request as sr
-
-    return sr._cfg(key, default)
+from core.music.cch_config import cfg as _cfg
 
 
 def enabled() -> bool:

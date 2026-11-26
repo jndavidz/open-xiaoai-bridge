@@ -19,10 +19,7 @@ _SLOW_POLL_S = 10.0      # 连续失败降频（避免 Songloft 未部署端点�
 _FAIL_STREAK_SLOW = 3
 
 
-def _cfg(key: str, default=None):
-    from core.tools import song_request as sr
-
-    return sr._cfg(key, default)
+from core.music.cch_config import cfg as _cfg
 
 
 def enabled() -> bool:

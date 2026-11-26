@@ -42,11 +42,7 @@ _SOURCE_LOGO = {
 }
 
 
-def _cfg(key: str, default=None):
-    """读 song_request 配置段（与 song_bridge 同源）。"""
-    from core.tools import song_request as sr
-
-    return sr._cfg(key, default)
+from core.music.cch_config import cfg as _cfg
 
 
 def cch_cast_url() -> str:
