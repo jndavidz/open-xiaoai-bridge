@@ -177,6 +177,8 @@ async def _cast_entry(idx: int, item: dict) -> dict:
         await render_display(render_data)
     else:
         # 活实例轨：曲末实例死 ⇒ cast 大概率无声；事后验证 NEED_M5 感知
+        # 同样要注入歌词（m5 关的回滚模式下换代也不能沿用旧 lrc）
+        render_data = await attach_lyric(item, render_data)
         ok, detail = await cast_native(render_data)
         if ok and not await wait_np_play(5.0):
             ok, detail = False, "NEED_M5"

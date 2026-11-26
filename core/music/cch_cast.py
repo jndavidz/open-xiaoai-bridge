@@ -263,6 +263,7 @@ async def attach_lyric(item: dict, render_data: dict) -> dict:
     if not sid:
         return render_data
     lrc = ""
+    via = ""
     try:
         from core.tools.song_request import _lyric_has_content  # 延迟 import 破循环
 
@@ -271,12 +272,13 @@ async def attach_lyric(item: dict, render_data: dict) -> dict:
             try:
                 async with http.get(
                     f"{base}/{str(item.get('source') or 'kuwo').lower()}/lyric",
-                    params={"id": sid}, timeout=aiohttp.ClientTimeout(total=8),
+                    params={"id": sid}, timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status == 200:
                         body = await resp.json()
                         if isinstance(body, dict) and body.get("code") == 200:
                             lrc = str((body.get("data") or {}).get("lyric") or "")
+                            via = "same-platform" if lrc else ""
             except Exception:  # noqa: BLE001 - 同平台失败回落跨源
                 pass
             if not _lyric_has_content(lrc):
@@ -292,13 +294,20 @@ async def attach_lyric(item: dict, render_data: dict) -> dict:
                     pass
                 if _lyric_has_content(cross):
                     lrc = cross
+                    via = "songloft-cross"
                 elif not lrc:
                     lrc = cross
+                    via = "songloft-cross-raw"
         if lrc:
             ok, _ = await musicctl("lyric", {"id": sid, "lrc": lrc})
             if ok:
                 render_data = inject_lyric(render_data, sid)
-                logger.info(f"[CchCast] lyric attached id={sid} len={len(lrc)}", module="CchCast")
+                logger.info(f"[CchCast] lyric attached id={sid} via={via or 'unknown'} "
+                            f"len={len(lrc)}", module="CchCast")
+            else:
+                logger.warning(f"[CchCast] lyric push failed id={sid} via={via}", module="CchCast")
+        else:
+            logger.info(f"[CchCast] lyric empty id={sid}", module="CchCast")
     except Exception as exc:  # noqa: BLE001 - 歌词失败不阻塞播放
         logger.warning(f"[CchCast] lyric err: {type(exc).__name__}", module="CchCast")
     return render_data

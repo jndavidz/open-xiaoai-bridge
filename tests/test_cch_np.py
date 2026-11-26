@@ -103,8 +103,12 @@ class ReplayCurrentTest(CchNpTestBase):
         async def fake_wait(seconds):
             return True
 
+        async def fake_attach(item, rd):
+            return rd  # 歌词网络调用在单测里不触发
+
         with mock.patch.object(cch_cast, "m5_enabled", lambda: False), \
-             mock.patch.object(cch_cast, "wait_np_play", fake_wait):
+             mock.patch.object(cch_cast, "wait_np_play", fake_wait), \
+             mock.patch.object(cch_cast, "attach_lyric", fake_attach):
             result = await cch_np.replay_current()
         self.assertEqual("replayed", result["action"])
         self.assertEqual(1, result["index"])
