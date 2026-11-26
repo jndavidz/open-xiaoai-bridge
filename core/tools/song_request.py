@@ -430,6 +430,8 @@ _CCH_EPOCH = 1
 # 才返回失败，用户感知「点歌十几秒没反应」）。预算耗尽即停，真实原因透出文案，
 # 避免把上游 resolve 超时误判成 VerifyMP3。
 _CCH_FALLBACK_BUDGET_S = 8.0
+# Songloft prepare 轮询在 kwqq resolve 卡死时可单独吃 30s（真机复验 40s 总额）。
+_CCH_PREPARE_BUDGET_S = 8.0
 _cch_state = {"entry": 0, "items": [], "session": _CCH_SESSION}
 
 
@@ -655,8 +657,10 @@ async def _run_cch(action: str, args: dict) -> str:
                     _entry = str(it.get("id") or "cch-1")
                     _play_url = None
                     try:
-                        _ticket_url = await resolve_ticket_url(
-                            _ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=_entry)
+                        _ticket_url = await asyncio.wait_for(
+                            resolve_ticket_url(
+                                _ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=_entry),
+                            timeout=_CCH_PREPARE_BUDGET_S)
                         async with aiohttp.ClientSession() as http:
                             # Range GET 而非 HEAD：Songloft /media 的 HEAD 未注册（SPA 兜底成
                             # text/html），HEAD 判定会把全曲票据误杀。只取 1KB 头部即可判类型/总长。

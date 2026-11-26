@@ -302,6 +302,34 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, 0.5, f"总耗时 {elapsed:.2f}s 应被 0.25s 预算截断")
         self.assertLess(len(tried), 3, "预算耗尽后不应继续尝试第三个源")
 
+    async def test_prepare_budget_caps_latency(self):
+        """真实日志显示 prepare 轮询单独吃 30s——必须有独立预算，超时即走 fallback。"""
+        import asyncio
+        import time
+
+        items = [{"id": "X", "name": "x", "artist": "a", "source": "qq"}]
+        calls = {"build_item": None, "speak": [], "pick": []}
+
+        async def fake_resolve(*a, **kw):
+            await asyncio.sleep(0.3)  # 模拟 kwqq resolve 上游慢
+            return "http://ticket"
+
+        async def fake_pick(http, source, it):
+            return "http://direct"
+
+        with ExitStack() as stack:
+            self._setup(stack, items=items, pick=fake_pick,
+                        resolve=fake_resolve,
+                        host_cmd=AsyncMock(return_value=(True, "OK")), calls=calls)
+            stack.enter_context(patch.object(sr, "_CCH_PREPARE_BUDGET_S", 0.1))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            t0 = time.monotonic()
+            out = await sr._run_cch("play", {"query": "x"})
+            elapsed = time.monotonic() - t0
+
+        self.assertLess(elapsed, 0.25, f"prepare 耗时 {elapsed:.2f}s 应被 0.1s 预算截断")
+        self.assertIn("已在 CCH 上为你播放", out, "prepare 超时后应走 fallback 成功")
+
     async def test_error_message_reports_real_reason(self):
         """H4：错误文案带真实原因，不再把上游 resolve 超时伪装成 VerifyMP3。"""
         items = [{"id": "X", "name": "x", "artist": "a", "source": "qq"}]
