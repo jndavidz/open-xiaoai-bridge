@@ -94,6 +94,39 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
                          "恢复成功后必须可继续接受换代事件")
         self.assertFalse(self.session.controlled())
 
+    async def test_stale_play_cannot_override_new_intent(self):
+        """新意图（silence）必须作废旧 play 的提交——真机 13:44:24 旧晴天
+        覆盖新青花瓷意图（cch playing entry=晴天）。代次 CAS 守卫。"""
+        import asyncio
+
+        from core.music import cch_cast, playback_observation as obs
+
+        async def slow_observe(*a, **kw):
+            await asyncio.sleep(0.1)  # 模拟 18s 观测窗
+            return True
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "OK"))))
+            stack.enter_context(patch.object(obs, "observe_play", slow_observe))
+            stack.enter_context(patch.object(cch_cast, "build_render_data",
+                                             MagicMock(return_value={})))
+            stack.enter_context(patch.object(cch_cast, "render_display", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
+            stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
+
+            await self.session.silence()
+            self.session.prepare()
+            old_play = asyncio.create_task(self.session.play(_prepared()))
+            await asyncio.sleep(0)  # 让 old_play 进入观测等待
+            await self.session.silence()  # 新意图到达，作废旧 play
+            self.session.prepare()
+            ok = await old_play
+
+        self.assertFalse(ok, "陈旧 play 不得提交（epoch 已变）")
+        self.assertNotEqual("NEW", self.session.entry, "旧曲不得覆盖新意图")
+
     async def test_observation_window_covers_worker_poll_cycle(self):
         """观测窗必须 >= worker 一个 poll 周期（15s）+ 余量——STATE 上报天然滞后。"""
         import inspect

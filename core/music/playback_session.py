@@ -55,6 +55,7 @@ class PlaybackSession:
         self._last_toggle_ts: float = 0.0
         self._silence_ts: float = 0.0  # 静音起点：观测只认此后的 play
         self._inflight: asyncio.Task | None = None  # 在途恢复任务（新意图到达时取消）
+        self.intent_seq = 0  # 意图代次：新 silence 递增，旧 play 观测后 CAS 失败即作废
 
     def cancel_inflight(self) -> None:
         """作废上一曲的在途恢复（FREEZE/换代取票可能跨几十秒）。"""
@@ -87,6 +88,7 @@ class PlaybackSession:
         from core.music import cch_cast
 
         self.cancel_inflight()  # 新意图到达：先废掉旧曲在途恢复
+        self.intent_seq += 1  # 递增意图代次 ⇒ 上一曲 play 观测后 CAS 失败，不覆盖新意图
         # 用户裁决（2026-11-26）：唤醒词静默 = AGMC pause（audioStatus:9，实例保留），
         # 保持暂停态直到 bridge 发来新曲 play；不用 stop（audioStatus:8 杀实例）。
         ok, status = await cch_cast.host_cmd("pause")
@@ -128,9 +130,13 @@ class PlaybackSession:
             logger.info(f"[PlaybackSession] play skipped phase={self.phase.value}",
                         )
             return False
+        my_seq = self.intent_seq  # 代次快照：观测期间若新意图到达则 seq 变，作废本次提交
         ok, status = await cch_cast.host_cmd(
             "play", url=prepared.play_url, retry_once=False)
         confirmed = await obs.observe_play(since_ts=self.observation_since())
+        if my_seq != self.intent_seq:
+            logger.info("[PlaybackSession] play superseded by newer intent (seq changed)")
+            return False
         if not confirmed and not ok:
             logger.warning(f"[PlaybackSession] play failed status={status}",
                            )
