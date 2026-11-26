@@ -289,6 +289,10 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
                 raise
 
         with ExitStack() as stack:
+            # silence() 会发 pause（含 report 内部二次 silence）——必须 mock，
+            # 否则打真实 9102 HTTP，CancelledError 落在 aiohttp 上导致全量卡住。
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "SENT"))))
             stack.enter_context(patch("core.music.cch_np.replay_current", slow_replay))
             await self.session.silence()
             self.session.phase = playback_session.PlaybackPhase.PLAYING
@@ -308,7 +312,9 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
     async def test_two_sessions_isolated(self):
         """per-renderer 隔离（ADR L15）：一端事务不影响另一端。"""
         other = playback_session.PlaybackSession("lx06")
-        await self.session.silence()  # cch-test 进入 SILENCED
+        with patch.object(cch_cast, "host_cmd",
+                          AsyncMock(return_value=(True, "SENT"))):
+            await self.session.silence()  # cch-test 进入 SILENCED
         self.assertFalse(other.controlled(), "另一 renderer 不应被牵连")
         self.assertTrue(self.session.controlled())
 
