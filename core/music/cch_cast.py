@@ -271,6 +271,58 @@ async def prepare_background(cover: str) -> str:
         return ""
 
 
+async def write_lyric(item: dict) -> bool:
+    """只取词并写设备本地 lrc 文件，不触碰 renderData（呈现层的独立副作用）。
+
+    与 attach_lyric 的区别：本函数不返回被修改的 renderData，调用方可在
+    唯一一次 renderDisplay 之后异步写歌词，避免设备 UI 连续重载两次。
+    """
+    import aiohttp
+
+    sid = str(item.get("id") or "")
+    if not sid:
+        return False
+    lrc = ""
+    try:
+        from core.tools.song_request import _lyric_has_content
+
+        base = str(_cfg("api_base", "http://10.10.10.2:3003")).rstrip("/")
+        async with aiohttp.ClientSession() as http:
+            try:
+                async with http.get(
+                    f"{base}/{str(item.get('source') or 'kuwo').lower()}/lyric",
+                    params={"id": sid}, timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        if isinstance(body, dict) and body.get("code") == 200:
+                            lrc = str((body.get("data") or {}).get("lyric") or "")
+            except Exception:  # noqa: BLE001
+                pass
+            if not _lyric_has_content(lrc):
+                try:
+                    from core.music import songloft_api
+
+                    ly = await songloft_api.lyric(
+                        str(item.get("name") or ""),
+                        str(item.get("artist") or item.get("singer") or ""), http=http)
+                    cross = songloft_api.pick_lrc(ly)
+                    if _lyric_has_content(cross):
+                        lrc = cross
+                except Exception:  # noqa: BLE001
+                    pass
+        if lrc:
+            ok, _ = await musicctl("lyric", {"id": sid, "lrc": lrc})
+            if ok:
+                return True
+            logger.warning(f"[CchCast] lyric push failed id={sid}", module="CchCast")
+        else:
+            logger.info(f"[CchCast] lyric empty id={sid}", module="CchCast")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[CchCast] write_lyric err: {type(exc).__name__}", module="CchCast")
+    return False
+
+
 async def attach_lyric(item: dict, render_data: dict) -> dict:
     """取词 → 写设备 → 注入 renderData（点播与换代共用；失败不抛、不阻塞播放）。
 

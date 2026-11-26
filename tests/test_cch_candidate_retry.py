@@ -404,7 +404,7 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         async def fake_resolve(*a, **kw):
             return "http://ticket"
 
-        async def fake_attach(item, rd):
+        async def fake_write_lyric(item):
             raise asyncio.CancelledError()  # 模拟 LLM tool 超时取消
 
         async def fake_render(rd):
@@ -415,7 +415,7 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
             self._setup(stack, items=items, pick=fake_pick,
                         resolve=fake_resolve,
                         host_cmd=AsyncMock(return_value=(True, "OK")), calls=calls)
-            stack.enter_context(patch.object(cch_cast, "attach_lyric", fake_attach))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", fake_write_lyric))
             stack.enter_context(patch.object(cch_cast, "render_display", fake_render))
             sr._cch_state.update({"entry": 1,
                                   "items": [{"id": "OLD", "name": "当世界年纪小", "source": "kugou"}]})

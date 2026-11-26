@@ -104,9 +104,14 @@ async def _present_and_project(play_url: str, item: dict, items: list[dict],
     try:
         render_data = cch_cast.build_render_data(play_url, item, meta,
                                                  background_image=bg_url)
-        await cch_cast.render_display(render_data)  # 先纯显示（不依赖歌词 15s）
-        render_data = await cch_cast.attach_lyric(item, render_data)
-        await cch_cast.render_display(render_data)  # 二次补投带歌词版本
+        # 歌词 URL 是纯函数注入（只依赖 song_id），首帧即可带上；歌词内容由
+        # 独立异步副作用写设备本地文件。这样 renderDisplay 全程只发一次——
+        # 真机「显示层加载多次」就是之前先无词后带词连续两次 render 造成的。
+        sid = str(item.get("id") or "")
+        if sid:
+            render_data = cch_cast.inject_lyric(render_data, sid)
+        await cch_cast.render_display(render_data)
+        await cch_cast.write_lyric(item)  # 异步写 lrc，设备按 URL 自行读取
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[PlaybackCommit] presentation failed: {type(exc).__name__}",
                        module="PlaybackCommit")

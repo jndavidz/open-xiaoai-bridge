@@ -68,14 +68,49 @@ class PlaybackCommitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("OLD", sr._cch_state["items"][0]["id"], "失败不得改所有权")
         self.assertEqual(3, sr._cch_state["entry"])
 
+    async def test_single_render_display(self):
+        """显示层只补投一次：URL 首帧注入，歌词内容异步写文件。"""
+        calls = {"render": 0, "lyric_write": 0, "inject": 0}
+
+        def fake_inject(rd, sid):
+            calls["inject"] += 1
+            return dict(rd, lyricUrl=f"http://127.0.0.1:18081/{sid}.lrc")
+
+        async def fake_render(rd):
+            calls["render"] += 1
+            return True
+
+        async def fake_write_lyric(item):
+            calls["lyric_write"] += 1
+            return True
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "OK"))))
+            stack.enter_context(patch.object(cch_cast, "host_cmd_nowait", AsyncMock()))
+            stack.enter_context(patch.object(playback_observation, "observe_play",
+                                             AsyncMock(return_value=True)))
+            stack.enter_context(patch.object(cch_cast, "build_render_data",
+                                             MagicMock(return_value={})))
+            stack.enter_context(patch.object(cch_cast, "inject_lyric", fake_inject))
+            stack.enter_context(patch.object(cch_cast, "render_display", fake_render))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", fake_write_lyric))
+            stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
+            stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
+            await playback_commit.commit_playback(**self._kwargs())
+
+        self.assertEqual(1, calls["render"], "renderDisplay 只应调用一次")
+        self.assertEqual(1, calls["inject"], "歌词 URL 首帧注入")
+        self.assertEqual(1, calls["lyric_write"], "歌词独立异步写文件")
+
     async def test_presentation_survives_caller_cancellation(self):
         """不变量 3：LLM tool 取消后呈现任务仍完成（UI/歌词不落旧曲）。"""
         done = []
 
-        async def slow_attach(item, rd):
+        async def slow_lyric_write(item):
             await asyncio.sleep(0.05)
             done.append("lyric")
-            return rd
+            return True
 
         async def fake_render(rd):
             done.append("render")
@@ -90,7 +125,7 @@ class PlaybackCommitTest(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(cch_cast, "build_render_data",
                                              MagicMock(return_value={})))
             stack.enter_context(patch.object(cch_cast, "render_display", fake_render))
-            stack.enter_context(patch.object(cch_cast, "attach_lyric", slow_attach))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", slow_lyric_write))
             stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
             stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
             task = asyncio.create_task(
