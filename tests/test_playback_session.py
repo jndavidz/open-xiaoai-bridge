@@ -75,6 +75,46 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
 
         replay.assert_not_awaited()
 
+    async def test_freeze_recovers_back_to_playing(self):
+        """freeze 恢复成功后必须回到 PLAYING，否则后续换代被 controlled() 吞掉。"""
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "OK"))))
+            stack.enter_context(patch("core.music.cch_np.replay_current",
+                                      AsyncMock(return_value={"action": "replayed"})))
+            await self.session.silence()
+            self.session.prepare()
+            self.session.phase = playback_session.PlaybackPhase.PLAYING
+            result = await self.session.report("freeze")
+
+        self.assertEqual("replayed", result["action"])
+        self.assertEqual(playback_session.PlaybackPhase.PLAYING, self.session.phase,
+                         "恢复成功后必须可继续接受换代事件")
+        self.assertFalse(self.session.controlled())
+
+    async def test_play_uses_fresh_observation_window(self):
+        """观测必须带 since_ts：上一首遗留的 play 不得确认本次起播。"""
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "OK"))))
+            obs_mock = stack.enter_context(patch.object(
+                playback_observation, "observe_play",
+                AsyncMock(return_value=True)))
+            stack.enter_context(patch.object(cch_cast, "build_render_data",
+                                             MagicMock(return_value={})))
+            stack.enter_context(patch.object(cch_cast, "inject_lyric",
+                                             MagicMock(side_effect=lambda rd, sid: dict(rd))))
+            stack.enter_context(patch.object(cch_cast, "render_display", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
+            stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
+            await self.session.silence()
+            self.session.prepare()
+            await self.session.play(_prepared())
+
+        self.assertIsNotNone(obs_mock.call_args.kwargs.get("since_ts"),
+                             "观测须带静音起点，排除上一首遗留 play")
+
     async def test_two_sessions_isolated(self):
         """per-renderer 隔离（ADR L15）：一端事务不影响另一端。"""
         other = playback_session.PlaybackSession("lx06")

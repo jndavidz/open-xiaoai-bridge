@@ -786,9 +786,9 @@ async def _run_cch(action: str, args: dict) -> str:
                 prepared = PreparedPlayback(
                     play_url=ticket_url, item=item, items=items, meta=meta,
                     bg_url=bg_url, intent=play_intent_for(song, artist))
-                await _session.silence()
-                _session.prepare()
-                await _session.play(prepared)
+                # 活实例轨：cast_native 已带 renderData+play，不再 stop/play 二次；
+                # 只把 session 推到 PLAYING 并提交所有权（同一次设备副作用）。
+                _session.mark_playing(prepared)
         except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
             return f"CCH 点播失败：{type(exc).__name__}"

@@ -32,7 +32,7 @@ class PlaybackPhase(str, enum.Enum):
 
 @dataclass
 class PreparedPlayback:
-    """一次点播 준비 완료后的不可变输入（由 song_request 构造）。"""
+    """一次点播准备完成后的不可变输入（由 song_request 构造）。"""
 
     play_url: str
     item: dict
@@ -53,10 +53,22 @@ class PlaybackSession:
         self.items: list[dict] = []
         self._recent_freeze: dict[tuple[str, str, int], float] = {}
         self._last_toggle_ts: float = 0.0
+        self._silence_ts: float = 0.0  # 静音起点：观测只认此后的 play
+
+    def observation_since(self) -> float:
+        """供换代/重播的观测裁决使用（排除上一首遗留 STATE play）。"""
+        return self._silence_ts
 
     def controlled(self) -> bool:
-        """SILENCED / PREPARING 期间受控——所有恢复事件应 no-op。"""
-        return self.phase in (PlaybackPhase.SILENCED, PlaybackPhase.PREPARING)
+        """受控态（事务中 / 对话 focus 持有中）——所有恢复事件应 no-op。"""
+        if self.phase in (PlaybackPhase.SILENCED, PlaybackPhase.PREPARING):
+            return True
+        try:
+            from core.music import focus_bridge
+
+            return focus_bridge.focus_holding()
+        except Exception:  # noqa: BLE001 - 读不到按受控处理（fail-closed）
+            return True
 
     async def silence(self) -> None:
         """任意态 → SILENCED：新意图抢占时也要静音（PLAYING→SILENCED）。
@@ -70,15 +82,29 @@ class PlaybackSession:
         self.phase = PlaybackPhase.SILENCED
         self._recent_freeze.clear()  # 新会话：清掉上一曲的去抖桶
         self._last_toggle_ts = 0.0
+        import time
+
+        self._silence_ts = time.time()
         logger.info(f"[PlaybackSession] {self.renderer_id} silenced "
-                    f"(from prior phase)", module="PlaybackSession")
+                    f"(from prior phase)")
+
+    def mark_playing(self, prepared: PreparedPlayback) -> None:
+        """活实例轨：设备已由 cast_native 起播，只提交状态（不二次 stop/play）。"""
+        self.epoch += 1
+        self.entry = str(prepared.item.get("id") or "")
+        self.items = prepared.items
+        self._commit_state(prepared)
+        self.phase = PlaybackPhase.PLAYING
+        asyncio.create_task(self._present(prepared))
+        logger.info(f"[PlaybackSession] {self.renderer_id} adopted playing "
+                    f"entry={self.entry}")
 
     def prepare(self) -> None:
         """SILENCED/PLAYING → PREPARING：进入静默等待（换代/新点播都经此）。"""
         if self.phase in (PlaybackPhase.SILENCED, PlaybackPhase.PLAYING):
             self.phase = PlaybackPhase.PREPARING
             logger.info(f"[PlaybackSession] {self.renderer_id} preparing",
-                        module="PlaybackSession")
+                        )
 
     async def play(self, prepared: PreparedPlayback) -> bool:
         """PREPARING → PLAYING：起播 + 观测 + 原子提交 + 单次呈现。"""
@@ -86,13 +112,14 @@ class PlaybackSession:
 
         if self.phase != PlaybackPhase.PREPARING:
             logger.info(f"[PlaybackSession] play skipped phase={self.phase.value}",
-                        module="PlaybackSession")
+                        )
             return False
         ok, status = await cch_cast.host_cmd("play", url=prepared.play_url)
-        confirmed = await obs.observe_play(timeout_s=3.0)
+        confirmed = await obs.observe_play(timeout_s=3.0,
+                                           since_ts=self.observation_since())
         if not confirmed and not ok:
             logger.warning(f"[PlaybackSession] play failed status={status}",
-                           module="PlaybackSession")
+                           )
             self.phase = PlaybackPhase.IDLE
             return False
         # 原子提交所有权（唯一位置）
@@ -102,10 +129,13 @@ class PlaybackSession:
         self._commit_state(prepared)
         # 单次呈现：shield 保证调用方取消时后台仍继续；正常调用等它完成
         presentation = asyncio.create_task(self._present(prepared))
-        await asyncio.shield(presentation)
+        try:
+            await asyncio.shield(presentation)
+        except asyncio.CancelledError:
+            self.phase = PlaybackPhase.IDLE  # 取消不留半状态（后台呈现仍继续）
+            raise
         self.phase = PlaybackPhase.PLAYING
-        logger.info(f"[PlaybackSession] {self.renderer_id} playing entry={self.entry}",
-                    module="PlaybackSession")
+        logger.info(f"[PlaybackSession] {self.renderer_id} playing entry={self.entry}")
         return True
 
     def _commit_state(self, prepared: PreparedPlayback) -> None:
@@ -129,23 +159,23 @@ class PlaybackSession:
             await cch_cast.write_lyric(prepared.item)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[PlaybackSession] present failed: {type(exc).__name__}",
-                           module="PlaybackSession")
+                           )
         try:
             cch_history.note(prepared.items[0])
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[PlaybackSession] history failed: {type(exc).__name__}",
-                           module="PlaybackSession")
+                           )
         try:
             await cch_cast.push_queue(prepared.items)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[PlaybackSession] queue failed: {type(exc).__name__}",
-                           module="PlaybackSession")
+                           )
 
     async def report(self, kind: str, *, ev: dict | None = None) -> dict:
         """外部事件唯一入口：受控态 no-op，PLAYING 态分派到既有执行 seam。"""
         if self.controlled():
             logger.info(f"[PlaybackSession] {self.renderer_id} report suppressed kind={kind}",
-                        module="PlaybackSession")
+                        )
             return {"action": "suppressed", "kind": kind, "renderer": self.renderer_id}
         if self.phase != PlaybackPhase.PLAYING:
             return {"action": "not_playing", "kind": kind, "renderer": self.renderer_id}
@@ -176,6 +206,7 @@ class PlaybackSession:
                         "renderer": self.renderer_id}
             self._recent_freeze[key] = now
             result = await cch_np.replay_current()
+            self.phase = PlaybackPhase.PLAYING  # 恢复成功回到可换代态
         elif kind == "toggle":
             # 换代 stop 的 pushNotify 副产品会被 tap_hook 当 PLAYTOGGLE 上报
             # （真机 11:20:49 advance 后立刻 replay）——5s 去抖挡住二次启动
@@ -199,8 +230,7 @@ class PlaybackSession:
                     result = await cch_np.replay_current()
         elif kind == "tts_resume":
             result = await cch_np.resume_after_tts()
-        elif kind == "track_finish":
-            result = await cch_np._advance_if_finished()
+            self.phase = PlaybackPhase.PLAYING  # 恢复成功回到可换代态
         else:
             return {"action": "unknown_kind", "kind": kind}
         return dict(result, kind=kind, renderer=self.renderer_id)

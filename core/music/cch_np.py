@@ -220,8 +220,10 @@ async def _cast_entry(idx: int, item: dict, *, fallback_direct: bool = False) ->
         # 架构收敛：与点播同一观测裁决——回执 TIMEOUT 不算失败，
         # 设备 STATE play 新鲜观测才是起播真相（真机 advance/replay 常 TIMEOUT 但已播）
         from core.music import playback_observation as obs
+        from core.music.playback_session import for_renderer
 
-        if await obs.observe_play(timeout_s=3.0):
+        if await obs.observe_play(timeout_s=3.0,
+                                  since_ts=for_renderer("cch").observation_since()):
             ok, status = True, "observed"
         detail = status
         # 换代/重播必须刷新歌词与显示层（2026-11-26 用户报「歌词对不上声音」）：
