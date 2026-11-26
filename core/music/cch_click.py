@@ -257,7 +257,8 @@ async def _playtoggle(ev: dict) -> None:
     """屏上播放/暂停键：薄壳，只把事件报给 renderer session 裁决。"""
     from core.music.playback_session import for_renderer
 
-    result = await for_renderer("cch").report("toggle", ev=ev)
+    task = for_renderer("cch").dispatch("toggle")
+    result = await task if task is not None else {"action": "already_inflight"}
     logger.info(f"[CchClick] PLAYTOGGLE -> {result.get('action')}", module="CchClick")
 
 
@@ -265,7 +266,8 @@ async def _freeze_recover(ev: dict) -> None:
     """设备冻结事实：薄壳，只把事件报给 renderer session 裁决（受控态/去抖/执行）。"""
     from core.music.playback_session import for_renderer
 
-    result = await for_renderer("cch").report("freeze", ev=ev)
+    task = for_renderer("cch").dispatch("freeze")
+    result = await task if task is not None else {"action": "already_inflight"}
     logger.info(f"[CchClick] FREEZE -> {result.get('action')}", module="CchClick")
 
 
