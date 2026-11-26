@@ -819,7 +819,7 @@ class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
     """
 
     def setUp(self):
-        cch_click._recent_freeze_ts = 0.0
+        cch_click._recent_freeze.clear()
 
     async def test_freeze_with_active_entry_recovers(self):
         import asyncio
@@ -855,6 +855,46 @@ class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(cch_np_mod, "replay_current", fake_replay):
             await cch_click._freeze_recover({"source": "FREEZE", "name": "FREEZE"})
         self.assertEqual([], replay_calls, "stop 后旧 play/自愈不得复活")
+
+    async def test_freeze_debounce_is_per_entry(self):
+        """全局单戳会跨会话误抑制：不同 (source, rawID, epoch) 必须各自去抖。"""
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+        from core.tools import song_request as sr
+
+        replay_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed"}
+
+        state = {"items": [{"id": "A", "source": "kwqq"}], "entry": 0, "epoch": 1}
+        with mock.patch.object(sr, "_cch_state", state), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay):
+            await cch_click._freeze_recover({"source": "FREEZE"})
+            state["items"] = [{"id": "B", "source": "kugou"}]
+            state["epoch"] = 2
+            await cch_click._freeze_recover({"source": "FREEZE"})
+        self.assertEqual(2, len(replay_calls), "不同 entry/epoch 的冻结各自独立")
+
+    async def test_freeze_suppressed_while_tts_focus_held(self):
+        """TTS/对话持焦期间不恢复——用户 pause/stop/next 后旧资格立即失效。"""
+        from unittest import mock
+        from core.music import cch_np as cch_np_mod
+        from core.tools import song_request as sr
+
+        replay_calls = []
+
+        async def fake_replay():
+            replay_calls.append(True)
+            return {"action": "replayed"}
+
+        state = {"items": [{"id": "A", "source": "kwqq"}], "entry": 0}
+        with mock.patch.object(sr, "_cch_state", state), \
+             mock.patch.object(cch_np_mod, "replay_current", fake_replay), \
+             mock.patch("core.music.focus_bridge.focus_holding", lambda: True):
+            await cch_click._freeze_recover({"source": "FREEZE"})
+        self.assertEqual([], replay_calls, "focus 持有时不得恢复")
 
     async def test_accept_event_routes_freeze_to_recovery(self):
         import asyncio

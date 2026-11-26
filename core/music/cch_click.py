@@ -54,7 +54,8 @@ _FAVCLICK_GUARD_S = 3.0
 # 两条 PLAYTOGGLE spool；1s 内重复直接丢弃，防并发 toggle 两次翻转回原状。
 _recent_playtoggle_ts: float = 0.0
 _PLAYTOGGLE_DEBOUNCE_S = 1.0
-_recent_freeze_ts: float = 0.0
+# FREEZE 去抖按 (渲染端来源, 曲目身份, 代次) 分桶：全局单戳会跨会话误抑制下一首。
+_recent_freeze: dict[tuple[str, str, object], float] = {}
 _FREEZE_DEBOUNCE_S = 5.0  # 设备每 play 会话只上报一次；桥侧再去抖防重复恢复
 
 
@@ -289,25 +290,34 @@ async def _freeze_recover(ev: dict) -> None:
     """F1：设备冻结事实 → 策略面裁决 → 命中才恢复。
 
     设备侧 assistTick 不再自行 stop+replay（只上报 FREEZE spool 事件）。恢复资格
-    由策略面按活跃 entry 裁决：`_do_stop` 清空 items ⇒ stop 后不复活；票据撤销/
-    过期由 replay_current 重新取票失败自然 fail-closed。重复事件在 5s 内去抖。
+    由策略面按 (source, rawID, epoch) + 活跃 entry 裁决：`_do_stop` 清空 items ⇒
+    stop 后不复活；票据撤销/过期由 replay_current 取票失败自然 fail-closed；
+    TTS/对话持焦期间不下发（旧恢复资格已失效）。去抖按身份分桶，跨曲互不抑制。
     """
-    global _recent_freeze_ts
-    now = time.time()
-    if now - _recent_freeze_ts < _FREEZE_DEBOUNCE_S:
-        logger.info("[CchClick] FREEZE drop(debounce)", module="CchClick")
-        return
-    _recent_freeze_ts = now
-    from core.music import cch_np
+    global _recent_freeze
+    from core.music import cch_np, focus_bridge
     from core.tools import song_request as sr
 
+    if focus_bridge.focus_holding():
+        logger.info("[CchClick] FREEZE suppressed(focus held)", module="CchClick")
+        return
     items = sr._cch_state.get("items") or []
     idx = int(sr._cch_state.get("entry", 0) or 0)
     if not items or idx >= len(items):
         logger.info("[CchClick] FREEZE no active entry -> no recover", module="CchClick")
         return
+    entry = items[idx]
+    rid = str(entry.get("id") or entry.get("rawId") or "")
+    source = str(entry.get("source") or "")
+    epoch = sr._cch_state.get("epoch", getattr(sr, "_generation", 0))
+    key = (source, rid, epoch)  # 同一 (渲染端, 曲目, 代次) 只产生一次恢复副作用
+    now = time.time()
+    if now - _recent_freeze.get(key, 0.0) < _FREEZE_DEBOUNCE_S:
+        logger.info(f"[CchClick] FREEZE drop(debounce) key={key}", module="CchClick")
+        return
+    _recent_freeze[key] = now
     result = await cch_np.replay_current()
-    logger.info(f"[CchClick] FREEZE -> replay_current {result}", module="CchClick")
+    logger.info(f"[CchClick] FREEZE {key} -> replay_current {result}", module="CchClick")
 
 
 def _accept_event(ev: dict) -> None:

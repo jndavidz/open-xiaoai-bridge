@@ -160,6 +160,34 @@ class CchHistoryPushTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_push_writes_current_truth_snapshot(self):
+        """外部行为判据：设备镜像内容 = 真相源当前快照（原厂 schema）。"""
+        import asyncio
+        from unittest import mock
+
+        prev = list(cch_history._items)
+        try:
+            cch_history._items.clear()
+            cch_history._items.append({"name": "晴天", "id": "B3A52A7A", "source": "kugou"})
+
+            async def run():
+                with mock.patch.object(cch_history, "load_favorite_rawids",
+                                       new_callable=mock.AsyncMock, return_value=set()), \
+                     mock.patch("core.music.cch_cast.musicctl",
+                                new_callable=mock.AsyncMock,
+                                return_value=(True, {})) as m:
+                    await cch_history._push()
+                    payload = m.call_args.args[1]
+                    items = payload["items"]
+                    self.assertEqual(1, len(items))
+                    self.assertEqual("晴天", items[0]["title"])
+                    self.assertEqual("B3A52A7A", items[0]["rawId"])
+
+            asyncio.run(run())
+        finally:
+            cch_history._items.clear()
+            cch_history._items.extend(prev)
+
     def test_concurrent_push_serializes_device_writes(self):
         """并发全量写不重叠：设备镜像只反映最后一次真相源状态。"""
         import asyncio
