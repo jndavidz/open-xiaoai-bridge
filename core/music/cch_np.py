@@ -122,8 +122,13 @@ async def on_np_event(kind: str, extras: dict, device_ts: str = "") -> dict:
         return {"action": "recorded", "kind": kind}
     state_str = str((extras or {}).get("statusStr") or "").lower()
     code = str((extras or {}).get("audioStatus") or "")
-    if state_str in ("finish", "stop") and code in ("1", "8"):
+    # 换代只认自然曲终 finish（audioStatus:1）。stop（audioStatus:8）= 点播打断 /
+    # TTS 抢占 / 手动停止——2026-11-26 用户报「批量点播首曲几秒切到第二首」，
+    # 真机证实是点播后 TTS 播报产生的 stop 误触发了换代。
+    if state_str == "finish" and code == "1":
         return await _advance_if_finished()
+    if state_str == "stop":
+        return {"action": "stop_recorded"}
     if state_str == "suspend":
         # 票 04：恢复点由 speak_with_resume 的定时器触发，此处只记录
         return {"action": "suspend_recorded"}

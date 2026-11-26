@@ -190,12 +190,24 @@ class AdvanceTest(CchNpTestBase):
             {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"},
             {"source": "kwqq", "id": "s3"},
         ]})
-        first = await cch_np.on_np_event("STATE", {"statusStr": "stop", "audioStatus": "8"})
+        first = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
         self.assertEqual(first["action"], "advanced")
         second = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
         self.assertEqual(second["action"], "advance_cooldown")
         self.assertEqual(len(rec["cast"]), 1, "冷却窗内重复 finish 不得二次 advance（防跳曲）")
         self.assertEqual(sr._cch_state["entry"], 1)
+
+    async def test_stop_does_not_advance(self):
+        """stop（audioStatus:8）= 点播打断/TTS 抢占，不是自然曲终——不得提前换代
+        （2026-11-26 用户报「首曲几秒就切到第二首」）。自然曲终只有 finish(1)。"""
+        rec = self.fake_downlink()
+        sr._cch_state.update({"entry": 0, "items": [
+            {"source": "kwqq", "id": "s1"}, {"source": "kwqq", "id": "s2"},
+        ]})
+        action = await cch_np.on_np_event("STATE", {"statusStr": "stop", "audioStatus": "8"})
+        self.assertNotEqual("advanced", action["action"])
+        self.assertEqual([], rec["cast"], "stop 不得触发 cast 下一首")
+        self.assertEqual(0, sr._cch_state["entry"], "entry 不推进")
 
     async def test_queue_exhausted_falls_back_to_native(self):
         rec = self.fake_downlink()
