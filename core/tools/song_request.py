@@ -755,37 +755,18 @@ async def _run_cch(action: str, args: dict) -> str:
                     items = [item] + [it for it in items if it is not item]
                 if ann_task is not None:
                     await ann_task
-                # TTS 的 suspend/resume 可能把旧会话唤醒 ⇒ 起播前再补一发 stop（幂等、几十 ms）
-                try:
-                    await host_cmd_nowait("stop")
-                except Exception:  # noqa: BLE001
-                    pass
-                render_data = build_render_data(play_url, item, meta, background_image=bg_url)
-                ok, status = await host_cmd("play", url=play_url)
-                if not ok:
-                    return f"CCH 点播失败（M5：{status}）"
-                # 🔴 队列所有权先提交（真机 17:24 回归）：LLM tool 可能在歌词 15s
-                # 等待期超时取消；若状态更新排在后面，音频已切新曲而 _cch_state 仍
-                # 指向旧队列，播完就 advance 回旧曲（用户观察到切回「小城」）。
-                # 指定曲 single / 歌手批量 batch 的意图神据是 LLM 参数，不用结果反推。
-                _intent = play_intent_for(song, artist)
-                _cch_state.update({"entry": 0, "items": items, "no_advance": False,
-                                   "play_intent": _intent, "played": []})
-                # 歌词 + 显示补投（A3/A1）：公共 seam，与换代链共用——
-                # 同平台精确（音源 id）→ Songloft 跨源回搜 → 设备本地 httpd；
-                # 换代时若不重注入，设备会沿用上一首 lrc（2026-11-26 用户报）。
-                # 🔴 顺序纪律（真机 17:24 回归）：先补纯显示（曲名/封面），再等歌词。
-                # attach_lyric 最多 15s，若 LLM tool 在等待期超时取消，后置显示会让
-                # 音频已切新曲而 UI/歌词停留旧曲。先显示后歌词，取消也可接受。
-                from core.music.cch_cast import attach_lyric, render_display
+                # 架构收敛：设备起播 + 所有权 + 呈现 + 投影收进唯一提交点。
+                # 命令回执 TIMEOUT 不再等于失败——由设备 STATE play 观测裁决。
+                from core.music.playback_commit import commit_playback
 
-                await render_display(render_data)
-                render_data = await attach_lyric(item, render_data)
-                # 纯 VIEW intent renderData，不带播控副作用；二次补投带歌词版本
-                await render_display(render_data)
+                result = await commit_playback(
+                    play_url=play_url, item=item, items=items, meta=meta,
+                    bg_url=bg_url, intent=play_intent_for(song, artist))
+                if not result.ok:
+                    return result.detail
             else:
                 # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；
-                # 事后验证 cast_need_m5（8s 保守值，P95 基线待采）
+                # cast_native 已带 renderData+play，无需二次 play。
                 ticket_url = await resolve_ticket_url(
                     ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
                 render_data = build_render_data(ticket_url, item, meta, background_image=bg_url)
@@ -796,46 +777,23 @@ async def _run_cch(action: str, args: dict) -> str:
                     return "CCH 点播未起播（NEED_M5：死实例，待 M5 刷机）"
                 if not ok:
                     return f"CCH 点播失败（9102 /cmd：{detail}）"
-                _intent = play_intent_for(song, artist)
-                _cch_state.update({"entry": 0, "items": items, "no_advance": False,
-                                   "play_intent": _intent, "played": []})
+                from core.music.playback_commit import finalize_playback
+
+                result = await finalize_playback(
+                    play_url=ticket_url, item=item, items=items, meta=meta,
+                    bg_url=bg_url, intent=play_intent_for(song, artist))
         except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
             return f"CCH 点播失败：{type(exc).__name__}"
-        # 存整队供 cch_np 换代编排（STATE finish → advance 下一首）；票据按 entry 逐条 prepare
-        # no_advance=False：清除点击播的单发标志（票 23），恢复语音队列的正常换代
-        # 票 11：play_mode = 点播意图（single 特定歌 / 批量走播控页模式）+ played 重置
         from core.music import cch_np as _np
 
-        # 意图单一真相源 = LLM 的 song/artist（不再从结果反推）：
-        #   有 song（指定曲目，含「周杰伦的青花瓷」双字段）→ single；
-        #   仅 artist（歌手批量，如「任素汐的歌」）→ batch。
-        # 队列快照已在起播成功后立即提交（见 M5 / cast 两轨的 _cch_state.update）；
-        # 此处仅幂等重述，确保活实例轨（cast_native 分支）也有一致状态。
+        # 播控页四档状态不在此快照——由 cch_np.current_play_mode() 实时读（单一真相源）。
         _intent = play_intent_for(song, artist)
-        _cch_state.update({"entry": 0, "items": items, "no_advance": False,
-                           "play_intent": _intent, "played": []})
-        # 播控页四档状态不在此快照——由 cch_np.current_play_mode() 实时读（单一真相源），
-        # 保证「点播后切按钮立即生效」。
         logger.info(f"[SongRequest] cch play_intent={_intent} mode={_np.current_play_mode()} "
                     f"n={len(items)}", module="SongRequest")
-        # 播放历史 UI 接管：CCH 设备专属历史（不用 Songloft 全局），点歌成功登记当前曲
-        try:
-            from core.music import cch_history
-            cch_history.note(items[0])   # 最新一首（items[0]）→ 设备 play_history.json
-        except Exception as exc:  # noqa: BLE001 - 历史是体验增强，不阻塞起播
-            logger.warning(f"[SongRequest] cch history note failed: {type(exc).__name__}",
-                           module="SongRequest")
-        # 票 21：UI 队列下发（搜索结果 topN 元数据，脱敏无票据）。失败不阻塞起播。
-        try:
-            await push_queue(items)
-        except Exception as exc:  # noqa: BLE001 - 队列是体验增强
-            logger.warning(f"[SongRequest] cch queue push failed: {type(exc).__name__}",
-                           module="SongRequest")
         suppress_reply()   # kwqq 源已起播：本轮收尾 TTS 不得顶掉它
-        # §2.77-53：audioName 已改为「歌手 - 歌名」（屏显用），播报不能用它（会念成
-        # 《周杰伦 - 晴天》）；用门面 item 的原曲名播报。
-        name = str(item.get("name") or render_data.get("audioName") or "歌曲")
+        # §2.77-53：audioName 是「歌手 - 歌名」（屏显用），播报用原曲名。
+        name = str(item.get("name") or "歌曲")
         return f"已在 CCH 上为你播放《{name}》（队列 {len(items)} 首）"
 
     # CCH 主动投送默认关闭（票 16/17 的 D 方向裁决）：原厂 = 唯一播放器，bridge = 控制/状态端。

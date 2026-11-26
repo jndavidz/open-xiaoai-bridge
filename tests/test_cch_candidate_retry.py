@@ -68,6 +68,11 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
         stack.enter_context(patch("core.tools.registry.suppress_reply", MagicMock()))
         stack.enter_context(patch("aiohttp.ClientSession", _FakeSession))
+        # 架构重构：离线单测不真的等设备观测（生产由 STATE play 裁决）
+        from core.music import playback_observation
+
+        stack.enter_context(patch.object(playback_observation, "observe_play",
+                                         AsyncMock(return_value=True)))
 
     async def test_raw_id_skips_search_uses_truth_source(self):
         """FAVCLICK 源头 rawID+平台 → 跳过按标题搜索，ref 用 rawID/source（§2.77-57）。

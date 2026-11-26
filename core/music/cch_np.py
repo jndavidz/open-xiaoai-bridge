@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 
 from core.utils.logger import logger
 
@@ -112,12 +113,14 @@ def record_event(kind: str, extras: dict, device_ts: str = "") -> None:
     （snapshot/_latest_state_str 的读方）——此前 on_np_event 直接以大写 kind 存键，
     读方永远读空（上批遗留 bug，本批修正）。
     """
-    _np_state[kind.lower()] = {"extras": extras or {}, "device_ts": device_ts}
+    _np_state[kind.lower()] = {"extras": extras or {}, "device_ts": device_ts,
+                               "observed_at": time.time()}
 
 
 async def on_np_event(kind: str, extras: dict, device_ts: str = "") -> dict:
     """worker 上行事件入口。返回编排动作（供日志/审计）。"""
-    _np_state[kind.lower()] = {"extras": extras or {}, "device_ts": device_ts}
+    _np_state[kind.lower()] = {"extras": extras or {}, "device_ts": device_ts,
+                               "observed_at": time.time()}
     if kind != "STATE":
         return {"action": "recorded", "kind": kind}
     state_str = str((extras or {}).get("statusStr") or "").lower()

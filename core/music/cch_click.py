@@ -298,18 +298,13 @@ async def _freeze_recover(ev: dict) -> None:
     from core.music import cch_np, focus_bridge
     from core.tools import song_request as sr
 
-    if focus_bridge.focus_holding():
-        logger.info("[CchClick] FREEZE suppressed(focus held)", module="CchClick")
-        return
-    # 真机回归（17:13）：语音点播期间 TTS 暂停让设备误判冻结；此时 bridge
-    # 的 _cch_state 还指向旧队列，replay 会把旧曲拉回覆盖新点播。语音窗与
-    # 对话管线任一活跃即放弃恢复资格（与 focus 读口正交，点歌是单轮不 hold）。
-    from core.utils import pipeline
-    if pipeline.state() != pipeline.PipelineState.IDLE:
-        logger.info("[CchClick] FREEZE suppressed(turn active)", module="CchClick")
-        return
-    if time.time() - _recent_voice_ts < _VOICE_GUARD_S:
-        logger.info("[CchClick] FREEZE suppressed(voice window)", module="CchClick")
+    # 架构收敛：受控判据收进观测 seam（事务进行中 / TTS focus 持有中）。
+    # 取代散落的 focus / pipeline / voice 三道门——观测层只处理无人接管的
+    # 真实冻结，点播与对话各自负责自己的恢复资格。
+    from core.music import playback_observation as obs
+    if obs.suppressed():
+        logger.info("[CchClick] FREEZE suppressed(controlled by transaction/focus)",
+                    module="CchClick")
         return
     items = sr._cch_state.get("items") or []
     idx = int(sr._cch_state.get("entry", 0) or 0)
