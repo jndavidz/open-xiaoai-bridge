@@ -426,6 +426,10 @@ async def _run_managed(action: str, args: dict) -> str:
 # 播控（pause/resume/next/stop）经 patched dlnaserver 的 DLNA SOAP；stop 同时撤票。
 _CCH_SESSION = "bridge-cch"
 _CCH_EPOCH = 1
+# 多源串行 fallback 总预算（复核实测：单源 15s 超时 + 票据链 30s 累积 51s
+# 才返回失败，用户感知「点歌十几秒没反应」）。预算耗尽即停，真实原因透出文案，
+# 避免把上游 resolve 超时误判成 VerifyMP3。
+_CCH_FALLBACK_BUDGET_S = 8.0
 _cch_state = {"entry": 0, "items": [], "session": _CCH_SESSION}
 
 
@@ -635,6 +639,9 @@ async def _run_cch(action: str, args: dict) -> str:
                     if len(candidates) >= 8:
                         break
 
+                failure_reasons: list[str] = []
+                _loop = asyncio.get_event_loop()
+
                 async def _try_item(it: dict, _meta: dict | None = None,
                                     _bg_url: str | None = None):
                     """单个候选取链：票据 resolve + Range 验证 → 各源直链回退。
@@ -668,12 +675,26 @@ async def _run_cch(action: str, args: dict) -> str:
                                 f"[SongRequest] ticket rejected (type={ctype} range={crange} len={clen});"
                                 " fallback direct", module="SongRequest")
                     except Exception as exc:  # noqa: BLE001 - 票据链失败降级直链
+                        failure_reasons.append(f"ticket({type(exc).__name__}: {exc})"[:160])
                         logger.warning(f"[SongRequest] ticket chain failed: {type(exc).__name__}; fallback direct",
                                        module="SongRequest")
                     if not _play_url:
                         async with aiohttp.ClientSession() as http:
+                            deadline = _loop.time() + _CCH_FALLBACK_BUDGET_S
                             for src in _sources(None):
-                                _play_url = await _pick_url(http, src, it)
+                                left = deadline - _loop.time()
+                                if left <= 0:
+                                    failure_reasons.append("fallback_budget_exhausted")
+                                    break
+                                try:
+                                    _play_url = await asyncio.wait_for(
+                                        _pick_url(http, src, it), timeout=left)
+                                except asyncio.CancelledError:
+                                    failure_reasons.append(f"{src}(timeout)")
+                                    _play_url = None
+                                except Exception as exc:  # noqa: BLE001 - 单源失败继续
+                                    failure_reasons.append(f"{src}({type(exc).__name__})")
+                                    _play_url = None
                                 if _play_url:
                                     break
                     if not _play_url:
@@ -708,7 +729,11 @@ async def _run_cch(action: str, args: dict) -> str:
                     picked = (_it, _result)
                     break
                 if picked is None:
-                    return "CCH 音源暂不可用（kwqq 解析冷却/预览降级），请稍后再试或换音源"
+                    detail = ";".join(dict.fromkeys(failure_reasons))[:160] or "no_source"
+                    logger.warning(f"[SongRequest] all candidates failed: {detail}",
+                                   module="SongRequest")
+                    return (f"CCH 音源暂不可用（kwqq 解析冷却/预览降级；原因: {detail}），"
+                            "请稍后再试或换音源")
                 item, (play_url, ref, entry, meta, bg_url) = picked
                 if item is not candidates[0]:
                     # 换曲：播报按最终 item 重建（取消旧任务，避免播错歌名）；并把选中曲

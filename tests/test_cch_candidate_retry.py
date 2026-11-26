@@ -266,9 +266,62 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
             sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
             out = await sr._run_cch("play", {"query": "不著痕跡"})
 
-        self.assertEqual(out, "CCH 音源暂不可用（kwqq 解析冷却/预览降级），请稍后再试或换音源")
+        self.assertIn("CCH 音源暂不可用", out)
+        self.assertIn("原因:", out, "失败文案须带真实原因，不能只给泛化提示")
         host_cmd.assert_not_awaited()
         self.assertIsNone(calls["build_item"])
+
+    async def test_fallback_total_budget_caps_latency(self):
+        """H1：多源串行 fallback 必须有总预算——单源慢不能累积成 50s 等待。"""
+        import asyncio
+        import time
+
+        items = [{"id": "X", "name": "x", "artist": "a", "source": "qq"}]
+        calls = {"build_item": None, "speak": [], "pick": []}
+        tried = []
+
+        async def fake_pick(http, source, it):
+            tried.append(source)
+            await asyncio.sleep(0.2)  # 模拟 kwqq 上游慢（真实日志为 15s 超时）
+            return None
+
+        async def fake_resolve(*a, **kw):
+            raise RuntimeError("no ticket")
+
+        with ExitStack() as stack:
+            self._setup(stack, items=items, pick=fake_pick,
+                        resolve=fake_resolve,
+                        host_cmd=AsyncMock(return_value=(True, "OK")), calls=calls)
+            stack.enter_context(patch.object(sr, "_sources", lambda req: ["qq", "kugou", "migu"]))
+            stack.enter_context(patch.object(sr, "_CCH_FALLBACK_BUDGET_S", 0.25))
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            t0 = time.monotonic()
+            await sr._run_cch("play", {"query": "x"})
+            elapsed = time.monotonic() - t0
+
+        self.assertLess(elapsed, 0.5, f"总耗时 {elapsed:.2f}s 应被 0.25s 预算截断")
+        self.assertLess(len(tried), 3, "预算耗尽后不应继续尝试第三个源")
+
+    async def test_error_message_reports_real_reason(self):
+        """H4：错误文案带真实原因，不再把上游 resolve 超时伪装成 VerifyMP3。"""
+        items = [{"id": "X", "name": "x", "artist": "a", "source": "qq"}]
+        calls = {"build_item": None, "speak": [], "pick": []}
+
+        async def fake_pick(http, source, it):
+            return None
+
+        async def fake_resolve(*a, **kw):
+            raise RuntimeError("kwqq resolve timeout")
+
+        with ExitStack() as stack:
+            self._setup(stack, items=items, pick=fake_pick,
+                        resolve=fake_resolve,
+                        host_cmd=AsyncMock(return_value=(True, "OK")), calls=calls)
+            sr._cch_state.update({"entry": 0, "items": [], "session": sr._CCH_SESSION})
+            out = await sr._run_cch("play", {"query": "x"})
+
+        self.assertIn("CCH 音源暂不可用", out)
+        self.assertIn("kwqq resolve timeout", out, "须把真实失败原因透出，避免误判为 VerifyMP3")
 
     async def test_candidate_cap_eight(self):
         """候选遍历上限前 8 个（13 个候选时不得全量串行尝试）。"""
