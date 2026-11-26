@@ -32,6 +32,13 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         cch_np._np_state.update({"meta": {}, "state": {}})
         cch_np._last_advance_at = -1e9
+        # 架构收敛：换代经 session.report，测试需把 renderer session 置 PLAYING
+        from core.music import playback_session
+
+        _s = playback_session.for_renderer("cch")
+        _s.phase = playback_session.PlaybackPhase.PLAYING
+        _s._recent_freeze.clear()
+        _s._last_toggle_ts = 0.0
         sr._cch_state.update({"entry": 0, "items": []})
         self._saved = {}
         for name in ("resolve_ticket_url", "kwqq_meta", "build_render_data",
@@ -732,6 +739,13 @@ class PlaybackModeIntegrationTest(unittest.IsolatedAsyncioTestCase):
             "revoke", "resolve_ticket_url", "kwqq_meta", "cast_native",
             "host_token_deploy", "m5_enabled", "wait_np_play")}
         cch_np._last_advance_at = -1e9
+        # 架构收敛：换代经 session.report，测试需把 renderer session 置 PLAYING
+        from core.music import playback_session
+
+        _s = playback_session.for_renderer("cch")
+        _s.phase = playback_session.PlaybackPhase.PLAYING
+        _s._recent_freeze.clear()
+        _s._last_toggle_ts = 0.0
 
     def tearDown(self):
         from core.music import cch_cast

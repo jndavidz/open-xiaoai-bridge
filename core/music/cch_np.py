@@ -217,6 +217,12 @@ async def _cast_entry(idx: int, item: dict, *, fallback_direct: bool = False) ->
     if m5_enabled():
         await host_token_deploy()
         ok, status = await host_cmd("play", url=ticket_url)
+        # 架构收敛：与点播同一观测裁决——回执 TIMEOUT 不算失败，
+        # 设备 STATE play 新鲜观测才是起播真相（真机 advance/replay 常 TIMEOUT 但已播）
+        from core.music import playback_observation as obs
+
+        if await obs.observe_play(timeout_s=3.0):
+            ok, status = True, "observed"
         detail = status
         # 换代/重播必须刷新歌词与显示层（2026-11-26 用户报「歌词对不上声音」）：
         # m5 轨 host_cmd 只传 URL、不带 renderData，设备显示层会沿用上一首的 lrc/封面。

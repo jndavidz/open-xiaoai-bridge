@@ -52,27 +52,30 @@ class PlaybackSession:
         self.entry = ""
         self.items: list[dict] = []
         self._recent_freeze: dict[tuple[str, str, int], float] = {}
+        self._last_toggle_ts: float = 0.0
 
     def controlled(self) -> bool:
         """SILENCED / PREPARING 期间受控——所有恢复事件应 no-op。"""
         return self.phase in (PlaybackPhase.SILENCED, PlaybackPhase.PREPARING)
 
     async def silence(self) -> None:
-        """IDLE → SILENCED：音频静音一次，旧 meta 保留到新曲覆盖。"""
+        """任意态 → SILENCED：新意图抢占时也要静音（PLAYING→SILENCED）。
+
+        真机 11:21:56「play skipped phase=playing」就是上一曲停在 PLAYING，
+        新点播无法进入 PREPARING。新意图到达即从当前态重置，音频 stop 一次。
+        """
         from core.music import cch_cast
 
-        if self.phase != PlaybackPhase.IDLE:
-            logger.debug(f"[PlaybackSession] silence skipped phase={self.phase.value}",
-                         module="PlaybackSession")
-            return
         await cch_cast.host_cmd("stop")
         self.phase = PlaybackPhase.SILENCED
-        logger.info(f"[PlaybackSession] {self.renderer_id} silenced",
-                    module="PlaybackSession")
+        self._recent_freeze.clear()  # 新会话：清掉上一曲的去抖桶
+        self._last_toggle_ts = 0.0
+        logger.info(f"[PlaybackSession] {self.renderer_id} silenced "
+                    f"(from prior phase)", module="PlaybackSession")
 
     def prepare(self) -> None:
-        """SILENCED → PREPARING：进入静默等待（TTS/取链由调用方在后台做）。"""
-        if self.phase == PlaybackPhase.SILENCED:
+        """SILENCED/PLAYING → PREPARING：进入静默等待（换代/新点播都经此）。"""
+        if self.phase in (PlaybackPhase.SILENCED, PlaybackPhase.PLAYING):
             self.phase = PlaybackPhase.PREPARING
             logger.info(f"[PlaybackSession] {self.renderer_id} preparing",
                         module="PlaybackSession")
@@ -147,7 +150,20 @@ class PlaybackSession:
         if self.phase != PlaybackPhase.PLAYING:
             return {"action": "not_playing", "kind": kind, "renderer": self.renderer_id}
 
+        # 冻结/恢复需重新 stop+play：先重置到 PREPARING（一次 stop + 静默持有）。
+        # 换代是自然曲终后的推进（旧曲已停），不额外 silence——cch_np 内部
+        # 已完成取票+cast，成功后把 session 推回 PLAYING。
+        if kind in ("freeze", "tts_resume"):
+            await self.silence()
+            self.prepare()
+
         from core.music import cch_np
+
+        if kind == "track_finish":
+            result = await cch_np._advance_if_finished()
+            if str(result.get("action") or "") == "advanced":
+                self.phase = PlaybackPhase.PLAYING
+            return dict(result, kind=kind, renderer=self.renderer_id)
 
         if kind == "freeze":
             # 同一 (source, rawID, epoch) 5s 内只恢复一次（跨曲互不抑制）
@@ -161,6 +177,15 @@ class PlaybackSession:
             self._recent_freeze[key] = now
             result = await cch_np.replay_current()
         elif kind == "toggle":
+            # 换代 stop 的 pushNotify 副产品会被 tap_hook 当 PLAYTOGGLE 上报
+            # （真机 11:20:49 advance 后立刻 replay）——5s 去抖挡住二次启动
+            import time
+
+            now = time.time()
+            if now - self._last_toggle_ts < 5.0:
+                return {"action": "drop_debounce", "kind": kind,
+                        "renderer": self.renderer_id}
+            self._last_toggle_ts = now
             # 保留既有语义：曲终态重播，播放态 M5 原子 toggle（NEED_M5 回退重播）
             from core.music import cch_cast
 

@@ -44,6 +44,7 @@ class CchClickTest(unittest.IsolatedAsyncioTestCase):
         _s = playback_session.for_renderer("cch")
         _s.phase = playback_session.PlaybackPhase.PLAYING
         _s._recent_freeze.clear()
+        _s._last_toggle_ts = 0.0
         cch_click._pending_ev = None
         if cch_click._pending_task is not None:
             cch_click._pending_task.cancel()
