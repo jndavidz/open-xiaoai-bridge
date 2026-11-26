@@ -32,6 +32,22 @@ class HostCmdRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, calls.count("hostcmd"),
                          "retry_once=False 时 play 不得重发（否则设备重复起播）")
 
+    async def test_fire_and_forget_pause_never_waits_or_resends(self):
+        """抢占 pause 必须 fire-and-forget——真机 retry_once 双 5s 超时致 11s 旧曲残留。"""
+        calls = []
+
+        async def fake_musicctl(op, payload=None):
+            calls.append(op)
+            return True, {}
+
+        with patch.object(cch_cast, "host_derived_key", return_value="tok"), \
+             patch.object(cch_cast, "musicctl", fake_musicctl):
+            ok, status = await cch_cast.host_cmd("pause", wait_ack=False)
+
+        self.assertEqual((True, "SENT"), (ok, status))
+        self.assertEqual(["hostcmd"], calls,
+                         "wait_ack=False 只发一次、不等回执、不重发")
+
     async def test_default_retry_still_resends(self):
         """默认（其它命令）保留重发——广播间歇丢失兜底，不破坏既有语义。"""
         calls = []

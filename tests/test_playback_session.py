@@ -64,6 +64,21 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["pause", "play"], cmds, "silence 用 pause 保持实例，bridge 备好再 play")
         self.assertEqual(1, render.await_count, "renderDisplay 恰好一次")
 
+    async def test_silence_pause_is_fire_and_forget(self):
+        """抢占 pause 必须 wait_ack=False——真机默认双 5s 超时+重发=11s 旧曲残留。"""
+        calls = []
+
+        async def fake_host_cmd(cmd, **kw):
+            calls.append((cmd, kw))
+            return True, "SENT"
+
+        with patch.object(cch_cast, "host_cmd", fake_host_cmd):
+            await self.session.silence()
+
+        self.assertEqual("pause", calls[0][0])
+        self.assertFalse(calls[0][1].get("wait_ack", True),
+                         "silence 的 pause 不得等回执（否则 11s 抢占延迟）")
+
     async def test_report_suppressed_during_preparing(self):
         """PREPARING 期间所有恢复事件 no-op——一个状态判据。"""
         with ExitStack() as stack:

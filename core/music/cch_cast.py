@@ -610,15 +610,20 @@ async def host_token_deploy() -> tuple[bool, dict]:
 
 
 async def host_cmd(cmd: str, url: str = None, extra: str = None,
-                   timeout_s: float = 5.0, *, retry_once: bool = True) -> tuple[bool, str]:
+                   timeout_s: float = 5.0, *, retry_once: bool = True,
+                   wait_ack: bool = True) -> tuple[bool, str]:
     """M5 控制通道命令（broadcast fire-and-forget + last_result cmd_id 回读）。
 
-    返回 (ok, status)：status = OK / NEED_M5 / AUTH_FAILED / INVALID_CMD / TIMEOUT。
+    返回 (ok, status)：status = OK / NEED_M5 / AUTH_FAILED / INVALID_CMD / TIMEOUT / SENT。
     cmd_id 不匹配 = 广播丢失或处理中；匹配但 AUTH_FAILED = token 不匹配。
 
-    `retry_once` 默认 True（广播间歇丢失兜底，2026-11-20 实测）。**play 传 False**：
-    真机 2026-11-26 证实回执 TIMEOUT 后重发会让设备重复起播（pid 7342143→7342144）；
-    起播真相由 observe_play 裁决，不靠回执重发保证送达。
+    语义分流（2026-11-26 真机，控制命令契约）：
+    - `wait_ack=True`（默认）+ `retry_once=True`：等回执 + 超时重发一次（广播丢包兜底）。
+    - `retry_once=False`：等回执但不重发。**play 用**：真机证实重发会重复起播
+      （pid 7342143→7342144）；起播真相由 observe_play 裁决。
+    - `wait_ack=False`：fire-and-forget，发一次立即返回 (True, "SENT")。**抢占 pause 用**：
+      真机证实 pause 默认双 5s 超时 + 重发 = 11s 抢占延迟，旧曲持续响；
+      抢占要的是最快生效，不是保证送达（广播偶丢由后续 play 覆盖兜底）。
     """
     import asyncio
     import uuid
@@ -636,6 +641,8 @@ async def host_cmd(cmd: str, url: str = None, extra: str = None,
         if str((payload or {}).get("error") or "") == "tts token not configured":
             return False, "NO_TOKEN"
         return False, "NEED_M5"
+    if not wait_ack:
+        return True, "SENT"  # 抢占语义：不等回执、不重发，立即交还控制权
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout_s
     while loop.time() < deadline:

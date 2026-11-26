@@ -91,10 +91,12 @@ class PlaybackSession:
         self.intent_seq += 1  # 递增意图代次 ⇒ 上一曲 play 观测后 CAS 失败，不覆盖新意图
         # 用户裁决（2026-11-26）：唤醒词静默 = AGMC pause（audioStatus:9，实例保留），
         # 保持暂停态直到 bridge 发来新曲 play；不用 stop（audioStatus:8 杀实例）。
-        ok, status = await cch_cast.host_cmd("pause")
+        # 抢占 pause = fire-and-forget：真机默认等回执+重发 = 11s，旧曲持续响。
+        # 抢占要最快生效；广播偶丢由后续 play(新曲) 覆盖兜底，不靠回执重发保证送达。
+        ok, status = await cch_cast.host_cmd("pause", wait_ack=False)
         if not ok and "NEED_M5" in str(status):
             # 实例已死（曲终/被抢）：pause 无处可施，补一个 stop 清场防旧曲残影
-            await cch_cast.host_cmd("stop")
+            await cch_cast.host_cmd("stop", wait_ack=False)
         self.phase = PlaybackPhase.SILENCED
         self._recent_freeze.clear()  # 新会话：清掉上一曲的去抖桶
         self._last_toggle_ts = 0.0
