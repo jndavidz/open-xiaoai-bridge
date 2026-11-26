@@ -142,6 +142,40 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok, "陈旧 play 不得提交（epoch 已变）")
         self.assertNotEqual("NEW", self.session.entry, "旧曲不得覆盖新意图")
 
+    async def test_render_display_precedes_observation_wait(self):
+        """显示层必须在 18s 观测等待之前投——map.md ab13cb1 历史教训，
+        架构收敛时把 render 挪到 observe_play 之后导致 10s 显示层滞后。"""
+        order = []
+
+        async def slow_observe(*a, **kw):
+            order.append("observe")
+            await asyncio.sleep(0.05)
+            return True
+
+        async def fake_render(rd):
+            order.append("render")
+            return True
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "OK"))))
+            stack.enter_context(patch.object(playback_observation, "observe_play",
+                                             slow_observe))
+            stack.enter_context(patch.object(cch_cast, "build_render_data",
+                                             MagicMock(return_value={})))
+            stack.enter_context(patch.object(cch_cast, "inject_lyric",
+                                             MagicMock(side_effect=lambda rd, sid: dict(rd))))
+            stack.enter_context(patch.object(cch_cast, "render_display", fake_render))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
+            stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
+            await self.session.silence()
+            self.session.prepare()
+            await self.session.play(_prepared())
+
+        self.assertEqual(["render", "observe"], order,
+                         "render 不得被 18s 观测窗阻塞")
+
     async def test_observation_window_covers_worker_poll_cycle(self):
         """观测窗必须 >= worker 一个 poll 周期（15s）+ 余量——STATE 上报天然滞后。"""
         import inspect

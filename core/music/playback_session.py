@@ -135,6 +135,10 @@ class PlaybackSession:
         my_seq = self.intent_seq  # 代次快照：观测期间若新意图到达则 seq 变，作废本次提交
         ok, status = await cch_cast.host_cmd(
             "play", url=prepared.play_url, retry_once=False)
+        # 显示层立即投：不等 18s 观测窗（map.md ab13cb1 历史教训——架构收敛时
+        # 把 render 挪到 observe_play 之后，真机显示层滞后 10s）。音轨已由 hostcmd
+        # 起播，显示层与实际音轨同源，观测只用于所有权提交裁决。
+        await self._render_display(prepared)
         confirmed = await obs.observe_play(since_ts=self.observation_since())
         if my_seq != self.intent_seq:
             logger.info("[PlaybackSession] play superseded by newer intent (seq changed)")
@@ -167,8 +171,9 @@ class PlaybackSession:
                               "no_advance": False, "play_intent": prepared.intent,
                               "played": []})
 
-    async def _present(self, prepared: PreparedPlayback) -> None:
-        from core.music import cch_cast, cch_history
+    async def _render_display(self, prepared: PreparedPlayback) -> None:
+        """显示层首帧（含歌词 URL 纯函数注入）——hostcmd play 后立即投，不等观测。"""
+        from core.music import cch_cast
 
         try:
             rd = cch_cast.build_render_data(prepared.play_url, prepared.item,
@@ -177,7 +182,15 @@ class PlaybackSession:
             sid = str(prepared.item.get("id") or "")
             if sid:
                 rd = cch_cast.inject_lyric(rd, sid)
-            await cch_cast.render_display(rd)  # 唯一一次
+            await cch_cast.render_display(rd)  # 全程唯一一次
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[PlaybackSession] render failed: {type(exc).__name__}",
+                           )
+
+    async def _present(self, prepared: PreparedPlayback) -> None:
+        from core.music import cch_cast, cch_history
+
+        try:
             await cch_cast.write_lyric(prepared.item)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[PlaybackSession] present failed: {type(exc).__name__}",
