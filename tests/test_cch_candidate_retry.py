@@ -253,7 +253,10 @@ class CchCandidateRetryTest(unittest.IsolatedAsyncioTestCase):
         # 断言 play 那次参数正确（不再要求总调用次数为 1）
         play_calls = [c for c in host_cmd.await_args_list if c.args and c.args[0] == "play"]
         self.assertEqual(1, len(play_calls))
-        self.assertEqual({"url": "http://good"}, play_calls[0].kwargs)
+        self.assertEqual("http://good", play_calls[0].kwargs["url"])
+        # F2 定案（spec.md:84）：play 不等回执、不重发，真相只由观测裁决
+        self.assertFalse(play_calls[0].kwargs.get("wait_ack", True))
+        self.assertFalse(play_calls[0].kwargs.get("retry_once", True))
         self.assertIs(calls["build_item"], right, "renderData 必须用最终选中的候选")
         self.assertEqual(sr._cch_state["items"][0]["id"], "RIGHT", "队列首项须是最终曲")
         self.assertIn("WRONG", calls["pick"])

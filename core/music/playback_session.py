@@ -106,8 +106,18 @@ class PlaybackSession:
         logger.info(f"[PlaybackSession] {self.renderer_id} silenced "
                     f"(from prior phase)")
 
-    def mark_playing(self, prepared: PreparedPlayback) -> None:
-        """活实例轨：设备已由 cast_native 起播，只提交状态（不二次 stop/play）。"""
+    def mark_playing(self, prepared: PreparedPlayback,
+                     *, intent_seq: int) -> bool:
+        """活实例轨：设备已由 cast_native 起播，只提交状态（不二次 stop/play）。
+
+        `intent_seq` 必须由调用方在 cast_native 之前快照——cast_native +
+        wait_np_play(8s) 期间若有新意图到达（silence 递增 seq），陈旧轨不得
+        提交覆盖新意图（与 M5 轨 play() 的 CAS 同构，ADR-0001 代次闸门）。
+        """
+        if intent_seq != self.intent_seq:
+            logger.info("[PlaybackSession] mark_playing superseded by newer intent "
+                        f"(seq {intent_seq} != {self.intent_seq})")
+            return False
         self.epoch += 1
         self.entry = str(prepared.item.get("id") or "")
         self.items = prepared.items
@@ -116,6 +126,7 @@ class PlaybackSession:
         asyncio.create_task(self._present(prepared))
         logger.info(f"[PlaybackSession] {self.renderer_id} adopted playing "
                     f"entry={self.entry}")
+        return True
 
     def prepare(self) -> None:
         """SILENCED/PLAYING → PREPARING：进入静默等待（换代/新点播都经此）。"""

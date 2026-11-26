@@ -774,6 +774,9 @@ async def _run_cch(action: str, args: dict) -> str:
                 ticket_url = await resolve_ticket_url(
                     ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
                 render_data = build_render_data(ticket_url, item, meta, background_image=bg_url)
+                # CAS 快照必须在 cast_native（含 wait_np_play 8s）之前——
+                # 期间若有新意图 silence 递增 seq，陈旧轨不得提交覆盖新意图。
+                my_seq = _session.intent_seq
                 if ann_task is not None:
                     await ann_task
                 ok, detail = await cast_native(render_data)
@@ -788,7 +791,9 @@ async def _run_cch(action: str, args: dict) -> str:
                     bg_url=bg_url, intent=play_intent_for(song, artist))
                 # 活实例轨：cast_native 已带 renderData+play，不再 stop/play 二次；
                 # 只把 session 推到 PLAYING 并提交所有权（同一次设备副作用）。
-                _session.mark_playing(prepared)
+                # CAS 失败（新意图抢占）时提交作废，不返回成功误导上层。
+                if not _session.mark_playing(prepared, intent_seq=my_seq):
+                    return "CCH 点播已被新指令取代（旧轨提交作废）"
         except Exception as exc:  # noqa: BLE001 - 收敛为错误串（工具层不抛）
             logger.error(f"[SongRequest] cch native cast failed: {type(exc).__name__}: {exc}")
             return f"CCH 点播失败：{type(exc).__name__}"

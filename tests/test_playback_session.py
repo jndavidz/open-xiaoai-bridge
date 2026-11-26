@@ -109,6 +109,33 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
                          "恢复成功后必须可继续接受换代事件")
         self.assertFalse(self.session.controlled())
 
+    async def test_stale_mark_playing_cannot_override_new_intent(self):
+        """活实例轨 mark_playing 也必须过 CAS——真机同类竞速：
+        旧曲 cast_native 完成晚于新意图 silence，旧轨不得覆盖新意图。"""
+        from core.music import cch_cast
+
+        with patch.object(cch_cast, "host_cmd",
+                          AsyncMock(return_value=(True, "SENT"))):
+            await self.session.silence()   # seq=1
+            self.session.prepare()
+            my_seq = self.session.intent_seq
+            await self.session.silence()   # seq=2（新意图）
+            self.session.prepare()
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "build_render_data",
+                                             MagicMock(return_value={})))
+            stack.enter_context(patch.object(cch_cast, "render_display", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
+            stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
+            ok = self.session.mark_playing(_prepared(), intent_seq=my_seq)
+
+        self.assertFalse(ok, "陈旧 mark_playing 不得提交（seq 已变）")
+        self.assertNotEqual("NEW", self.session.entry, "旧 entry 不得覆盖新意图")
+        self.assertEqual(playback_session.PlaybackPhase.PREPARING, self.session.phase,
+                         "作废后不应停留在 PLAYING")
+
     async def test_stale_play_cannot_override_new_intent(self):
         """新意图（silence）必须作废旧 play 的提交——真机 13:44:24 旧晴天
         覆盖新青花瓷意图（cch playing entry=晴天）。代次 CAS 守卫。"""
