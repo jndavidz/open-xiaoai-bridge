@@ -134,7 +134,12 @@ async def resolve_ticket_url(ref: dict, *, session: str, epoch: int, entry: str)
                 media = str(data.get("media_url") or "")
                 if not media.startswith("/media?"):
                     raise ManagedError("cch_cast: bad media_url")
-                logger.info("[CchCast] ticket ready", module="CchCast")
+                # 验证等级随票据响应返回，记入诊断面——degraded 票据可解释、
+                # 不冒充 verified（ticket 03 / ADR Decision 5）。
+                validation = str(data.get("validation_status") or "unknown")
+                reason = str(data.get("validation_reason") or "")
+                logger.info(f"[CchCast] ticket ready validation={validation} "
+                            f"reason={reason[:120]}", module="CchCast")
                 return base + media
             if state == "failed":
                 raise ManagedError(f"cch_cast prepare failed: {data.get('error', '')}")
