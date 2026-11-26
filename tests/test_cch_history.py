@@ -141,5 +141,53 @@ class CchHistoryIdentityTest(unittest.TestCase):
         self.assertIs(False, item["isAudition"])
 
 
+class CchHistoryPushTest(unittest.TestCase):
+    """票 04（F7）：历史镜像首次读取空值与并发全量写。"""
+
+    def test_push_with_unknown_favorites_still_writes(self):
+        """首次收藏读失败（fav=None）时全量写仍完成，不抛 TypeError。"""
+        import asyncio
+        from unittest import mock
+
+        async def run():
+            with mock.patch.object(cch_history, "load_favorite_rawids",
+                                   new_callable=mock.AsyncMock, return_value=None), \
+                 mock.patch("core.music.cch_cast.musicctl",
+                            new_callable=mock.AsyncMock,
+                            return_value=(True, {})) as m:
+                await cch_history._push()
+                self.assertEqual(1, m.call_count, "未知收藏态不应阻断设备镜像写入")
+
+        asyncio.run(run())
+
+    def test_concurrent_push_serializes_device_writes(self):
+        """并发全量写不重叠：设备镜像只反映最后一次真相源状态。"""
+        import asyncio
+        from unittest import mock
+
+        async def run():
+            active = 0
+            peak = 0
+            writes = []
+
+            async def fake_musicctl(op, payload):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                writes.append(payload.get("items"))
+                active -= 1
+                return True, {}
+
+            with mock.patch.object(cch_history, "load_favorite_rawids",
+                                   new_callable=mock.AsyncMock, return_value=set()), \
+                 mock.patch("core.music.cch_cast.musicctl", new=fake_musicctl):
+                await asyncio.gather(cch_history._push(), cch_history._push())
+            self.assertEqual(1, peak, "并发 _push 的设备全量写必须串行")
+            self.assertEqual(2, len(writes))
+
+        asyncio.run(run())
+
+
 if __name__ == "__main__":
     unittest.main()

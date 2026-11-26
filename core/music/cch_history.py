@@ -215,12 +215,21 @@ async def load_favorite_rawids() -> set[str] | None:
     return out
 
 
+# 全量写串行锁：note() 与收藏同步都 fire-and-forget 投递 _push，
+# 不串行会让两个全量写并发落到设备镜像，旧快照可能后到覆盖新状态（F7）。
+_push_lock = asyncio.Lock()
+
+
 async def _push() -> None:
     """完整历史 → 原厂 schema（按收藏真相源校准红心）→ 9102 historyfile 全量写设备文件。"""
     from core.music import cch_cast
 
-    fav_rids = await load_favorite_rawids()
-    items = history_item_schema(list(_items), fav_rids=fav_rids)
-    ok, payload = await cch_cast.musicctl("historyfile", {"items": items})
-    logger.info(f"[CchHistory] push n={len(items)} fav={len(fav_rids)} ok={ok} "
-                f"status={str(payload)[:120]}", module="CchHistory")
+    async with _push_lock:
+        fav_rids = await load_favorite_rawids()
+        items = history_item_schema(list(_items), fav_rids=fav_rids)
+        ok, payload = await cch_cast.musicctl("historyfile", {"items": items})
+        # fav=-1 表示"收藏真相源未知"（读失败且无缓存），不把 unknown 写成空集 0；
+        # history_item_schema 对 None 保留 item 自带 collect（不假阴性全灭红心）。
+        fav_count = len(fav_rids) if fav_rids is not None else -1
+        logger.info(f"[CchHistory] push n={len(items)} fav={fav_count} ok={ok} "
+                    f"status={str(payload)[:120]}", module="CchHistory")
