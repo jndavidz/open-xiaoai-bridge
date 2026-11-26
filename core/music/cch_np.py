@@ -137,11 +137,34 @@ async def on_np_event(kind: str, extras: dict, device_ts: str = "") -> dict:
     return {"action": "recorded", "state": state_str or code}
 
 
-async def _prepare_cast(idx: int, item: dict) -> tuple[str, dict]:
-    """按 (source,id) 取票 + meta + renderData（advance/replay/recast 共用的准备链）。
+async def _pick_direct_url(item: dict) -> str | None:
+    """票据链失败后的多源直链兜底（与 song_request._try_item 同策略）。
 
-    返回 (ticket_url, render_data)；下行策略（m5 / cast_native / prepare_playback）
+    复用 song_request 的 _sources/_pick_url（同一份源序与预览/加密件过滤），
+    不在本模块重写源策略；无可用直链返回 None，由调用方决定抛错还是换候选。
+    """
+    import aiohttp
+    from core.tools import song_request as sr
+
+    async with aiohttp.ClientSession() as http:
+        for src in sr._sources(None):
+            url = await sr._pick_url(http, src, item)
+            if url:
+                return url
+    return None
+
+
+async def _prepare_cast(idx: int, item: dict, *, fallback_direct: bool = False) -> tuple[str, dict]:
+    """按 (source,id) 取可播 URL + meta + renderData（advance/replay/recast 共用的准备链）。
+
+    返回 (play_url, render_data)；下行策略（m5 / cast_native / prepare_playback）
     由各调用方决定——准备链收敛，执行链保持各自语义。
+
+    fallback_direct=True（仅 stopped replay 开启）：票据链与首次点播
+    （song_request._try_item）同构——Songloft managed prepare 可能因音源数据本身被拒
+    （如尾部无标签 junk 触发 verify.go:100），此时降级多源直链，不让曲终按 ▶️ 哑火
+    （票 06 复现：爱你一万年）。换代链不开此兜底：prepare 失败须显式 advance_failed
+    推进到下一曲，不能卡在当前曲重取直链（既有契约，见 test_prepare_exception）。
     """
     from core.music.cch_cast import (
         build_render_data, kwqq_meta, prepare_background, resolve_ticket_url,
@@ -150,20 +173,30 @@ async def _prepare_cast(idx: int, item: dict) -> tuple[str, dict]:
 
     ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
            "extra": item.get("extra") or {}}
-    ticket_url = await resolve_ticket_url(
-        ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
-        entry=str(item.get("id") or f"cch-{idx}"))
+    try:
+        play_url = await resolve_ticket_url(
+            ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
+            entry=str(item.get("id") or f"cch-{idx}"))
+    except Exception as exc:  # noqa: BLE001
+        if not fallback_direct:
+            raise  # 换代链保留原失败语义（advance_failed）
+        logger.warning(f"[CchNp] ticket chain failed ({type(exc).__name__}); fallback direct",
+                       module="CchNp")
+        play_url = await _pick_direct_url(item)
+        if not play_url:
+            raise  # 无可用直链 → replay_failed（不吞错）
     meta = await kwqq_meta(ref["id"], ref.get("source") or "kuwo")
     # 换代也要重算虚化背景（2026-11-26 用户报「切歌后全屏背景没虚化」）：
     # 点播链原本有 bg_cache.ensure，换代链缺 ⇒ build_render_data 回落清晰封面。
     bg_url = await prepare_background(str(meta.get("cover") or item.get("cover") or ""))
-    return ticket_url, build_render_data(ticket_url, item, meta, background_image=bg_url)
+    return play_url, build_render_data(play_url, item, meta, background_image=bg_url)
 
 
-async def _cast_entry(idx: int, item: dict) -> dict:
+async def _cast_entry(idx: int, item: dict, *, fallback_direct: bool = False) -> dict:
     """按 (source,id) 准备 + cast 单曲（advance 与 stopped replay 共用）。
 
     返回 {ok, detail}；不改 _cch_state.entry（由调用方决定推进还是重播），不撤票。
+    fallback_direct 透传给 _prepare_cast（仅 replay 开启，见其 docstring）。
     """
     from core.music.cch_cast import (
         attach_lyric,
@@ -175,7 +208,7 @@ async def _cast_entry(idx: int, item: dict) -> dict:
         wait_np_play,
     )
 
-    ticket_url, render_data = await _prepare_cast(idx, item)
+    ticket_url, render_data = await _prepare_cast(idx, item, fallback_direct=fallback_direct)
     if m5_enabled():
         await host_token_deploy()
         ok, status = await host_cmd("play", url=ticket_url)
@@ -208,7 +241,7 @@ async def replay_current() -> dict:
     if not items or idx >= len(items):
         return {"action": "replay_no_item"}
     try:
-        res = await _cast_entry(idx, items[idx])
+        res = await _cast_entry(idx, items[idx], fallback_direct=True)
         logger.info(f"[CchNp] replay {idx} ok={res['ok']} detail={res['detail']}", module="CchNp")
         return {"action": "replayed", "index": idx, "ok": res["ok"]}
     except Exception as exc:  # noqa: BLE001

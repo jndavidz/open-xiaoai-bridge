@@ -166,6 +166,68 @@ class ReplayCurrentTest(CchNpTestBase):
         self.assertEqual("replay_no_item", result["action"])
         self.assertEqual([], rec["cast"])
 
+    async def test_replay_falls_back_to_direct_when_ticket_rejected(self):
+        """票 06 复现：Songloft verify 拒该音源（尾部 junk）→ 票据链失败，
+        replay 必须与首次点播同构降级多源直链，否则曲终按 ▶️ 哑火。"""
+        from unittest import mock
+        rec = self.fake_downlink()
+        sr._cch_state.update({"entry": 0, "items": [
+            {"source": "qq", "id": "001I5Nzt1DLHUp", "name": "爱你一万年"},
+        ]})
+
+        async def fake_ticket_reject(*a, **kw):
+            raise RuntimeError("prepare failed: expected frame sync at offset 5875547")
+
+        async def fake_wait(seconds):
+            return True
+
+        async def fake_attach(item, rd):
+            return rd
+
+        pick_calls = []
+
+        async def fake_pick(http, src, it):
+            pick_calls.append(src)
+            if src == "qq":
+                return "http://direct.qq/aini.mp3"
+            return None
+
+        cch_cast.resolve_ticket_url = fake_ticket_reject
+        with mock.patch.object(sr, "_sources", lambda requested: ["migu", "qq"]), \
+             mock.patch.object(sr, "_pick_url", fake_pick), \
+             mock.patch.object(cch_cast, "m5_enabled", lambda: False), \
+             mock.patch.object(cch_cast, "wait_np_play", fake_wait), \
+             mock.patch.object(cch_cast, "attach_lyric", fake_attach):
+            result = await cch_np.replay_current()
+
+        self.assertEqual("replayed", result["action"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, len(rec["cast"]), "降级直链后重新 cast 一次")
+        self.assertEqual("http://direct.qq/aini.mp3",
+                         rec["cast"][0]["audioUrl"], "renderData 用直链")
+        self.assertEqual(["migu", "qq"], pick_calls, "按源序兜底至首个可用")
+
+    async def test_replay_no_direct_keeps_failed(self):
+        """票据失败且无可用直链 → 仍返回 replay_failed（不吞错、不假成功）。"""
+        from unittest import mock
+        self.fake_downlink()
+        sr._cch_state.update({"entry": 0, "items": [
+            {"source": "qq", "id": "x", "name": "x"},
+        ]})
+
+        async def fake_ticket_reject(*a, **kw):
+            raise RuntimeError("prepare failed")
+
+        async def fake_pick(http, src, it):
+            return None
+
+        cch_cast.resolve_ticket_url = fake_ticket_reject
+        with mock.patch.object(sr, "_sources", lambda requested: ["migu"]), \
+             mock.patch.object(sr, "_pick_url", fake_pick):
+            result = await cch_np.replay_current()
+        self.assertEqual("replay_failed", result["action"])
+        self.assertEqual("RuntimeError", result["error"])
+
 
 class AdvanceTest(CchNpTestBase):
     """票 03：STATE finish → 撤旧票 + cast 下一首。"""
