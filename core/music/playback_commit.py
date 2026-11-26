@@ -41,7 +41,8 @@ async def commit_playback(
 
     if announce_task is not None:
         await announce_task
-    obs.begin(str(item.get("id") or "cch-1"))
+    # 事务边界由调用方（song_request 的 play 意图）提前 begin，覆盖取链全程；
+    # 这里只负责收尾 end，避免 FREEZE 在取票窗口内抢回旧曲。
     try:
         # 起播前幂等 stop（TTS suspend/resume 可能唤醒旧会话）
         try:
@@ -81,10 +82,8 @@ async def finalize_playback(
     intent: str,
 ) -> CommitResult:
     """活实例轨收尾：设备已由 cast_native 起播，只做所有权提交 + 呈现。"""
-    from core.music import playback_observation as obs
     from core.tools import song_request as sr
 
-    obs.begin(str(item.get("id") or "cch-1"))
     try:
         sr._cch_state.update({"entry": 0, "items": items, "no_advance": False,
                               "play_intent": intent, "played": []})
@@ -92,6 +91,8 @@ async def finalize_playback(
             _present_and_project(play_url, item, items, meta, bg_url))
         return CommitResult(True, "committed", presentation)
     finally:
+        from core.music import playback_observation as obs
+
         obs.end()
 
 

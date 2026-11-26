@@ -506,6 +506,12 @@ async def _run_cch(action: str, args: dict) -> str:
                 logger.info(f"[SongRequest] artist from utterance fallback: {artist!r}",
                             module="SongRequest")
         if action == "play":
+            # 事务边界从「意图到达」开始（架构收敛）：FREEZE observer 在整个
+            # 取链窗口内都必须看到受控态——真机 10:12:15 FREEZE 早于 10:12:21
+            # 取票完成，若 begin 排在起播时，旧曲会被 replay 抢回并与新点播打架。
+            from core.music import playback_observation as _obs
+
+            _obs.begin(str(args.get("raw_id") or args.get("song") or "pending"))
             # 立即暂停（用户 2026-11-21）：派生 key 有 10 分钟缓存；stop 走「连发+回执」，
             # 广播有间歇丢失，单发一次不够（否则旧曲会在播报前继续响）。
             try:
