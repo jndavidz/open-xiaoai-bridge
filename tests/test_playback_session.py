@@ -29,6 +29,77 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
         sr._cch_state.update(self._state_backup)
         playback_session._SESSIONS.pop("cch-test", None)
 
+    async def test_epoch_bumped_explicitly_at_ticket_time(self):
+        """epoch 由取票路径显式 bump_epoch() 递增（换代/replay/首次点播共用），
+        提交时不再改——撤票按 (session,epoch,entry) 严格匹配才命中。"""
+        before = self.session.epoch
+        self.session.prepare()
+        self.assertEqual(before, self.session.epoch, "prepare 不改 epoch（与 phase 解耦）")
+
+        e1 = self.session.bump_epoch()  # 取票点
+        self.assertEqual(before + 1, e1)
+        self.assertEqual(e1, self.session.ticket_identity()[1])
+
+        item = {"id": "S1", "name": "晴天", "source": "kwqq"}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "OK"))))
+            stack.enter_context(patch.object(playback_observation, "observe_play",
+                                             AsyncMock(return_value=True)))
+            stack.enter_context(patch.object(cch_cast, "build_render_data",
+                                             MagicMock(return_value={})))
+            stack.enter_context(patch.object(cch_cast, "inject_lyric",
+                                             MagicMock(side_effect=lambda rd, sid: dict(rd))))
+            stack.enter_context(patch.object(cch_cast, "render_display", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
+            stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
+            prepared = playback_session.PreparedPlayback(
+                play_url="http://ticket/x", item=item, items=[item], meta={},
+                bg_url="", intent="single")
+            await self.session.play(prepared)
+        self.assertEqual(e1, self.session.epoch,
+                         "提交时 epoch 不再变（票据 epoch 已固定）")
+
+    async def test_ticket_identity_tracks_epoch_and_source_entry(self):
+        """票据身份必须来自 session 真实状态（F3）：epoch 随换代递增、
+        entry 带 source 前缀（四铁律），不再是固定 bridge-cch/1 + 裸 ID。"""
+        s, e, entry = self.session.ticket_identity()
+        self.assertEqual("cch-test", s, "session 应绑定 renderer_id")
+        self.assertEqual(0, e, "初始 epoch 为 0")
+        self.assertEqual("", entry, "未起播时 entry 为空")
+
+        with patch.object(cch_cast, "host_cmd",
+                          AsyncMock(return_value=(True, "SENT"))):
+            await self.session.silence()
+        self.session.prepare()
+        self.session.bump_epoch()  # 取票点换代
+        s, e_before, _ = self.session.ticket_identity()
+        self.assertGreater(e_before, e, "取票点换代：epoch 在此递增并固定（撤票需命中）")
+
+        item = {"id": "B3A52A7A", "name": "晴天", "source": "kugou"}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd",
+                                             AsyncMock(return_value=(True, "OK"))))
+            stack.enter_context(patch.object(playback_observation, "observe_play",
+                                             AsyncMock(return_value=True)))
+            stack.enter_context(patch.object(cch_cast, "build_render_data",
+                                             MagicMock(return_value={})))
+            stack.enter_context(patch.object(cch_cast, "inject_lyric",
+                                             MagicMock(side_effect=lambda rd, sid: dict(rd))))
+            stack.enter_context(patch.object(cch_cast, "render_display", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "write_lyric", AsyncMock()))
+            stack.enter_context(patch.object(cch_cast, "push_queue", AsyncMock()))
+            stack.enter_context(patch("core.music.cch_history.note", MagicMock()))
+            prepared = playback_session.PreparedPlayback(
+                play_url="http://ticket/x", item=item, items=[item], meta={},
+                bg_url="", intent="single")
+            await self.session.play(prepared)
+
+        s, e_after, entry_after = self.session.ticket_identity()
+        self.assertEqual(e_before, e_after, "提交时 epoch 不再变（票据 epoch 已固定）")
+        self.assertEqual("kugou:B3A52A7A", entry_after, "entry 必须带 source 前缀")
+
     async def test_silence_then_prepare_then_play(self):
         """状态机：IDLE→SILENCED→PREPARING→PLAYING，stop 只一次。"""
         cmds = []

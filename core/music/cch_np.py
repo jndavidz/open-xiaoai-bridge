@@ -178,10 +178,15 @@ async def _prepare_cast(idx: int, item: dict, *, fallback_direct: bool = False) 
 
     ref = {"source": item.get("source") or "", "id": str(item.get("id") or ""),
            "extra": item.get("extra") or {}}
+    # 所有取票路径（首次点播/换代/replay）统一换代：同曲重播也需要不同
+    # (session,epoch,entry)，否则 Songloft 判 op already active（B1）。
+    from core.music.playback_session import PlaybackSession, for_renderer
+
+    for_renderer("cch").bump_epoch()
     try:
         play_url = await resolve_ticket_url(
-            ref, session=sr._CCH_SESSION, epoch=sr._CCH_EPOCH,
-            entry=str(item.get("id") or f"cch-{idx}"))
+            ref, session=sr_session(), epoch=sr_epoch(),
+            entry=PlaybackSession.entry_for(item))
     except Exception as exc:  # noqa: BLE001
         if not fallback_direct:
             raise  # 换代链保留原失败语义（advance_failed）
@@ -309,7 +314,7 @@ async def _advance_if_finished() -> dict:
             _last_advance_at = loop.time()
             logger.info(f"[CchNp] advance {idx}->{nxt} ok={res['ok']} detail={res['detail']}",
                         module="CchNp")
-            return {"action": "advanced", "index": nxt, "ok": res["ok"]}
+            return {"action": "advanced", "index": nxt, "ok": res["ok"], "item": item}
         except Exception as exc:  # noqa: BLE001
             _last_advance_at = loop.time()
             logger.error(f"[CchNp] advance err: {type(exc).__name__}: {exc}", module="CchNp")
@@ -320,8 +325,9 @@ async def _revoke_entry(idx: int, item: dict) -> bool:
     """撤单条旧票（/managed/command stop）。失败仅 warning（票据 30min TTL 自过期兜底）。"""
     try:
         from core.music.cch_cast import revoke
+        from core.music.playback_session import PlaybackSession
 
-        entry_id = str(item.get("id") or f"cch-{idx}")
+        entry_id = PlaybackSession.entry_for(item)
         ok = await revoke(sr_session(), sr_epoch(), entry_id)
         if not ok:
             logger.warning(f"[CchNp] revoke entry={entry_id} failed", module="CchNp")
@@ -332,15 +338,20 @@ async def _revoke_entry(idx: int, item: dict) -> bool:
 
 
 def sr_session() -> str:
-    from core.tools import song_request as sr
+    """票据 session 的唯一真相源 = PlaybackSession(renderer_id)（F3）。"""
+    from core.music.playback_session import for_renderer
 
-    return sr._CCH_SESSION
+    return for_renderer("cch").ticket_identity()[0]
 
 
 def sr_epoch() -> int:
-    from core.tools import song_request as sr
+    """票据 epoch 跟随换代递增（不再是固定 1）。"""
+    from core.music.playback_session import for_renderer
 
-    return sr._CCH_EPOCH
+    return for_renderer("cch").ticket_identity()[1]
+
+
+
 
 
 def _latest_state_str() -> str:

@@ -424,6 +424,9 @@ async def _run_managed(action: str, args: dict) -> str:
 # ---- CCH 语音播控（T2 ticket 08）----
 # 目标设备 = cch 时：搜歌 → Songloft prepare 拿票据 URL → /cch/cast 投屏。
 # 播控（pause/resume/next/stop）经 patched dlnaserver 的 DLNA SOAP；stop 同时撤票。
+# 票据身份已统一由 PlaybackSession.ticket_identity() 提供（F3）；
+# 以下两个常量仅保留作测试夹具里 _cch_state["session"] 的历史字段值，
+# 生产路径不再读取（避免散点双真相源）。
 _CCH_SESSION = "bridge-cch"
 _CCH_EPOCH = 1
 # 多源串行 fallback 总预算（复核实测：单源 15s 超时 + 票据链 30s 累积 51s
@@ -481,10 +484,12 @@ async def _run_cch(action: str, args: dict) -> str:
             # 不依赖 NewEpoch）+ prestop 收尾（Control 22 directStop：停播且清 native
             # 残留队列；18 stop 有 isQuitting 永久 true 副作用弃用，facts §2.48③）
             cur = _cch_state.get("items") or []
+            from core.music.playback_session import for_renderer
+            _sess, _epoch, _ = for_renderer("cch").ticket_identity()
             for i, it in enumerate(cur):
-                entry_id = str(it.get("id") or f"cch-{i}")
+                entry_id = PlaybackSession.entry_for(it)
                 try:
-                    await revoke(_CCH_SESSION, _CCH_EPOCH, entry_id)
+                    await revoke(_sess, _epoch, entry_id)
                 except Exception as exc:  # noqa: BLE001 - 撤票失败不阻塞响应（30min TTL 兜底）
                     logger.warning(f"[SongRequest] cch revoke({entry_id}) err: {type(exc).__name__}")
             await musicctl("prestop")
@@ -659,12 +664,18 @@ async def _run_cch(action: str, args: dict) -> str:
                     """
                     _ref = {"source": it.get("source") or "", "id": str(it.get("id") or ""),
                             "extra": it.get("extra") or {}}
-                    _entry = str(it.get("id") or "cch-1")
+                    # 票据身份来自 session（F3）：entry 带 source 前缀、epoch 随换代递增。
+                    from core.music.playback_session import PlaybackSession, for_renderer
+
+                    _session_ref = for_renderer("cch")
+                    _session_ref.bump_epoch()  # 取票即换代（与 cch_np._prepare_cast 同构）
+                    _sess, _epoch, _ = _session_ref.ticket_identity()
+                    _entry = PlaybackSession.entry_for(it)
                     _play_url = None
                     try:
                         _ticket_url = await asyncio.wait_for(
                             resolve_ticket_url(
-                                _ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=_entry),
+                                _ref, session=_sess, epoch=_epoch, entry=_entry),
                             timeout=_CCH_PREPARE_BUDGET_S)
                         async with aiohttp.ClientSession() as http:
                             # Range GET 而非 HEAD：Songloft /media 的 HEAD 未注册（SPA 兜底成
@@ -771,8 +782,11 @@ async def _run_cch(action: str, args: dict) -> str:
             else:
                 # 活实例轨：不 prestop（prestop 杀实例 ⇒ cast 死实例无声，§2.49）；
                 # cast_native 已带 renderData+play，无需二次 play。
+                _session.bump_epoch()
+                _sess, _epoch, _ = _session.ticket_identity()
                 ticket_url = await resolve_ticket_url(
-                    ref, session=_CCH_SESSION, epoch=_CCH_EPOCH, entry=entry)
+                    ref, session=_sess, epoch=_epoch,
+                    entry=PlaybackSession.entry_for(item))
                 render_data = build_render_data(ticket_url, item, meta, background_image=bg_url)
                 # CAS 快照必须在 cast_native（含 wait_np_play 8s）之前——
                 # 期间若有新意图 silence 递增 seq，陈旧轨不得提交覆盖新意图。

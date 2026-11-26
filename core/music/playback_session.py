@@ -68,6 +68,23 @@ class PlaybackSession:
         """供换代/重播的观测裁决使用（排除上一首遗留 STATE play）。"""
         return self._silence_ts
 
+    def ticket_identity(self) -> tuple[str, int, str]:
+        """票据身份的唯一真相源（F3 / ADR Decision 3）。
+
+        返回 (session, epoch, entry)：session 绑定 renderer_id、epoch 随换代递增、
+        entry 带 source 前缀（四铁律）。所有票据调用点统一取此处，废弃固定常量。
+        """
+        # entry 在 play()/mark_playing() 提交时已由 entry_for 规范化为 source:rawID，
+        # 此处不做二次兜底（避免防御性重复；单一格式化点 = entry_for）。
+        return (self.renderer_id, self.epoch, self.entry)
+
+    @staticmethod
+    def entry_for(item: dict) -> str:
+        """按四铁律构造 entry = source:rawID（无 source 时用 renderer 前缀）。"""
+        rid = str(item.get("id") or "cch-1")
+        src = str(item.get("source") or "")
+        return f"{src}:{rid}" if src else f"cch:{rid}"
+
     def controlled(self) -> bool:
         """受控态（事务中 / 对话 focus 持有中）——所有恢复事件应 no-op。"""
         if self.phase in (PlaybackPhase.SILENCED, PlaybackPhase.PREPARING):
@@ -118,14 +135,13 @@ class PlaybackSession:
             logger.info("[PlaybackSession] mark_playing superseded by newer intent "
                         f"(seq {intent_seq} != {self.intent_seq})")
             return False
-        self.epoch += 1
-        self.entry = str(prepared.item.get("id") or "")
+        self.entry = self.entry_for(prepared.item)
         self.items = prepared.items
         self._commit_state(prepared)
         self.phase = PlaybackPhase.PLAYING
         asyncio.create_task(self._present(prepared))
         logger.info(f"[PlaybackSession] {self.renderer_id} adopted playing "
-                    f"entry={self.entry}")
+                    f"entry={self.entry} epoch={self.epoch}")
         return True
 
     def prepare(self) -> None:
@@ -134,6 +150,16 @@ class PlaybackSession:
             self.phase = PlaybackPhase.PREPARING
             logger.info(f"[PlaybackSession] {self.renderer_id} preparing",
                         )
+
+    def bump_epoch(self) -> int:
+        """取票前调用，返回新 epoch（票据身份的换代点）。
+
+        所有取票路径（首次点播 / 换代 / replay）都经此递增，保证同曲重播
+        也有不同 (session,epoch,entry) 三元组，Songloft 不会判 op already active。
+        epoch 与 phase 解耦——它表达「媒体代次」，不是播放状态。
+        """
+        self.epoch += 1
+        return self.epoch
 
     async def play(self, prepared: PreparedPlayback) -> bool:
         """PREPARING → PLAYING：起播 + 观测 + 原子提交 + 单次呈现。"""
@@ -161,8 +187,7 @@ class PlaybackSession:
             self.phase = PlaybackPhase.IDLE
             return False
         # 原子提交所有权（唯一位置）
-        self.epoch += 1
-        self.entry = str(prepared.item.get("id") or "")
+        self.entry = self.entry_for(prepared.item)
         self.items = prepared.items
         self._commit_state(prepared)
         # 单次呈现：shield 保证调用方取消时后台仍继续；正常调用等它完成
@@ -246,6 +271,12 @@ class PlaybackSession:
         if kind == "track_finish":
             result = await cch_np._advance_if_finished()
             if str(result.get("action") or "") == "advanced":
+                # 换代成功后提交新 entry（去抖键与票据身份都依赖它），
+                # 否则 self.entry 永远停在首曲（M1）。
+                from core.music.playback_session import PlaybackSession
+                new_item = result.get("item")
+                if isinstance(new_item, dict):
+                    self.entry = PlaybackSession.entry_for(new_item)
                 self.phase = PlaybackPhase.PLAYING
             return dict(result, kind=kind, renderer=self.renderer_id)
 

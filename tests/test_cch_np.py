@@ -45,6 +45,10 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
                      "cast_native", "cast_native_simple", "revoke", "speak",
                      "prepare_background"):
             self._saved[name] = getattr(cch_cast, name)
+        # 单例 PlaybackSession 的 epoch/entry 跨测试污染防护（审查 M2）
+        from core.music.playback_session import for_renderer
+        self._saved_epoch = for_renderer("cch").epoch
+        self._saved_entry = for_renderer("cch").entry
 
     def tearDown(self):
         for name, fn in self._saved.items():
@@ -53,14 +57,19 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
             cch_np._speak_timer.cancel()
             cch_np._speak_timer = None
         sr._cch_state.update({"entry": 0, "items": []})
+        # 恢复单例 epoch/entry（防跨测试污染）
+        from core.music.playback_session import for_renderer
+        for_renderer("cch").epoch = self._saved_epoch
+        for_renderer("cch").entry = self._saved_entry
 
     # ---- fake 构造 ----
 
     def fake_downlink(self, *, cast_ok=True, simple_ok=True, revoke_log=None):
         """替换 cch_cast 下行函数为内存 fake。返回记录 dict。"""
-        rec = {"cast": [], "simple": [], "revoke": [], "speak": []}
+        rec = {"cast": [], "simple": [], "revoke": [], "speak": [], "tickets": []}
 
         async def fake_resolve(ref, *, session, epoch, entry):
+            rec["tickets"].append((session, epoch, entry))
             return f"http://songloft/media?media_ticket={entry}"
 
         async def fake_meta(song_id, source="kuwo"):
@@ -81,6 +90,7 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
 
         async def fake_revoke(session, epoch, entry):
             rec["revoke"].append(entry)
+            rec.setdefault("revoke_epochs", []).append((session, epoch))
             return True
 
         async def fake_speak(text):
@@ -101,6 +111,45 @@ class CchNpTestBase(unittest.IsolatedAsyncioTestCase):
         if revoke_log is not None:
             revoke_log.extend(rec["revoke"])
         return rec
+
+
+class TicketIdentityTest(CchNpTestBase):
+    """F3：票据 session/epoch/entry 来自 PlaybackSession 真实状态，非固定常量。"""
+
+    async def test_ticket_identity_uses_session_and_source_entry(self):
+        from core.music.playback_session import for_renderer
+        sess = for_renderer("cch")
+        sess.epoch = 7
+        rec = self.fake_downlink()
+        await cch_np._prepare_cast(0, {"id": "S1", "source": "kwqq"})
+        self.assertTrue(rec["tickets"], "应发出票据请求")
+        s, e, entry = rec["tickets"][-1]
+        self.assertEqual("cch", s, "session 应绑定 renderer_id（非 bridge-cch）")
+        self.assertGreater(e, 7, "取票点换代后 epoch 应递增（来自 session，非固定 1）")
+        self.assertEqual("kwqq:S1", entry, "entry 应为 source:rawID")
+
+    async def test_generation_bumps_epoch_for_same_entry(self):
+        """同曲换代/repeatone（B1）：两次取票必须拿到不同 epoch，
+        否则 Songloft 判 op already active → advance_failed。"""
+        rec = self.fake_downlink()
+        item = {"id": "SAME", "source": "kwqq"}
+        await cch_np._prepare_cast(0, item)
+        e1 = rec["tickets"][-1][1]
+        await cch_np._prepare_cast(0, item)  # 同曲换代/replay
+        e2 = rec["tickets"][-1][1]
+        self.assertGreater(e2, e1, "同曲再次取票 epoch 必须递增")
+
+    async def test_revoke_uses_ticket_epoch(self):
+        """撤票 epoch 必须与取票 epoch 一致（Songloft RevokeEntry 严格匹配）。"""
+        from core.music.playback_session import for_renderer
+        sess = for_renderer("cch")
+        sess.epoch = 7
+        rec = self.fake_downlink()
+        await cch_np._prepare_cast(0, {"id": "S1", "source": "kwqq"})
+        ticket_epoch = rec["tickets"][-1][1]
+        await cch_np._revoke_entry(0, {"id": "S1", "source": "kwqq"})
+        self.assertEqual(ticket_epoch, rec["revoke_epochs"][-1][1],
+                         "撤票 epoch 必须等于取票 epoch，否则撤不掉旧票")
 
 
 class ReplayCurrentTest(CchNpTestBase):
@@ -249,7 +298,7 @@ class AdvanceTest(CchNpTestBase):
         self.assertEqual(action["action"], "advanced")
         self.assertEqual(action["index"], 1)
         self.assertEqual(sr._cch_state["entry"], 1)
-        self.assertEqual(rec["revoke"], ["s1"], "换代前必须逐条撤刚播完那条的旧票")
+        self.assertEqual(rec["revoke"], ["kwqq:s1"], "换代前必须逐条撤刚播完那条的旧票（entry=source:rawID）")
         self.assertEqual(len(rec["cast"]), 1)
         self.assertEqual(rec["cast"][0]["audioName"], "歌s2")
 
@@ -284,7 +333,7 @@ class AdvanceTest(CchNpTestBase):
                                                     {"source": "kwqq", "id": "s2"}]})
         action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
         self.assertEqual(action["action"], "queue_exhausted")
-        self.assertEqual(rec["revoke"], ["s2"], "耗尽时撤当前条旧票")
+        self.assertEqual(rec["revoke"], ["kwqq:s2"], "耗尽时撤当前条旧票（entry=source:rawID）")
         self.assertEqual(rec["cast"], [], "回退原厂链：不 cast、不动作")
 
     async def test_cast_http_fail_still_reports_advanced_with_ok_false(self):
@@ -296,7 +345,7 @@ class AdvanceTest(CchNpTestBase):
         action = await cch_np.on_np_event("STATE", {"statusStr": "finish", "audioStatus": "1"})
         self.assertEqual(action["action"], "advanced")
         self.assertFalse(action["ok"])
-        self.assertEqual(rec["revoke"], ["s1"], "cast 失败不影响撤旧票")
+        self.assertEqual(rec["revoke"], ["kwqq:s1"], "cast 失败不影响撤旧票（entry=source:rawID）")
         self.assertEqual(sr._cch_state["entry"], 1)
 
     async def test_prepare_exception_reports_advance_failed(self):
