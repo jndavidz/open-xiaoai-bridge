@@ -679,11 +679,9 @@ LLM function calling 的内嵌工具注册表（lineage 阶段 1.5，需求⑤"�
   **换会话即接管**：旧会话先停 tick 再落 `stopped(reason=taken_over)`——不能让旧客户端
   一直看到 playing。E6（设备侧被别人替换媒体）在本后端**不可检测**（URL 会话无媒体身份/
   位置回读），不要用「第二次 status:1」猜接管（会误杀 TTS 恢复）。
-- **可选 GENA（B-09，默认关闭、未接线）**：`core/music/gena.py` 的 `GenaGate` 只做补充信号，
-  **永不替代** duration/位置/身份/意图（主动 Stop 主路径不依赖它）。按服务器返回有效期续订，
-  仅到期/SID 失效/设备重启才重订阅且恢复先取快照；SID+SEQ 处理重复/乱序/缺口（缺口 ⇒ snapshot），
-  语义幂等按 `(状态|uri 摘要, 播放代次)` 去重、`note_playback_started()` 换代清键（真实重播不被吞）；
-  校验来源白名单/SID/正文上限/解析边界，任何异常都不触发 Stop/推进/恢复。
+- **GENA（B-09）已正式退役（P5 / `ff36a47`）**：代码 `core/music/gena.py` 与 15 项测试已删；
+  能力关闭裁决见 `ws: docs/adr/0001-multi-renderer-playback-scope.md` Decision 7。
+  主动 Stop 主路径从不依赖它，删除无行为变化；如需恢复该能力，按 ADR 重新论证而非回退此删除。
 - **完成证据（B-03）**：`wait_for_finish()` 返回 `Completion(finished, started, reason,
   quality, source, paused)`（属性访问，不再支持三元组解包）。`quality=strong` ⇔ 主源
   亲自观察到起播**和**结束；影子兜底 / 宽限兜底 / 超时 / 未见起播一律 `weak`。
