@@ -59,7 +59,9 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ok)
         self.assertEqual(self.session.phase, playback_session.PlaybackPhase.PLAYING)
-        self.assertEqual(["stop", "play"], cmds, "silence 一次 stop + play 一次 play")
+        # 用户裁决：唤醒词静默 = pause（audioStatus:9，实例保留），保持到 bridge 新指令；
+        # 不用 stop（audioStatus:8，杀实例导致位置丢失/重播竞速）
+        self.assertEqual(["pause", "play"], cmds, "silence 用 pause 保持实例，bridge 备好再 play")
         self.assertEqual(1, render.await_count, "renderDisplay 恰好一次")
 
     async def test_report_suppressed_during_preparing(self):
@@ -114,6 +116,55 @@ class PlaybackSessionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(obs_mock.call_args.kwargs.get("since_ts"),
                              "观测须带静音起点，排除上一首遗留 play")
+
+    async def test_silence_falls_back_to_stop_when_pause_unavailable(self):
+        """实例已死（pause 返回 NEED_M5）时回退 stop 清场，不留旧曲残影。"""
+        cmds = []
+
+        async def fake_host_cmd(cmd, **kw):
+            cmds.append(cmd)
+            return (False, "NEED_M5") if cmd == "pause" else (True, "OK")
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(cch_cast, "host_cmd", fake_host_cmd))
+            await self.session.silence()
+
+        self.assertEqual(["pause", "stop"], cmds,
+                         "pause 不可用（死实例）时补一个 stop 清场")
+
+    async def test_new_intent_cancels_inflight_recovery(self):
+        """新点播到达必须作废旧曲的在途恢复任务（真机 FREEZE 取票 30s
+        跨越新点播窗口，最终把旧曲 play 发出来）。"""
+        import asyncio
+
+        started = asyncio.Event()
+        finished = []
+
+        async def slow_replay():
+            started.set()
+            try:
+                await asyncio.sleep(10)  # 模拟取票/换代长任务
+                finished.append("old-play")
+            except asyncio.CancelledError:
+                finished.append("cancelled")
+                raise
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("core.music.cch_np.replay_current", slow_replay))
+            await self.session.silence()
+            self.session.phase = playback_session.PlaybackPhase.PLAYING
+            task = self.session.dispatch("freeze")
+            await started.wait()
+            # 新意图到达：silence 必须取消在途恢复
+            await self.session.silence()
+            await asyncio.sleep(0)
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        self.assertIn("cancelled", finished, "在途旧曲恢复必须被新意图取消")
+        self.assertNotIn("old-play", finished)
 
     async def test_two_sessions_isolated(self):
         """per-renderer 隔离（ADR L15）：一端事务不影响另一端。"""

@@ -54,6 +54,14 @@ class PlaybackSession:
         self._recent_freeze: dict[tuple[str, str, int], float] = {}
         self._last_toggle_ts: float = 0.0
         self._silence_ts: float = 0.0  # 静音起点：观测只认此后的 play
+        self._inflight: asyncio.Task | None = None  # 在途恢复任务（新意图到达时取消）
+
+    def cancel_inflight(self) -> None:
+        """作废上一曲的在途恢复（FREEZE/换代取票可能跨几十秒）。"""
+        if self._inflight is not None and not self._inflight.done():
+            self._inflight.cancel()
+            logger.info("[PlaybackSession] cancelled inflight recovery")
+        self._inflight = None
 
     def observation_since(self) -> float:
         """供换代/重播的观测裁决使用（排除上一首遗留 STATE play）。"""
@@ -78,7 +86,13 @@ class PlaybackSession:
         """
         from core.music import cch_cast
 
-        await cch_cast.host_cmd("stop")
+        self.cancel_inflight()  # 新意图到达：先废掉旧曲在途恢复
+        # 用户裁决（2026-11-26）：唤醒词静默 = AGMC pause（audioStatus:9，实例保留），
+        # 保持暂停态直到 bridge 发来新曲 play；不用 stop（audioStatus:8 杀实例）。
+        ok, status = await cch_cast.host_cmd("pause")
+        if not ok and "NEED_M5" in str(status):
+            # 实例已死（曲终/被抢）：pause 无处可施，补一个 stop 清场防旧曲残影
+            await cch_cast.host_cmd("stop")
         self.phase = PlaybackPhase.SILENCED
         self._recent_freeze.clear()  # 新会话：清掉上一曲的去抖桶
         self._last_toggle_ts = 0.0
@@ -170,6 +184,13 @@ class PlaybackSession:
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[PlaybackSession] queue failed: {type(exc).__name__}",
                            )
+
+    def dispatch(self, kind: str) -> asyncio.Task | None:
+        """异步入口：登记在途恢复任务（新意图可取消）。返回 task 供测试/调用方。"""
+        if self._inflight is not None and not self._inflight.done():
+            return self._inflight  # 已有在途恢复，不重复启动
+        self._inflight = asyncio.create_task(self.report(kind))
+        return self._inflight
 
     async def report(self, kind: str, *, ev: dict | None = None) -> dict:
         """外部事件唯一入口：受控态 no-op，PLAYING 态分派到既有执行 seam。"""

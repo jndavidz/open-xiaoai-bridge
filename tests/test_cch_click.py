@@ -835,10 +835,12 @@ class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
         from unittest import mock
         from core.music import playback_session
 
-        with mock.patch.object(playback_session.for_renderer("cch"), "report",
-                               new_callable=mock.AsyncMock) as rep:
+        done = asyncio.get_running_loop().create_future()
+        done.set_result({"action": "replayed"})
+        with mock.patch.object(playback_session.for_renderer("cch"), "dispatch",
+                               return_value=done) as rep:
             await cch_click._freeze_recover({"source": "FREEZE", "name": "FREEZE"})
-        rep.assert_awaited_once()
+        rep.assert_called_once()
         self.assertEqual("freeze", rep.call_args.args[0])
 
     async def test_playtoggle_routes_to_session_recovery(self):
@@ -846,10 +848,12 @@ class FreezeRecoveryTest(unittest.IsolatedAsyncioTestCase):
         from unittest import mock
         from core.music import playback_session
 
-        with mock.patch.object(playback_session.for_renderer("cch"), "report",
-                               new_callable=mock.AsyncMock) as rep:
+        done = asyncio.get_running_loop().create_future()
+        done.set_result({"action": "toggled"})
+        with mock.patch.object(playback_session.for_renderer("cch"), "dispatch",
+                               return_value=done) as rep:
             await cch_click._playtoggle({"source": "PLAYTOGGLE"})
-        rep.assert_awaited_once()
+        rep.assert_called_once()
         self.assertEqual("toggle", rep.call_args.args[0])
 
     async def test_accept_event_routes_freeze_to_recovery(self):
