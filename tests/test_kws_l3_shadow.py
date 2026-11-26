@@ -33,6 +33,25 @@ _spec.loader.exec_module(_mod)
 L3ShadowArm = _mod.L3ShadowArm
 L3Forward = _mod.L3Forward
 load_l3_weights = _mod.load_l3_weights
+cmvn_sliding = _mod.cmvn_sliding
+
+
+class CmvnSlidingParityTest(unittest.TestCase):
+    """cmvn_sliding 的 cumsum 优化必须与固件朴素滑窗逐元素等价（行为零变化）。"""
+
+    def test_matches_naive_sliding_window(self):
+        rng = np.random.default_rng(42)
+        for frames, dim, window in ((37, 13, 600), (1200, 13, 600), (5, 4, 3)):
+            feats = rng.standard_normal((frames, dim)).astype(np.float32)
+            got = cmvn_sliding(feats, window=window)
+            want = np.empty_like(feats)
+            for t in range(frames):
+                want[t] = feats[t] - feats[max(0, t - window):t + 1].mean(axis=0)
+            np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
+    def test_empty_input_returns_empty(self):
+        feats = np.zeros((0, 13), dtype=np.float32)
+        self.assertEqual((0, 13), cmvn_sliding(feats).shape)
 word_path_score = _mod.word_path_score
 WORD_UNITS = _mod.WORD_UNITS
 WORDS3 = _mod.WORDS3

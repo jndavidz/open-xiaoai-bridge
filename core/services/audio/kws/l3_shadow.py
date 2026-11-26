@@ -133,12 +133,22 @@ class Mfcc40:
 
 
 def cmvn_sliding(feats: np.ndarray, window: int = CMVN_WINDOW) -> np.ndarray:
-    """causal 滑窗 CMVN（与 train_3word.cmvn_sliding 一致）。"""
-    out = np.empty_like(feats)
-    for t in range(len(feats)):
-        lo = max(0, t - window)
-        out[t] = feats[t] - feats[lo : t + 1].mean(axis=0)
-    return out
+    """causal 滑窗 CMVN（与 train_3word.cmvn_sliding 数值等价）。
+
+    原实现每帧一次 `feats[lo:t+1].mean(axis=0)`（O(n×window) 次 numpy 调用），
+    2s 音频全量测试里成为热点。改为前缀和 O(n)：均值 = (prefix[t+1]-prefix[lo])/count，
+    浮点求和顺序不同带来的误差在 1e-6 级（守门测试断言等价）。
+    """
+    n = len(feats)
+    if n == 0:
+        return np.empty_like(feats)
+    prefix = np.vstack((np.zeros((1, feats.shape[1]), dtype=np.float64),
+                        np.cumsum(feats, axis=0, dtype=np.float64)))
+    idx = np.arange(n, dtype=np.int64)
+    lo = np.maximum(0, idx - window)
+    count = (idx - lo + 1).astype(np.float64)[:, None]
+    means = (prefix[idx + 1] - prefix[lo]) / count
+    return (feats.astype(np.float64) - means).astype(feats.dtype)
 
 
 class L3Forward:
