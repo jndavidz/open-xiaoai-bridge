@@ -123,6 +123,12 @@ def _record_np_state(kind: str, extras: dict, device_ts: str) -> None:
                                "observed_at": observed_at}
     from core.music import cch_observation_shadow
     cch_observation_shadow.record_state(kind, extras or {}, device_ts, observed_at)
+    # 进度只记录不控制（任务2）：worker 已在 extras.progress 上报（毫秒字符串），
+    # 此前 bridge 透传但未消费——影子按 position 类型留证，先观察可靠性。
+    progress = (extras or {}).get("progress")
+    if progress is not None:
+        cch_observation_shadow.record_position(
+            str((extras or {}).get("statusStr") or kind), progress, device_ts, observed_at)
 
 
 async def on_np_event(kind: str, extras: dict, device_ts: str = "") -> dict:

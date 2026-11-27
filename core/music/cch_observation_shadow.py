@@ -73,6 +73,29 @@ class CchObservationShadow:
             logger.debug(f"[CchShadow] state record failed: {type(exc).__name__}",
                          module="CchShadow")
 
+    def record_position(self, status: str, progress_ms, device_ts: str,
+                        observed_at: float) -> None:
+        """设备进度观测（ticket 任务2）：只记录，不参与任何控制判定。
+
+        worker 已在 STATE extras 上报 progress（毫秒字符串），bridge 此前
+        只透传不消费；本方法把它按 `kind=position` 留证，供先观察后接入。
+        """
+        if not self.enabled():
+            return
+        try:
+            try:
+                progress = int(progress_ms)
+            except (TypeError, ValueError):
+                progress = -1  # 非法进度留证但不猜值
+            self._write({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                         "kind": "position", "status": status,
+                         "progress_ms": progress, "device_ts": device_ts,
+                         "observed_at": observed_at,
+                         "policy": "position-only-no-control"})
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[CchShadow] position record failed: {type(exc).__name__}",
+                         module="CchShadow")
+
     def snapshot(self) -> dict:
         """只读诊断（计数），不暴露票据/凭据。"""
         try:
@@ -91,6 +114,10 @@ def record_dispatch(cmd: str, cmd_id: str, *, entry=None, epoch=None, url="") ->
 
 def record_state(kind: str, extras: dict, device_ts: str, observed_at: float) -> None:
     _SHADOW.record_state(kind, extras, device_ts, observed_at)
+
+
+def record_position(status: str, progress_ms, device_ts: str, observed_at: float) -> None:
+    _SHADOW.record_position(status, progress_ms, device_ts, observed_at)
 
 
 def snapshot() -> dict:

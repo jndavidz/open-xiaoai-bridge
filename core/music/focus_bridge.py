@@ -21,9 +21,26 @@ from core.utils.logger import logger
 
 RELEASE_GRACE_S = 5.0
 
-_hold_count = 0
-_hold_token: FocusToken | None = None
-_pending_release: asyncio.Task | None = None
+
+class _HoldState:
+    """单个渲染端的 focus 持有状态（每设备一把锁，互不牵连）。"""
+
+    def __init__(self):
+        self.count = 0
+        self.token: FocusToken | None = None
+        self.pending: asyncio.Task | None = None
+        self.cch_paused = False  # CCH：pause 已发、等待新曲 play 解除（不自动 resume）
+
+
+# 默认渲染端 = lx06（既有调用无 renderer 参数时走原行为）。
+DEFAULT_RENDERER = "lx06"
+_holds: dict[str, _HoldState] = {}
+
+
+def _state(renderer: str) -> _HoldState:
+    if renderer not in _holds:
+        _holds[renderer] = _HoldState()
+    return _holds[renderer]
 
 
 def enabled() -> bool:
@@ -40,22 +57,41 @@ def manages_music() -> bool:
     return song_bridge.managed_enabled() and bool(song_bridge.active_session())
 
 
-def focus_holding() -> bool:
-    """TTS focus 是否持有中（hold 计数/待释放/令牌任一在即算）。
+def focus_holding(renderer: str = DEFAULT_RENDERER) -> bool:
+    """指定渲染端的 TTS focus 是否持有中（计数/待释放/令牌/CCH pause 任一在即算）。
 
     供 pcm 编排器判断「暂停是否仍在 TTS 保护下」；focus 状态机的唯一读口，
-    外部不要伸手进 _hold_* 私有状态。
+    外部不要伸手进 _holds 私有状态。
     """
 
+    st = _state(renderer)
     return bool(
-        _hold_count > 0
-        or _hold_token is not None
-        or _pending_release is not None
+        st.count > 0
+        or st.token is not None
+        or st.pending is not None
+        or st.cch_paused
     )
 
 
-async def acquire(reason: str = "tts") -> FocusToken | None:
-    """直接取一个 focus 令牌（无托管会话/音乐未在播时返回 None）。"""
+async def acquire(reason: str = "tts", *,
+                  renderer: str = DEFAULT_RENDERER) -> FocusToken | None:
+    """取指定渲染端的 focus（无托管会话/音乐未在播时返回 None）。
+
+    LX06：走 TtsFocus 令牌（暂停 + 按资格恢复）。
+    CCH：无 TtsFocus 令牌，改发 fire-and-forget pause 按住；
+        返回一个轻量哨兵令牌，release 时**不** resume（遵守 §2.79：
+        解除暂停的唯一正常出口是新曲 play，resume 旧曲会竞速）。
+    """
+
+    if renderer == "cch":
+        from core.music import cch_cast
+
+        ok, _status = await cch_cast.host_cmd("pause", wait_ack=False)
+        if not ok:
+            return None
+        _state("cch").cch_paused = True
+        # 轻量哨兵：session_id 标记设备，release 靠 cch_paused 判断而非真令牌
+        return FocusToken("cch-focus", "cch", 0, "cch", 0.0, reason, 0.0)
 
     if not enabled():
         return None
@@ -74,6 +110,10 @@ async def acquire(reason: str = "tts") -> FocusToken | None:
 
 
 async def release(token: FocusToken) -> tuple[bool, str]:
+    # CCH 哨兵令牌：不调真 TtsFocus.release（不 resume 旧曲）；清 pause 标记即可。
+    if token.session_id == "cch":
+        _state("cch").cch_paused = False
+        return True, "cch-held-for-new-play"
     from core.music import song_bridge
 
     focus = song_bridge.focus()
@@ -82,93 +122,105 @@ async def release(token: FocusToken) -> tuple[bool, str]:
     return await focus.release(token)
 
 
-async def hold(reason: str = "conversation", *, required: bool = False) -> bool:
-    """引用计数持有：第一次持有才真正暂停音乐并把令牌记在桥上。
+async def hold(reason: str = "conversation", *, required: bool = False,
+               renderer: str = DEFAULT_RENDERER) -> bool:
+    """指定渲染端的引用计数持有：第一次持有才真正暂停音乐。
 
-    返回是否处于「持有中」；`required=True` 时暂停确认失败会抛 `FocusDenied`。
+    `required=True` 时暂停确认失败会抛 `FocusDenied`。
     """
 
-    global _hold_count, _hold_token, _pending_release
-    if not enabled():
+    st = _state(renderer)
+    if renderer != "cch" and not enabled():
         return False
-    if _pending_release is not None:
-        _pending_release.cancel()
-        _pending_release = None
-    if _hold_count == 0:
+    if st.pending is not None:
+        st.pending.cancel()
+        st.pending = None
+    if st.count == 0:
         try:
-            _hold_token = await acquire(reason)
+            st.token = await acquire(reason, renderer=renderer)
         except FocusDenied:
             if required:
                 raise
             return False
-        if _hold_token is None:
+        if st.token is None:
             return False
-    _hold_count += 1
-    logger.debug(f"[TtsFocus] hold acquired reason={reason} count={_hold_count}")
+    st.count += 1
+    logger.debug(f"[TtsFocus] hold acquired reason={reason} renderer={renderer} count={st.count}")
     return True
 
 
-async def release_hold(*, grace_s: float = RELEASE_GRACE_S) -> None:
-    """释放一次持有；归零后**延迟**恢复音乐（去抖：开场白→对话之间的缝隙）。"""
+async def release_hold(*, grace_s: float = RELEASE_GRACE_S,
+                       renderer: str = DEFAULT_RENDERER) -> None:
+    """释放一次持有；归零后**延迟**恢复（去抖）。CCH 不自动 resume。"""
 
-    global _hold_count, _pending_release
-    if _hold_count == 0:
+    st = _state(renderer)
+    if st.count == 0:
         return
-    _hold_count -= 1
-    logger.debug(f"[TtsFocus] hold released count={_hold_count}")
-    if _hold_count > 0:
+    st.count -= 1
+    logger.debug(f"[TtsFocus] hold released renderer={renderer} count={st.count}")
+    if st.count > 0:
         return
-    _pending_release = asyncio.ensure_future(_finish_release(grace_s))
+    st.pending = asyncio.ensure_future(_finish_release(grace_s, renderer))
 
 
-async def _finish_release(grace_s: float) -> None:
-    global _hold_token, _pending_release
+async def _finish_release(grace_s: float, renderer: str) -> None:
+    st = _state(renderer)
     try:
         if grace_s > 0:
             await asyncio.sleep(grace_s)
     except asyncio.CancelledError:
         return
-    _pending_release = None
-    token, _hold_token = _hold_token, None
+    st.pending = None
+    token, st.token = st.token, None
     if token is not None:
         try:
             resumed, why = await release(token)
             if resumed:
-                logger.debug(f"[TtsFocus] music resumed after conversation ({why})")
+                logger.debug(f"[TtsFocus] music resumed after conversation ({why}) renderer={renderer}")
             else:
-                logger.warning(f"[TtsFocus] music not resumed after conversation ({why})")
+                logger.debug(f"[TtsFocus] {renderer} focus released ({why})")
         except Exception as exc:  # noqa: BLE001 - 释放失败不得杀会话
             logger.warning(f"[TtsFocus] release failed: {type(exc).__name__}: {exc}")
 
 
-async def force_release(*, resume: bool = False) -> None:
+async def force_release(*, resume: bool = False,
+                        renderer: str = DEFAULT_RENDERER) -> None:
     """显式结束 focus（用户「继续播放」/停止）：立即放弃令牌。"""
 
-    global _hold_count, _hold_token, _pending_release
-    _hold_count = 0
-    if _pending_release is not None:
-        _pending_release.cancel()
-        _pending_release = None
-    token, _hold_token = _hold_token, None
+    st = _state(renderer)
+    st.count = 0
+    if st.pending is not None:
+        st.pending.cancel()
+        st.pending = None
+    token, st.token = st.token, None
+    st.cch_paused = False
     if token is not None and resume:
         await release(token)
 
 
 def _reset_for_tests() -> None:
-    global _hold_count, _hold_token, _pending_release
-    _hold_count, _hold_token, _pending_release = 0, None, None
+    _holds.clear()
 
 
 def health() -> dict:
-    """只读快照：引用计数/待释放/当前令牌（不暴露设备细节，供 /api/health 诊断）。"""
+    """只读快照：每渲染端的计数/待释放/令牌（供 /api/health 诊断）。"""
 
-    token = _hold_token
-    return {
-        "hold_count": _hold_count,
-        "pending_release": _pending_release is not None,
-        "token": None if token is None else {
-            "session_id": token.session_id,
-            "epoch": token.epoch,
-            "provider": token.provider,
-        },
-    }
+    out = {}
+    for renderer, st in _holds.items():
+        token = st.token
+        out[renderer] = {
+            "hold_count": st.count,
+            "pending_release": st.pending is not None,
+            "cch_paused": st.cch_paused,
+            "token": None if token is None else {
+                "session_id": token.session_id,
+                "epoch": token.epoch,
+                "provider": token.provider,
+            },
+        }
+    # 兼容旧读法（顶层 hold_count/token = 默认 lx06）
+    lx = out.get(DEFAULT_RENDERER, {})
+    return {"renderers": out,
+            "hold_count": lx.get("hold_count", 0),
+            "pending_release": lx.get("pending_release", False),
+            "token": lx.get("token")}

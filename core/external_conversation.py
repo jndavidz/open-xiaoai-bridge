@@ -204,11 +204,15 @@ class ExternalConversationController:
         # 注：「停止聆听」不在对话内处理（2026-11-01 用户裁决）——对话中 KWS
         # 暂停、免唤醒路径不可达，该词只匹配 exit_keywords 之外的普通文本进
         # LLM；要停止聆听须先退出对话再经 KWS 路径（含二次确认闸门）。
+        # 每设备独立 focus（用户裁决②）：CCH 外部轮只按住 CCH，不碰 LX06 音乐；
+        # 其它轮次（LX06/native）维持默认 renderer=lx06 原行为。
+        _asr_source = str((self._external_request or {}).get("source") or "").lower()
+        _renderer = "cch" if "cch" in _asr_source else "lx06"
         focus_held = False
         try:
             from core.music import focus_bridge
 
-            focus_held = await focus_bridge.hold("conversation")
+            focus_held = await focus_bridge.hold("conversation", renderer=_renderer)
         except Exception as exc:  # noqa: BLE001 - focus 失败不阻断对话
             logger.debug(f"[{self.LOG_MODULE}] TTS focus unavailable: {exc}")
         try:
@@ -226,7 +230,7 @@ class ExternalConversationController:
                 try:
                     from core.music import focus_bridge
 
-                    await focus_bridge.release_hold()
+                    await focus_bridge.release_hold(renderer=_renderer)
                 except Exception as exc:  # noqa: BLE001 - 收尾不得抛
                     logger.debug(f"[{self.LOG_MODULE}] TTS focus release failed: {exc}")
 

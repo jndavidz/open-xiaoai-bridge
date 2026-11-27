@@ -56,3 +56,15 @@ class CchObservationShadowTest(unittest.TestCase):
         self._mod.record_dispatch("play", "x", entry="e", epoch=1)
         snap = self._mod.snapshot()
         self.assertGreaterEqual(snap["files"], 1)
+
+    def test_record_position_creates_position_kind(self):
+        """进度观测（只记录）：worker 已上报 progress，影子按 position 类型留证。"""
+        self._mod.enabled = lambda: True
+        self._mod.record_position("play", 21055, "22:10:01", 3.0)
+        files = list(Path(self._tmp.name).glob("cch-observation-*.jsonl"))
+        lines = [json.loads(x) for x in files[0].read_text(encoding="utf-8").splitlines()]
+        pos = [x for x in lines if x.get("kind") == "position"]
+        self.assertEqual(1, len(pos))
+        self.assertEqual(21055, pos[0]["progress_ms"])
+        self.assertEqual("play", pos[0]["status"])
+        self.assertEqual("position-only-no-control", pos[0]["policy"])
