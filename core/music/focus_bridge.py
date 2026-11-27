@@ -86,7 +86,7 @@ async def acquire(reason: str = "tts", *,
     if renderer == "cch":
         from core.music import cch_cast
 
-        ok, _status = await cch_cast.host_cmd("pause", wait_ack=False)
+        ok = await cch_cast.silence_for_new_intent()
         if not ok:
             return None
         _state("cch").cch_paused = True

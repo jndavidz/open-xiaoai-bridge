@@ -89,8 +89,7 @@ async def _preempt_cch_silence(source: str) -> bool:
         return False
     from core.music import cch_cast
 
-    ok, _ = await cch_cast.host_cmd("pause", wait_ack=False)
-    return bool(ok)
+    return await cch_cast.silence_for_new_intent()
 
 
 class ExternalConversationController:

@@ -110,10 +110,9 @@ class PlaybackSession:
         # 保持暂停态直到 bridge 发来新曲 play；不用 stop（audioStatus:8 杀实例）。
         # 抢占 pause = fire-and-forget：真机默认等回执+重发 = 11s，旧曲持续响。
         # 抢占要最快生效；广播偶丢由后续 play(新曲) 覆盖兜底，不靠回执重发保证送达。
-        ok, status = await cch_cast.host_cmd("pause", wait_ack=False)
-        if not ok and "NEED_M5" in str(status):
-            # 实例已死（曲终/被抢）：pause 无处可施，补一个 stop 清场防旧曲残影
-            await cch_cast.host_cmd("stop", wait_ack=False)
+        # 静音物理出口唯一化（方案 B）：pause / NEED_M5 补 stop 收敛到 cch_cast。
+        # 本处的 CAS / phase / 去抖清理语义保留不变。
+        await cch_cast.silence_for_new_intent()
         self.phase = PlaybackPhase.SILENCED
         self._recent_freeze.clear()  # 新会话：清掉上一曲的去抖桶
         self._last_toggle_ts = 0.0

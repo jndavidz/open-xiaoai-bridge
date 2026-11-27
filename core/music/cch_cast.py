@@ -787,3 +787,27 @@ async def host_cmd_nowait(cmd: str, url: str = None, extra: str = None) -> bool:
         body["extra"] = extra
     ok, _ = await musicctl("hostcmd", body)
     return ok
+
+
+async def silence_for_new_intent() -> bool:
+    """CCH 静音的**唯一物理出口**（方案 B，2026-11-27）。
+
+    收敛原先三处各自直发的 ``host_cmd("pause")``：
+      ① external_conversation._preempt_cch_silence（ASR 入口抢时间）
+      ② focus_bridge.acquire(renderer="cch")（对话级 focus）
+      ③ playback_session.silence()（新意图 CAS + 状态机）
+
+    语义（沿用 ③ 的既有裁决，不发明新行为）：
+      - pause = fire-and-forget（``wait_ack=False``）——等回执+重发 = 11s 残留。
+      - NEED_M5（实例已死，pause 无处可施）→ 补一条 stop 清场防旧曲残影。
+      - 返回 ok：pause 是否送达；stop 失败不翻 True（如实上报）。
+
+    **幂等由设备保证**（重复 pause 无害），本函数**每次都发**——因为设备会在
+    ~5.8s 自发 resume（facts §2.80），"已暂停"哨兵不可靠，跳过下发会留旧曲响。
+    各调用者的状态语义（focus 哨兵 / playback CAS / preempt 时序）保持不变。
+    """
+    ok, status = await host_cmd("pause", wait_ack=False)
+    if not ok and "NEED_M5" in str(status):
+        stop_ok, _ = await host_cmd("stop", wait_ack=False)
+        return bool(stop_ok)
+    return bool(ok)

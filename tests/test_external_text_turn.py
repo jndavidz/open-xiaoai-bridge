@@ -144,6 +144,20 @@ class AcquireExternalTextTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, text), ("ok", "hi"))
 
 
+class CchPreemptUnifiedExitTest(unittest.IsolatedAsyncioTestCase):
+    """方案 B 守门：preempt 必须走统一出口（旧 test 只 mock 底层 host_cmd）。"""
+
+    async def test_preempt_calls_unified_exit(self):
+        from core.external_conversation import _preempt_cch_silence
+        from core.music import cch_cast
+        with mock.patch.object(cch_cast, "silence_for_new_intent",
+                               new_callable=mock.AsyncMock,
+                               return_value=True) as se:
+            ok = await _preempt_cch_silence("cch-screen")
+        self.assertTrue(ok)
+        se.assert_awaited_once()
+
+
 class CchPreemptiveSilenceTest(unittest.IsolatedAsyncioTestCase):
     """CCH ASR 入口预告静音：覆盖 ASR→LLM tool 决策窗口（真机 ~1.4s）。"""
 
